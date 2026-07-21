@@ -1,0 +1,18 @@
+{
+  "protocolVersion": 1,
+  "scenario": "config-refresh",
+  "status": "ready-for-local-conformance",
+  "fixtures": [
+    "contracts/v1/config.request.json",
+    "contracts/v1/config.response.json",
+    "contracts/v1/config.not-modified.response.json",
+    "contracts/v1/error.response.json",
+    "contracts/v1/error.retry-directives.json"
+  ],
+  "assertions": [
+    "Send X-Onlo-Config-Schema: 1 unless relying on its documented default.",
+    "Send If-None-Match with the last ETag and retain the last-known-good config on a 304 response.",
+    "Fetch conditionally after config_changed, foreground, or network recovery.",
+    "On config_unavailable, retain the last-known-good config and follow after_backoff; incompatible_client is not recoverable by retry."
+  ]
+}

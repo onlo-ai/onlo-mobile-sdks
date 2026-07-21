@@ -1,0 +1,13 @@
+{
+  "assertions": [
+    "After a lost session response, retry the same logical operation with the identical transitionId and proposedCredential.",
+    "Resume and logout retries preserve expectedGeneration and presentedCredential as well as transitionId and proposedCredential.",
+    "Identify retries carry the same in-memory synthetic userJwt; the userJwt is never persisted.",
+    "Do not start a replacement transition until the uncertain logical operation has been resolved."
+  ],
+  "fixtures": [
+    "contracts/v1/session.idempotent-retry.operations.json"
+  ],
+  "protocolVersion": 1,
+  "scenario": "session-idempotent-retry"
+}

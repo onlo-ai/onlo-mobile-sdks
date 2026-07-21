@@ -1,0 +1,7 @@
+{
+  "action": "register",
+  "provider": "fcm",
+  "token": "redacted-provider-token",
+  "notificationPreference": "muted",
+  "locale": "en-US"
+}

@@ -1,0 +1,20 @@
+{
+  "sdkKey": "onlo_android_sk_example_public_key",
+  "appIdentifier": "com.operator.example",
+  "client": {
+    "protocolVersion": 1,
+    "installationId": "54d6774d-0ce4-4ae5-ab84-05d0154bb4ed",
+    "runtimePlatform": "android",
+    "sdkFamily": "android",
+    "sdkVersion": "0.1.0",
+    "capabilities": ["secure_storage", "persistent_outbox", "identity_jwt"]
+  },
+  "operation": {
+    "type": "identify",
+    "transitionId": "e26d4183-03c8-42fa-ad24-bc0a3cb57a2d",
+    "expectedGeneration": 1,
+    "presentedCredential": "opaque-current-credential",
+    "proposedCredential": "opaque-rotated-credential",
+    "userJwt": "redacted-operator-issued-user-jwt"
+  }
+}

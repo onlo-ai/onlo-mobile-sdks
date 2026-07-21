@@ -1,0 +1,86 @@
+# Dependencies and package-manager artifacts
+node_modules/
+.pnp.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Builds, tests, and local tooling
+dist/
+build/
+coverage/
+*.log
+*.tsbuildinfo
+.DS_Store
+.idea/
+*.swp
+.env
+.env.*
+!.env.example
+
+# Secrets, credentials, and customer-local data
+*.jwt
+*.token
+*.tokens
+*.secret
+*.secrets
+*.credentials
+*.private
+*.pem
+*.key
+*.p8
+*.p12
+*.pkcs12
+*.jks
+*.keystore
+*.mobileprovision
+GoogleService-Info.plist
+google-services.json
+.secrets/
+secrets/
+*.sqlite
+*.sqlite-*
+*.db
+*.realm
+*.realm.*
+customer-data/
+customer_data/
+transcripts/
+recordings/
+exports/
+uploads/
+fixtures/local/
+fixtures/private/
+data/local/
+data/private/
+
+# iOS / Xcode
+DerivedData/
+Pods/
+*.xcarchive/
+*.xcresult/
+*.xcuserstate
+*.xcuserdatad/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# Android / Gradle
+.gradle/
+**/build/
+.cxx/
+captures/
+out/
+local.properties
+*.iml
+
+# Flutter / Dart
+.dart_tool/
+.packages
+.pub/
+/packages/flutter/pubspec.lock
+ephemeral/
+
+# React Native
+.expo/
+.expo-shared/

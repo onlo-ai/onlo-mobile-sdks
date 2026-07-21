@@ -1,0 +1,8 @@
+{
+  "headers": {
+    "If-None-Match": "W/\"mobile-config-example\"",
+    "X-Onlo-Config-Schema": "1"
+  },
+  "method": "GET",
+  "path": "/api/sdk/v1/config"
+}

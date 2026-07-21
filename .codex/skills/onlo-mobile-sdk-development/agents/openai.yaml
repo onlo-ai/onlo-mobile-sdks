@@ -1,0 +1,4 @@
+interface:
+  display_name: "Onlo Mobile SDK Development"
+  short_description: "Build secure Onlo mobile SDKs"
+  default_prompt: "Use $onlo-mobile-sdk-development to change the Onlo mobile SDK workspace safely."

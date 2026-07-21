@@ -1,0 +1,19 @@
+{
+  "protocolVersion": 1,
+  "scenario": "session-lifecycle",
+  "fixtures": [
+    "contracts/v1/session.bootstrap.request.json",
+    "contracts/v1/session.response.json",
+    "contracts/v1/session.resume.request.json",
+    "contracts/v1/session.identify.request.json",
+    "contracts/v1/session.logout.request.json",
+    "contracts/v1/session.idempotent-retry.operations.json"
+  ],
+  "assertions": [
+    "Persist only the proposed credential in protected native storage.",
+    "Keep the chat token in memory only.",
+    "Replay an uncertain operation with its original transition ID and proposed credential.",
+    "Return to anonymous scope after a successful logout result.",
+    "Block the old owner partition before any new account authority is accepted."
+  ]
+}

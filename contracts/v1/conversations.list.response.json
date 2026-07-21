@@ -1,0 +1,15 @@
+{
+  "conversations": [
+    {
+      "id": "bfb729c5-84e1-4f4b-9770-c7a1c73f2bc7",
+      "sessionId": "0d9768af-0fdf-49d2-9d0c-f7b237546631",
+      "title": "[redacted]",
+      "unread": false,
+      "unreadCount": 0,
+      "status": "open",
+      "updatedAt": "2026-07-21T10:00:00.000Z",
+      "messageCount": 1,
+      "lastMessageRole": "user"
+    }
+  ]
+}

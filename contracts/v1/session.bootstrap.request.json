@@ -1,0 +1,26 @@
+{
+  "sdkKey": "onlo_rn_sk_example_public_key",
+  "appIdentifier": "com.operator.example",
+  "client": {
+    "protocolVersion": 1,
+    "installationId": "54d6774d-0ce4-4ae5-ab84-05d0154bb4ed",
+    "runtimePlatform": "ios",
+    "sdkFamily": "react-native",
+    "sdkVersion": "0.1.0",
+    "appVersion": "1.4.0",
+    "appBuild": "104",
+    "capabilities": [
+      "secure_storage",
+      "persistent_outbox",
+      "foreground_stream",
+      "config_schema_v1",
+      "identity_jwt"
+    ]
+  },
+  "operation": {
+    "type": "bootstrap",
+    "transitionId": "5a54c0b3-7d6f-481f-8fe5-c4a26d5fed85",
+    "proposedCredential": "opaque-device-credential",
+    "userJwt": "optional-operator-signed-short-lived-jwt"
+  }
+}

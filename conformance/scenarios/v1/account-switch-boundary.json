@@ -1,0 +1,13 @@
+{
+  "assertions": [
+    "On logout or account switch, block User A's owner partition before requesting or accepting any authority for User B.",
+    "User A's transcript, outbox, read state, credentials, and push association are inaccessible before User B can use the SDK.",
+    "A pending logout keeps the old owner partition blocked until the server transition is resolved."
+  ],
+  "fixtures": [
+    "contracts/v1/session.logout.request.json",
+    "contracts/v1/session.idempotent-retry.operations.json"
+  ],
+  "protocolVersion": 1,
+  "scenario": "account-switch-boundary"
+}

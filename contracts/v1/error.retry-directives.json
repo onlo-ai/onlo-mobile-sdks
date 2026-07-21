@@ -1,0 +1,7 @@
+[
+  { "directive": "never" },
+  { "directive": "after_token_refresh" },
+  { "directive": "after_attestation" },
+  { "directive": "after_backoff", "retryAfterMs": 250 },
+  { "directive": "after_full_sync" }
+]

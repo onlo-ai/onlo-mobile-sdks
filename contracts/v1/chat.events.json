@@ -1,0 +1,40 @@
+[
+  {
+    "type": "accepted",
+    "clientMessageId": "ea24a4c4-0442-4769-98dd-b09865f2a9c0",
+    "messageId": "d9a3e8e6-6b05-4f1c-9e12-2d99ef5d9fb2",
+    "conversationId": "bfb729c5-84e1-4f4b-9770-c7a1c73f2bc7",
+    "acceptedAt": "2026-07-21T10:00:00.000Z",
+    "duplicate": false,
+    "processingStatus": "processing"
+  },
+  { "type": "text", "content": "[redacted]" },
+  {
+    "type": "done",
+    "conversationId": "bfb729c5-84e1-4f4b-9770-c7a1c73f2bc7",
+    "duplicate": false,
+    "processingStatus": "completed"
+  },
+  {
+    "type": "accepted",
+    "clientMessageId": "ea24a4c4-0442-4769-98dd-b09865f2a9c0",
+    "messageId": "d9a3e8e6-6b05-4f1c-9e12-2d99ef5d9fb2",
+    "conversationId": "bfb729c5-84e1-4f4b-9770-c7a1c73f2bc7",
+    "acceptedAt": "2026-07-21T10:00:01.000Z",
+    "duplicate": true,
+    "processingStatus": "completed"
+  },
+  {
+    "type": "done",
+    "conversationId": "bfb729c5-84e1-4f4b-9770-c7a1c73f2bc7",
+    "duplicate": false,
+    "processingStatus": "completed",
+    "gated": true,
+    "reason": "synthetic_gate_reason"
+  },
+  {
+    "type": "error",
+    "error": "synthetic_widget_error",
+    "retryable": true
+  }
+]

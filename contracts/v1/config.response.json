@@ -1,0 +1,57 @@
+{
+  "requestId": "deae6f23-b5c0-4ee5-8d8e-9c409ce7b80e",
+  "serverTime": "2026-07-21T10:00:00.000Z",
+  "protocolVersion": 1,
+  "minimumProtocolVersion": 1,
+  "ok": true,
+  "result": {
+    "schemaVersion": 1,
+    "revision": "2026-07-21T10:00:00.000Z",
+    "compatibility": {
+      "requestedSchemaVersion": 1,
+      "appliedSchemaVersion": 1,
+      "capabilities": ["config_schema_v1"],
+      "unsupportedSettings": [
+        { "code": "native_placement", "setting": "launcher_position", "reason": "The host app controls native placement." },
+        { "code": "unsupported", "setting": "page_targeting", "reason": "Page targeting is not available in a native SDK." }
+      ]
+    },
+    "securityPolicy": {
+      "minimumProtocolVersion": 1,
+      "minimumSdkVersion": null,
+      "identityMode": "sdk_interface",
+      "anonymousScope": "installation_generation",
+      "nativePlacement": "host_app"
+    },
+    "appearance": {
+      "accent": "#6750A4",
+      "botName": "Onlo Assistant",
+      "botSubtitle": "How can we help?",
+      "greeting": "Hi, how can I help?",
+      "headerAvatar": { "mode": "initials", "text": "OA", "data": null },
+      "light": { "background": "#FFFFFF", "outgoing": "#6750A4", "outgoingText": "#FFFFFF", "incoming": "#F5F2FA", "incomingText": "#1D1B20" },
+      "dark": { "enabled": true, "background": "#1D1B20", "outgoing": "#D0BCFF", "outgoingText": "#381E72", "incoming": "#2B2930", "incomingText": "#E6E1E5" }
+    },
+    "features": {
+      "insertLink": false,
+      "insertCode": false,
+      "emoji": true,
+      "gifs": false,
+      "voice": false,
+      "fileUpload": true,
+      "transcriptDownload": false,
+      "soundNotifications": true,
+      "showTimestamps": true,
+      "faqButton": { "enabled": true, "label": "Help" }
+    },
+    "content": {
+      "faqs": [{ "question": "[redacted]", "answer": "[redacted]" }],
+      "tabs": { "enabled": true, "tabs": [{ "id": "home", "label": "Home", "icon": "home", "enabled": true }], "defaultTab": "home" },
+      "search": { "enabled": true, "placeholder": "Search", "showSearchInHome": true },
+      "onboarding": { "enabled": false, "title": "Welcome", "showProgress": false, "items": [] },
+      "homeSections": [{ "id": "welcome", "type": "welcome", "title": "Welcome", "content": "[redacted]", "enabled": true, "order": 0 }]
+    },
+    "identityMode": "sdk_interface",
+    "unsupportedWidgetSettings": [{ "setting": "launcher", "reason": "The host app controls native placement." }]
+  }
+}

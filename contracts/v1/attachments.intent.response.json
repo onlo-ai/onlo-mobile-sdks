@@ -1,0 +1,16 @@
+{
+  "requestId": "deae6f23-b5c0-4ee5-8d8e-9c409ce7b80e",
+  "serverTime": "2026-07-21T10:00:00.000Z",
+  "protocolVersion": 1,
+  "minimumProtocolVersion": 1,
+  "ok": true,
+  "result": {
+    "attachmentId": "a345c3a5-c325-42ee-a480-24195e9efadc",
+    "intent": "redacted-upload-intent",
+    "expiresAt": "2026-07-21T10:05:00.000Z",
+    "completion": {
+      "method": "POST",
+      "endpoint": "/api/sdk/v1/attachments/complete"
+    }
+  }
+}

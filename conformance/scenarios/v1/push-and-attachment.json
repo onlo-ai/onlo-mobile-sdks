@@ -1,0 +1,24 @@
+{
+  "protocolVersion": 1,
+  "scenario": "push-and-attachment",
+  "fixtures": [
+    "contracts/v1/attachments.intent.request.json",
+    "contracts/v1/attachments.intent.png.request.json",
+    "contracts/v1/attachments.intent.webp.request.json",
+    "contracts/v1/attachments.intent.response.json",
+    "contracts/v1/attachments.complete.response.json",
+    "contracts/v1/push-token.register.request.json",
+    "contracts/v1/push-token.register.response.json",
+    "contracts/v1/push-token.register-fcm.request.json",
+    "contracts/v1/push-token.register-fcm.response.json",
+    "contracts/v1/push-token.unregister.request.json",
+    "contracts/v1/push-token.unregister.response.json",
+    "contracts/v1/push.notification-payload.json"
+  ],
+  "assertions": [
+    "Allow only up to three JPEG, PNG, or WebP attachments no larger than 8 MiB each.",
+    "Render a completed attachment only through authenticated download.",
+    "Register push only after host-controlled permission and intent.",
+    "Refetch the authorised transcript before displaying or navigating from a push payload."
+  ]
+}

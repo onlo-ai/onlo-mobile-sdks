@@ -1,0 +1,6 @@
+[
+  { "type": "ready" },
+  { "type": "config_changed", "revision": "synthetic-config-revision" },
+  { "type": "inbox.conversation", "conversationId": "bfb729c5-84e1-4f4b-9770-c7a1c73f2bc7" },
+  { "type": "inbox.message", "conversationId": "bfb729c5-84e1-4f4b-9770-c7a1c73f2bc7" }
+]

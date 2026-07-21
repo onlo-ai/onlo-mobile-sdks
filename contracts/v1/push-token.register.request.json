@@ -1,0 +1,7 @@
+{
+  "action": "register",
+  "provider": "apns",
+  "token": "redacted-provider-token",
+  "notificationPreference": "enabled",
+  "locale": "en-US"
+}

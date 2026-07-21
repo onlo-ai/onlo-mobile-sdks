@@ -1,0 +1,19 @@
+{
+  "sdkKey": "onlo_ios_sk_example_public_key",
+  "appIdentifier": "com.operator.example",
+  "client": {
+    "protocolVersion": 1,
+    "installationId": "54d6774d-0ce4-4ae5-ab84-05d0154bb4ed",
+    "runtimePlatform": "ios",
+    "sdkFamily": "ios",
+    "sdkVersion": "0.1.0",
+    "capabilities": ["secure_storage", "persistent_outbox", "config_schema_v1"]
+  },
+  "operation": {
+    "type": "resume",
+    "transitionId": "147e6f10-9aef-4399-a337-3e8a59c57c91",
+    "expectedGeneration": 1,
+    "presentedCredential": "opaque-current-credential",
+    "proposedCredential": "opaque-rotated-credential"
+  }
+}

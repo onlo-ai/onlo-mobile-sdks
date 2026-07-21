@@ -1,0 +1,9 @@
+{
+  "protocolVersion": 1,
+  "sharedFixtures": [
+    {
+      "path": "contracts/v1/discovery.response.json",
+      "reason": "Unauthenticated discovery is a shared protocol boundary used before every session flow."
+    }
+  ]
+}

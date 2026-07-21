@@ -1,0 +1,14 @@
+{
+  "requestId": "deae6f23-b5c0-4ee5-8d8e-9c409ce7b80e",
+  "serverTime": "2026-07-21T10:00:00.000Z",
+  "protocolVersion": 1,
+  "minimumProtocolVersion": 1,
+  "ok": true,
+  "result": {
+    "state": "active",
+    "provider": "apns",
+    "environment": "sandbox",
+    "fingerprint": "redacted-token-fingerprint",
+    "registeredAt": "2026-07-21T10:00:00.000Z"
+  }
+}

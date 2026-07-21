@@ -1,0 +1,20 @@
+{
+  "requestId": "deae6f23-b5c0-4ee5-8d8e-9c409ce7b80e",
+  "serverTime": "2026-07-21T10:00:00.000Z",
+  "protocolVersion": 1,
+  "minimumProtocolVersion": 1,
+  "ok": true,
+  "result": {
+    "releaseState": "internal",
+    "manifest": {
+      "manifestVersion": 1,
+      "protocolVersion": 1,
+      "minimumProtocolVersion": 1,
+      "configSchema": { "minimum": 1, "maximum": 1 },
+      "capabilities": [
+        { "id": "secure_storage", "evidence": "client_declared", "securityRelevant": true, "description": "Protected native credential storage." },
+        { "id": "config_schema_v1", "evidence": "server_validated", "securityRelevant": false, "description": "Mobile configuration schema v1." }
+      ]
+    }
+  }
+}

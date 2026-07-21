@@ -1,0 +1,64 @@
+{
+  "bootstrap": {
+    "initial": {
+      "proposedCredential": "redacted-bootstrap-proposed-credential",
+      "transitionId": "11a71d21-36d6-4e5d-92ac-1aa91366c7ca",
+      "type": "bootstrap"
+    },
+    "retry": {
+      "proposedCredential": "redacted-bootstrap-proposed-credential",
+      "transitionId": "11a71d21-36d6-4e5d-92ac-1aa91366c7ca",
+      "type": "bootstrap"
+    }
+  },
+  "identify": {
+    "initial": {
+      "expectedGeneration": 4,
+      "presentedCredential": "redacted-current-credential",
+      "proposedCredential": "redacted-identified-proposed-credential",
+      "transitionId": "225131d9-4d88-49ae-a20e-2d1184c1ebdf",
+      "type": "identify",
+      "userJwt": "synthetic.in-memory.signature"
+    },
+    "retry": {
+      "expectedGeneration": 4,
+      "presentedCredential": "redacted-current-credential",
+      "proposedCredential": "redacted-identified-proposed-credential",
+      "transitionId": "225131d9-4d88-49ae-a20e-2d1184c1ebdf",
+      "type": "identify",
+      "userJwt": "synthetic.in-memory.signature"
+    }
+  },
+  "logout": {
+    "initial": {
+      "expectedGeneration": 5,
+      "presentedCredential": "redacted-identified-credential",
+      "proposedCredential": "redacted-anonymous-proposed-credential",
+      "transitionId": "3d3a8a37-7aa8-4a09-a85d-5a3fc0c75d22",
+      "type": "logout"
+    },
+    "retry": {
+      "expectedGeneration": 5,
+      "presentedCredential": "redacted-identified-credential",
+      "proposedCredential": "redacted-anonymous-proposed-credential",
+      "transitionId": "3d3a8a37-7aa8-4a09-a85d-5a3fc0c75d22",
+      "type": "logout"
+    }
+  },
+  "resume": {
+    "initial": {
+      "expectedGeneration": 3,
+      "presentedCredential": "redacted-current-credential",
+      "proposedCredential": "redacted-rotated-credential",
+      "transitionId": "425b6c34-a4f4-45a8-b369-9f7cdde7f63b",
+      "type": "resume"
+    },
+    "retry": {
+      "expectedGeneration": 3,
+      "presentedCredential": "redacted-current-credential",
+      "proposedCredential": "redacted-rotated-credential",
+      "transitionId": "425b6c34-a4f4-45a8-b369-9f7cdde7f63b",
+      "type": "resume"
+    }
+  }
+}

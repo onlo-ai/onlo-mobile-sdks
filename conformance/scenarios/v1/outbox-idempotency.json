@@ -1,0 +1,19 @@
+{
+  "protocolVersion": 1,
+  "scenario": "outbox-idempotency",
+  "fixtures": [
+    "contracts/v1/chat.request.json",
+    "contracts/v1/chat.events.json",
+    "contracts/v1/widget.error.response.json",
+    "contracts/v1/conversations.list.response.json",
+    "contracts/v1/conversations.detail.response.json",
+    "contracts/v1/stream.events.json"
+  ],
+  "assertions": [
+    "Write the client message ID before network work.",
+    "Reuse the same client message ID after a lost response or retryable failure.",
+    "Treat accepted as the durable acknowledgement.",
+    "Synchronize the transcript after duplicate acceptance rather than creating another message.",
+    "Treat foreground stream events only as refetch hints, never as transcript state."
+  ]
+}
