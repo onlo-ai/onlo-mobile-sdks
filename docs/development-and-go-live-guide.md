@@ -6,7 +6,7 @@ Use this guide to prepare the Operator account, backend, mobile hosts, and local
 
 | Environment | What can be done now | What is blocked |
 | --- | --- | --- |
-| Local | Implement SDK behavior and run shared type, fixture, manifest, hygiene, and available facade checks. Native configuration implementation remains under reviewer verification. | Android native test execution awaits explicit SDK licence acceptance/platform installation; full iOS execution awaits full Xcode/simulator setup. Local implementation is not server-gated. |
+| Local | Implement and mock-test native/bridge behavior with synthetic fixtures, mock transport, and redacted data. Local host foundations are available under `examples/`. | Android native test execution awaits Android API 35/build-tools licence acceptance; full iOS XCTest/simulator execution awaits full Xcode. React Native/Flutter host-native compilation remains unverified. Local implementation is not server-gated. |
 | Staging | Configure the exact HTTPS origin injected by release configuration. | Public-service E2E alone is server release-gated while the release state remains `internal`. Never guess a hostname. |
 | Production | Use `https://onlo.ai` only after release authorization. | Launch, publishing, deployment, and release actions remain prohibited without explicit approval. |
 
@@ -18,6 +18,7 @@ Use this guide to prepare the Operator account, backend, mobile hosts, and local
 | User JWT | Short-lived signed proof minted by the Operator backend after its own customer login. The SDK exchanges it but never signs or persists it. | Operator backend |
 | Native core | iOS or Android implementation that owns credentials, outbox, lifecycle, permissions, transport, and messenger UI. | SDK team |
 | Framework bridge | React Native or Flutter API that delegates to a native core. It cannot own sensitive state. | SDK team |
+| Monorepo-local native link | React Native and Flutter compile sibling iOS/Android core source during local development. These links are unpublished and are not installable release artifacts. | SDK team |
 | WebChat pipeline | The existing Onlo AI/chat pipeline used by web and mobile. Mobile must not create a separate AI path. | Onlo server team |
 | Release origin | Production is `https://onlo.ai`; staging/review uses an exact release-configured HTTPS origin. Local overrides are development-only. | Release configuration |
 | E2E release gate | A public session returns `503 sdk_not_available` while the service release state is `internal`; this is not an identity failure. | Onlo server owner |
@@ -109,7 +110,7 @@ The [API contract](api-contract.md) is complete and authoritative. Additive serv
 
    Expected result: every new request, response, error, and state transition has a server-confirmed shape. Stop if it does not.
 
-3. Run the focused checks for the code you changed. The four root shared checks are available in the foundation snapshot; component commands apply after that component's implementation commit lands.
+3. Run the focused checks for the code you changed. Shared checks are local evidence; platform commands are evidence only when their toolchain actually completes.
 
    | Area | Command | Expected result |
    | --- | --- | --- |
@@ -118,11 +119,11 @@ The [API contract](api-contract.md) is complete and authoritative. Additive serv
    | Conformance manifests | `npm run test:conformance` | Scenario shape, fixture references, JSON parsing, and synthetic/redacted policy pass; native behavior is not executed. |
    | Hygiene unit tests | `npm run test:hygiene` | Deterministic path/content-boundary tests pass. |
    | Repository hygiene | `npm run check:hygiene` | Tracked and non-ignored files pass the safe path/content preflight. |
-   | New React Native facade | `npm --prefix packages/react-native run typecheck && npm --prefix packages/react-native test` | Typed TurboModule facade checks pass; native adapters remain pending. |
+   | New React Native facade | `npm --prefix packages/react-native run typecheck && npm --prefix packages/react-native test` | Typed facade and adapter boundary checks pass; a real RN host-native build is still required. |
    | Legacy React Native prototype | `npm --prefix sdk/react-native run typecheck && npm --prefix sdk/react-native test` | Reference-only regression tests pass; this is not v1 conformance. |
    | Flutter facade | `(cd packages/flutter && flutter test)` | Dart facade tests pass without Dart-held SDK state. |
-   | iOS core | `swift test --package-path packages/ios` | Swift package and XCTest target compile. |
-   | Android core | `packages/android/gradlew -p packages/android test` | The checked-in Gradle 8.7 wrapper runs Android tests after JDK 17 and the required Android SDK platform/build tools are installed through accepted licences. |
+   | iOS core | `swift test --package-path packages/ios` | Requires full Xcode/XCTest for complete execution; source package build is a narrower check. |
+   | Android core | `packages/android/gradlew -p packages/android testDebugUnitTest` | The checked-in Gradle 8.7 wrapper runs Android tests after JDK 17 and Android API 35/build tools are installed through accepted licences. |
    | Fixture syntax | `find contracts/v1 conformance/scenarios -type f -name '*.json' -print0 \| xargs -0 jq empty` | All redacted JSON fixtures parse. |
 
    Expected result: shared checks provide local contract/fixture/hygiene evidence. Native behavioral evidence is recorded only after the platform-specific command actually runs.
@@ -135,6 +136,41 @@ The [API contract](api-contract.md) is complete and authoritative. Additive serv
 
    Expected result: the host calls `initialize`, one login method, `present`, `dismiss`, and `logout`; native code remains the only owner of credentials, outbox, messenger state, and recovery.
 
+6. Link framework hosts only to the checked-in sibling native cores during local development.
+
+   Expected result: React Native and Flutter exercise one native core per platform. These path/project/pod links are not installable release packages and must not be presented as publication artifacts.
+
+## SDK-team local full-stack iOS simulator
+
+The local merchant-backend simulator is **SDK-team-only** integration infrastructure. It does not alter the Onlo server contract and uses one fixed synthetic test subject held in process memory. Merchant app developers do not configure or call it; they use their existing authenticated backend as described in the [iOS merchant integration](../examples/ios/README.md).
+
+| Component | Local responsibility | Must not contain |
+| --- | --- | --- |
+| iOS host app | Presents merchant login UI, retains an ephemeral merchant session, calls the SDK. | Onlo signing secret, persistent user JWT, customer data. |
+| Merchant simulator | Authenticates a local test login code for its fixed synthetic test subject and creates the documented HS256 proof. | Production data, an Onlo chat token, Onlo server logic. |
+| Local Onlo service | Selects the Operator from the public SDK key and verifies the user JWT after identity exchange. | A separate mobile AI pipeline. |
+| Onlo iOS SDK | Exchanges the proof, owns protected credentials/outbox/UI, and presents messenger. | A signing key or host-customer authentication implementation. |
+
+1. Configure the local Onlo service with the intended public SDK key, iOS bundle ID, and mobile identity secret. Keep the exact local service origin HTTPS.
+
+   Expected result: anonymous bootstrap identifies the intended Operator before any customer proof is supplied.
+
+2. Configure and start [`examples/merchant-backend`](../examples/merchant-backend/README.md) using only local terminal values and a simulator-trusted TLS certificate.
+
+   Expected result: the merchant simulator can authenticate the local test login code and sign a 180-second HS256 proof for its fixed synthetic subject.
+
+3. In the iOS app target’s Debug Info.plist, set `ONLO_SDK_KEY`, `ONLO_DEVELOPMENT_ORIGIN`, and `MERCHANT_BACKEND_ORIGIN` from a private `.xcconfig`. Do not add those values to source control.
+
+   Expected result: `initializeDevelopment` is available only in Debug and receives exact HTTPS origins; a Release build uses only `https://onlo.ai`.
+
+4. Start the [installable iOS E2E host](../examples/ios-local-e2e/README.md), then enter the local merchant login code.
+
+   Expected result: the host calls the merchant simulator, receives a short-lived proof, calls `loginIdentifiedUser`, and the local Onlo service resolves the signed opaque subject for that Operator.
+
+5. Use the host’s **Log out** action, then sign in again and open Support.
+
+   Expected result: the prior customer’s transcript, outbox, unread state, push intent, and protected session are inaccessible before the second customer becomes usable.
+
 ## Manual test matrix
 
 | Test | Setup | Pass condition | Current availability |
@@ -143,10 +179,10 @@ The [API contract](api-contract.md) is complete and authoritative. Additive serv
 | Identified lifecycle | Synthetic compact JWT fixture and mock transport. | `loginIdentifiedUser({ userJwt })` exchanges proof without a second customer login or local JWT persistence. | Platform-specific test status; public-service E2E release-gated |
 | Account switch | Two synthetic test accounts; invoke logout before the second login. | Old history, outbox work, credentials, read state, and push association are inaccessible before the next account uses the SDK. | Platform-specific test status; public-service E2E release-gated |
 | Offline outbox | Disable network after creating a synthetic send. | One stable `clientMessageId` survives retry and a duplicate acceptance does not create another turn. | Platform-specific test status; public-service E2E release-gated |
-| Transcript/deep link | Synthetic conversation ID and authorised transcript response. | The core fetches the transcript before presentation; push/deep-link data is only a hint. | Protocol fixture only; native mock coverage planned |
-| Attachments | Synthetic JPEG, PNG, or WebP up to 8 MiB; no more than three. | Intent, completion, receipt, and chat payload follow the confirmed fixture. | Protocol fixture only; native mock coverage planned |
-| Push | Synthetic APNs/FCM token fixture after explicit host-controlled permission and intent. | Opening a notification re-syncs the authorised transcript before showing content. | Protocol fixture only; native mock coverage planned |
-| Configuration | Redacted configuration, ETag, and 304 fixtures. | Compatible revision applies atomically; offline cache remains valid. | Native implementation under reviewer verification; no completion claim |
+| Transcript/deep link | Synthetic conversation ID and authorised transcript response. | The core fetches the transcript before presentation; push/deep-link data is only a hint. | Native source/mock coverage; device evidence pending |
+| Attachments | Synthetic JPEG, PNG, or WebP up to 8 MiB; no more than three. | Intent, completion, receipt, and chat payload follow the confirmed fixture. | Blocked: `ChatRequest` has no required `conversationId` for attachment intent; do not implement until contract reconciliation |
+| Push | Synthetic APNs/FCM token fixture after explicit host-controlled permission and intent. | Opening a notification re-syncs the authorised transcript before showing content. | Native source/mock coverage; device evidence pending |
+| Configuration | Redacted configuration, ETag, and 304 fixtures. | Compatible revision applies atomically; offline cache remains valid. | Native source/mock coverage; platform execution evidence pending |
 
 ## Staging readiness procedure
 
@@ -154,9 +190,9 @@ The [API contract](api-contract.md) is complete and authoritative. Additive serv
 
    Expected result: the host app cannot override the origin, and the legacy prototype endpoint is never reused.
 
-2. Run the manual matrix on real iOS and Android devices using synthetic Operator accounts after the release gate permits public-service E2E.
+2. Run the manual matrix on real iOS and Android devices using synthetic Operator accounts after the release gate permits public-service E2E. Exclude attachment sending until its contract gap is resolved.
 
-   Expected result: evidence covers anonymous use, identity exchange, logout/account switch, offline recovery, attachments, push, config refresh, and deep-link authorization.
+   Expected result: evidence covers anonymous use, identity exchange, logout/account switch, offline recovery, push, config refresh, and deep-link authorization. Attachment evidence remains excluded until contract reconciliation.
 
 3. Review logs and artifacts for privacy.
 
@@ -166,8 +202,9 @@ The [API contract](api-contract.md) is complete and authoritative. Additive serv
 
 - [ ] The Onlo server owner has approved the production origin and set the public mobile release state.
 - [ ] The exact configuration, retry, JWT, and capability contracts are versioned and covered by redacted fixtures.
-- [ ] iOS and Android native cores implement protected durable storage, config refresh, push, messenger UI, lifecycle recovery, and the full conformance matrix.
-- [ ] React Native and Flutter native bindings are complete and hold no sensitive state in JavaScript or Dart.
+- [ ] iOS and Android native cores have completed protected-storage, outbox, config, push, UI, lifecycle, and account-boundary device/conformance evidence.
+- [ ] React Native and Flutter native bindings have completed host-native compile and device evidence and hold no sensitive state in JavaScript or Dart.
+- [ ] The attachment `conversationId` contract gap is reconciled and attachment implementation has its own fixture/conformance/device evidence.
 - [ ] Operator backend signing stays server-only and has been security reviewed.
 - [ ] Real-device staging evidence shows no User A data can appear for User B after logout or account switch.
 - [ ] Package names are confirmed (`@onlo/react-native` and `onlo_flutter`); publishing remains disabled until explicit approval.

@@ -6,11 +6,11 @@ Conformance proves that iOS, Android, React Native, and Flutter produce the same
 
 | Flow | Canonical source | Shared type | JSON fixture | Scenario | Readiness |
 | --- | --- | --- | --- | --- | --- |
-| Anonymous bootstrap, resume, identify, logout | `docs/api-contract.md` session lifecycle | `SessionRequest` / `SessionResult` / `SessionOperation` | Present | `session-lifecycle` | Ready for native implementation |
-| Compatible config fetch | `docs/api-contract.md` configuration | `MobileConfig`, config refresh types | Present | `config-refresh` | Ready for native implementation and mock conformance |
-| Chat, transcript, and foreground SSE | `docs/api-contract.md` shared chat path | `ChatRequest`, `ChatEvent`, transcript, and stream types | Present | `outbox-idempotency` | Ready for native implementation |
-| Push registration and handling | `docs/api-contract.md` push token registration | `PushTokenRequest`, result, and payload types | Present | `push-and-attachment` | Ready for native implementation |
-| Attachment intent, completion, and send | `docs/api-contract.md` image attachment flow | Intent, completion, and chat attachment types | Present | `push-and-attachment` | Ready for native implementation |
+| Anonymous bootstrap, resume, identify, logout | `docs/api-contract.md` session lifecycle | `SessionRequest` / `SessionResult` / `SessionOperation` | Present | `session-lifecycle` | Native source/mock tests implemented; shared platform runner evidence pending |
+| Compatible config fetch | `docs/api-contract.md` configuration | `MobileConfig`, config refresh types | Present | `config-refresh` | Native source/mock tests implemented; shared platform runner evidence pending |
+| Chat, transcript, and foreground SSE | `docs/api-contract.md` shared chat path | `ChatRequest`, `ChatEvent`, transcript, and stream types | Present | `outbox-idempotency` | Native source/mock tests implemented; shared platform runner evidence pending |
+| Push registration and handling | `docs/api-contract.md` push token registration | `PushTokenRequest`, result, and payload types | Present | `push-and-attachment` | Native source/mock tests implemented; provider/device evidence pending |
+| Attachment intent, completion, and send | `docs/api-contract.md` image attachment flow | Intent, completion, and chat attachment types | Present | `push-and-attachment` | Contract-blocked: chat/attachment conversation binding is undefined; capability remains undeclared |
 | Production endpoint selection | `docs/api-contract.md` transport conventions | `PRODUCTION_ORIGIN`, `ReleaseConfiguredHttpsOrigin` | Boundary test | Production is `https://onlo.ai`; staging/review requires explicit release configuration |
 
 The [v1 API contract](../docs/api-contract.md) and [`@onlo/protocol`](../packages/protocol/src/index.ts) remain the client/server source of truth. Do not create a fixture, type, or client fallback for an unknown field.
@@ -36,7 +36,7 @@ The [v1 API contract](../docs/api-contract.md) and [`@onlo/protocol`](../package
 ## Completion criteria
 
 - Every publicly supported `/api/sdk/v1` flow has success, failure, and retry fixtures.
-- Chat, transcript, SSE, push, and attachment payloads have exact schema coverage before native implementation claims support.
+- Chat, transcript, SSE, and push payloads have exact schema coverage before native implementation claims support. Attachment support additionally requires the documented conversation-binding gap to be resolved.
 - Each required invariant passes on iOS and Android; React Native and Flutter pass it through their native bridge.
 - Tests never include a real JWT, session/chat token, customer data, message text, push token, or attachment URL.
 

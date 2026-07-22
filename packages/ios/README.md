@@ -8,18 +8,20 @@ The public host lifecycle is deliberately limited to the SDK key and the
 Operator-issued proof:
 
 ```swift
-try await sdk.initialize(sdkKey: sdkKey)
+try await sdk.initialize(apiKey: sdkKey)
 try await sdk.loginUnidentifiedUser()
-try await sdk.loginIdentifiedUser(userJwt: userJwt)
+try await sdk.identify(userJwt: userJwt)
 try await sdk.logout()
 let intent = try await sdk.present(conversationId: nil)
 ```
 
-`initialize(sdkKey:)` uses the canonical production origin `https://onlo.ai`
+`initialize(apiKey:)` uses the canonical production origin `https://onlo.ai`
 and derives the app identifier from the host bundle. Staging/review builds must
 inject an explicit release-configured HTTPS origin through the internal native
 configuration path; the SDK never guesses a staging hostname. Internal tests
 inject HTTPS mock origins without making live requests.
+
+SDK-team Debug harnesses alone expose `@_spi(DevelopmentSupport) initializeDevelopment(sdkKey:onloDevelopmentOrigin:)` for an explicit local HTTPS service. It is not a merchant integration API, is not compiled into release builds, accepts no persistence or transport injection, and must never be used as production configuration.
 
 The public `OnloSDK()` initializer never accepts a host persistence store. Its
 transactional owner-scoped SQLite store blocks an owner before logout network

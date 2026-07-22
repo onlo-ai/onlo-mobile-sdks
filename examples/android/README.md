@@ -1,36 +1,23 @@
-# Android host integration
+# Android local host
 
-The Android core derives the app identifier from `Context`; a host supplies only its public Android SDK key. Do not ship an Onlo signing secret or mint a user JWT in the app.
+`app/` is a minimal Android application that uses the sibling native core by a local Gradle project dependency. It builds a host-owned Support button; no key, JWT, endpoint override, signing code, customer data, or generated dependency is checked in.
 
-```kotlin
-class SupportApplication : Application() {
-    override fun onCreate() {
-        super.onCreate()
-        Onlo.initialize(this, sdkKey = BuildConfig.ONLO_SDK_KEY)
-    }
-}
-```
+## Run foundation
 
-Observe native state before enabling a support entry point:
+1. Complete the Android tool setup in the [go-live guide](../../docs/development-and-go-live-guide.md#tool-and-account-setup).
 
-```kotlin
-lifecycleScope.launch {
-    Onlo.instance().state.collect { state ->
-        supportButton.isEnabled = state.phase == OnloPhase.ANONYMOUS_READY ||
-            state.phase == OnloPhase.IDENTIFIED_READY
-    }
-}
-```
+   Expected result: JDK 17 and Android API 35/build-tools 35.0.0 are installed after explicit licence acceptance.
 
-When the Operator app has already authenticated its own customer, ask its backend for a short-lived user JWT and exchange it. The host backend—not the Android app—signs the token.
+2. Open `examples/android` in Android Studio, or run `../../packages/android/gradlew -p . :app:assembleDebug` from this directory.
 
-```kotlin
-lifecycleScope.launch {
-    val userJwt = operatorBackend.fetchOnloUserJwtForCurrentCustomer()
-    Onlo.instance().loginIdentifiedUser(userJwt)
-}
-```
+   Expected result: the local host compiles against `../../packages/android`; it does not call Onlo because its public key is deliberately `null`.
 
-Call `logout()` before the host switches accounts. If it returns `Pending`, the old partition remains blocked and the core will retry revocation on a future initialization; do not make another account's messenger available through that client state.
+3. In a private host build configuration, supply the public Operator SDK key and replace the `publicSdkKey` seam in `MainActivity`.
 
-Production uses `https://onlo.ai` by default. A staging/review build receives its exact HTTPS origin from an internal release configuration; the host initializer cannot select an endpoint and the SDK never guesses a hostname.
+   Expected result: initialization uses the native Android core and enables Support only in anonymous or identified ready state.
+
+4. Implement `OperatorBackend.fetchShortLivedOnloUserJwt()` as an authenticated call to the Operator backend, then call it only after the host app login succeeds.
+
+   Expected result: the backend returns a short-lived JWT for `loginIdentifiedUser`; the app never signs, logs, or stores it.
+
+Call `logout()` before a host account switch. If it returns `Pending`, keep the old partition blocked until native recovery completes. Production uses `https://onlo.ai`; staging/review must be injected by release configuration, never guessed by the host.

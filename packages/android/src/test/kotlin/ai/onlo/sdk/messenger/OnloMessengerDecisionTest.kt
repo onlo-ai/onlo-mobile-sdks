@@ -1,0 +1,42 @@
+package ai.onlo.sdk.messenger
+
+import ai.onlo.sdk.OpenConversationOutcome
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+class OnloMessengerDecisionTest {
+    @Test
+    fun `open outcome is preserved and only opened attaches the messenger`() {
+        val outcomes = listOf(
+            OpenConversationOutcome.Opened,
+            OpenConversationOutcome.NoActiveSession,
+            OpenConversationOutcome.NotAuthorised,
+            OpenConversationOutcome.Unavailable,
+        )
+
+        outcomes.forEach { outcome ->
+            val decision = conversationOpenDecision(outcome)
+            assertEquals(outcome, decision.outcome)
+            assertFalse(decision.clearPendingPresentation)
+            if (outcome is OpenConversationOutcome.Opened) {
+                assertTrue(decision.attachMessenger)
+            } else {
+                assertFalse(decision.attachMessenger)
+            }
+        }
+    }
+
+    @Test
+    fun `activity invalidation after authorization clears pending presentation`() {
+        val decision = conversationOpenDecision(
+            OpenConversationOutcome.Opened,
+            hostAvailable = false,
+        )
+
+        assertEquals(OpenConversationOutcome.Unavailable, decision.outcome)
+        assertFalse(decision.attachMessenger)
+        assertTrue(decision.clearPendingPresentation)
+    }
+}

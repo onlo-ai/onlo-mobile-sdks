@@ -1,20 +1,30 @@
 # `@onlo/react-native`
 
-React Native is a thin TypeScript facade over the native iOS and Android Onlo SDK cores. JavaScript does not retain a session, credential, transcript, outbox, push registry, or UI state.
+Typed React Native facade over the iOS and Android Onlo native cores. JavaScript owns no session, credential, transcript, outbox, push registry, transport, or messenger UI state.
 
-Its host-app interface is:
+> **Status:** Unpublished (`private: true`). Android and iOS adapters are implemented against their sibling native cores. iOS source has not yet completed a full Xcode/React Native host compile.
 
-```ts
-Onlo.initialize({ sdkKey: 'onlo_rn_sk_…' });
-Onlo.loginUnidentifiedUser();
-Onlo.loginIdentifiedUser({ userJwt });
-Onlo.present();
-Onlo.dismiss();
-Onlo.logout();
-```
+The typed native-event API requires React Native 0.79 or newer.
 
-Subscribe to native lifecycle, unread-count, and typed-error events with `Onlo.addListener(listener)`. The native module is available in bare React Native apps and Expo development builds; Expo Go cannot load custom native modules.
+## Typed surface
 
-The host application obtains `userJwt` from its Operator backend. Do not generate it in the app or persist it in JavaScript.
+| Area | Facade API | Current boundary |
+| --- | --- | --- |
+| Lifecycle | `initialize({ sdkKey })`, `loginUnidentifiedUser()`, `loginIdentifiedUser({ userJwt })`, `logout()` | Both adapters use the fixed `react-native` family initializer and native protected state. |
+| Presentation | `present({ conversationId? })`, `dismiss()`, `openConversation(conversationId)` | Android attaches to the current Activity; iOS uses the current React Native presentation host. Targeted presentation resolves only after native ownership validation and presenter attachment. |
+| Push | `setPushToken({ provider, token, notificationPreference?, locale? })`, `handlePushNotification(payload)` | Android supports FCM; iOS supports APNs. Both use durable reconciliation and re-authorise payloads before opening a native messenger. |
+| Observation | `addListener(listener)`, `observeState(listener)`, `observeIdentityState(listener)`, `observeConnectionState(listener)`, `observeUnreadCount(listener)` | Both adapters emit distinct native-derived connection state and account-authorised unread totals; no inbox or credential state is retained in JavaScript. |
+| Types | Session, identity, connection, unread, push-result, error-code, and retry-directive types | Typed facade validation plus native-safe error mapping. |
 
-See the [integration guide](../../docs/integration-guide.md) and [delivery plan](../../docs/delivery-plan.md).
+## Monorepo-local native linking
+
+Neither native link is an installable distribution artifact. The package is not published.
+
+| Platform | Local link | Host constraint |
+| --- | --- | --- |
+| Android | Sibling `:onlo-android-sdk` Gradle project from `packages/android` | A local host/example must include the same project dependency until release artifacts exist. |
+| iOS | Sibling `packages/ios/Sources/OnloSDK` compiled into the `OnloReactNative` pod | Do not add the SwiftPM `OnloSDK` product to the app target; that would create a second native core. Full Xcode and a React Native iOS host compile remain pending. |
+
+The host obtains `userJwt` from its Operator backend. Never generate or persist it in JavaScript. Expo Go cannot load this custom native module; use a development build.
+
+See the [API contract](../../docs/api-contract.md), [integration guide](../../docs/integration-guide.md), and [delivery plan](../../docs/delivery-plan.md).

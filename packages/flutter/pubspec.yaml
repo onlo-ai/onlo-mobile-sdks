@@ -1,0 +1,27 @@
+name: onlo_flutter
+description: Typed Flutter facade for the Onlo native mobile SDK cores.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.6.0
+  flutter: ">=3.27.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  plugin_platform_interface: ^2.1.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: ai.onlo.flutter
+        pluginClass: OnloFlutterPlugin
+      ios:
+        pluginClass: OnloFlutterPlugin

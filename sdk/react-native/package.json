@@ -1,0 +1,41 @@
+{
+  "name": "@onlo/react-native",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Onlo AI chat for React Native apps — same agent, knowledge base and conversation history as your web widget.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "onlo",
+    "chat",
+    "support",
+    "ai",
+    "react-native"
+  ],
+  "license": "SEE LICENSE IN LICENSE",
+  "peerDependencies": {
+    "react": ">=18",
+    "react-native": ">=0.72"
+  },
+  "peerDependenciesMeta": {
+    "@react-native-async-storage/async-storage": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.79",
+    "react": "18.2.0",
+    "react-native": "0.74.5",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.9"
+  }
+}

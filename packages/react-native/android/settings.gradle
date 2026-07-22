@@ -1,0 +1,20 @@
+pluginManagement {
+  repositories {
+    google()
+    mavenCentral()
+    gradlePluginPortal()
+  }
+}
+
+dependencyResolutionManagement {
+  repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+  repositories {
+    google()
+    mavenCentral()
+  }
+}
+
+rootProject.name = 'onlo-react-native-android'
+
+include ':onlo-android-sdk'
+project(':onlo-android-sdk').projectDir = file('../../android')

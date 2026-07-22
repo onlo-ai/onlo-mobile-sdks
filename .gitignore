@@ -39,6 +39,7 @@ GoogleService-Info.plist
 google-services.json
 .secrets/
 secrets/
+/examples/merchant-backend/.local/
 *.sqlite
 *.sqlite-*
 *.db
@@ -56,6 +57,8 @@ data/local/
 data/private/
 
 # iOS / Xcode
+.build/
+.swiftpm/
 DerivedData/
 Pods/
 *.xcarchive/
@@ -64,6 +67,7 @@ Pods/
 *.xcuserdatad/
 *.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
+*.xcconfig
 
 # Android / Gradle
 .gradle/

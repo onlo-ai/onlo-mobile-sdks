@@ -8,6 +8,7 @@
     "packages/protocol"
   ],
   "scripts": {
+    "start": "npm --prefix examples/merchant-backend start",
     "check:hygiene": "node scripts/check-hygiene.mjs",
     "test:conformance": "node --test conformance/test/manifest.test.mjs",
     "test:hygiene": "node --test scripts/check-hygiene.test.mjs",

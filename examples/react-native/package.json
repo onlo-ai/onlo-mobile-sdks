@@ -1,0 +1,11 @@
+{
+  "name": "onlo-react-native-local-example",
+  "private": true,
+  "version": "0.0.0-local",
+  "scripts": { "start": "react-native start", "android": "react-native run-android", "ios": "react-native run-ios" },
+  "dependencies": {
+    "@onlo/react-native": "file:../../packages/react-native",
+    "react": "19.0.0",
+    "react-native": "0.79.0"
+  }
+}

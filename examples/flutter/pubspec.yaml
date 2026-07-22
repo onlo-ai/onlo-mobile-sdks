@@ -1,0 +1,12 @@
+name: onlo_flutter_local_example
+publish_to: none
+version: 0.0.0-local
+environment:
+  sdk: ^3.6.0
+dependencies:
+  flutter:
+    sdk: flutter
+  onlo_flutter:
+    path: ../../packages/flutter
+flutter:
+  uses-material-design: true

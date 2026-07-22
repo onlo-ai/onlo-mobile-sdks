@@ -1,0 +1,22 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = 'onlo-flutter-android'
+
+// The Flutter bridge is intentionally built against the checked-in native core,
+// never a duplicate Dart/Kotlin implementation.
+include ':onlo-android-sdk'
+project(':onlo-android-sdk').projectDir = file('../../android')

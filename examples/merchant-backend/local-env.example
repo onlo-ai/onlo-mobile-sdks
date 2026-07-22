@@ -1,0 +1,13 @@
+# Copy this file to .env.local. Do not commit .env.local.
+NODE_ENVIRONMENT=development
+MERCHANT_BACKEND_LOGIN_CODE=choose-a-local-test-code
+ONLO_MOBILE_IDENTITY_SECRET=replace-with-matching-local-onlo-secret
+ONLO_SDK_KEY=replace-with-local-public-sdk-key
+
+# This may be your HTTP local Onlo server. The harness publishes HTTPS on 8443
+# for the iPhone Simulator automatically.
+ONLO_DEVELOPMENT_ORIGIN=http://localhost:3000
+
+# Optional; defaults are 8444 for the merchant backend and 8443 for the HTTPS proxy.
+# MERCHANT_BACKEND_PORT=8444
+# ONLO_TLS_PROXY_PORT=8443

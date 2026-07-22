@@ -11,6 +11,8 @@ Kotlin native-core foundation for the Onlo mobile v1 contract. It owns protected
 | `loginIdentifiedUser(userJwt)` | Checks only compact JWT shape, then exchanges the proof without persisting or verifying it locally. |
 | `logout()` | Blocks the old partition before revocation; returns a typed pending result when a retry is needed. |
 | `state` / `presentationIntent` | `StateFlow` values for Compose and View adapters. `present()` only emits an intent; it installs no overlay. |
+| `OnloMessenger.present(activity)` | Presents the SDK-owned Android Views messenger from a host-controlled entry point. It never adds an overlay, manifest component, or permission prompt. |
+| `OnloMessenger.openConversation(activity, id)` | Re-authorises and refreshes the requested conversation before presenting it; an unauthorised target is not shown. |
 
 ## Storage and protocol invariants
 
@@ -36,4 +38,4 @@ The module is standalone and requires JDK 17 plus an Android SDK:
 gradle -p packages/android test
 ```
 
-This is a native-core foundation, not a released AAR or a completed Compose/View messenger.
+This is an unpublished native-core foundation with an Android Views messenger. Compose hosting, media UI, optional FCM adapter integration, release artifacts, and public end-to-end service verification remain unfinished.

@@ -1,0 +1,33 @@
+{
+  "name": "@onlo/react-native",
+  "version": "0.1.0",
+  "private": true,
+  "description": "React Native bridge for the native Onlo mobile SDKs.",
+  "main": "src/index.ts",
+  "react-native": "src/index.ts",
+  "types": "src/index.ts",
+  "files": [
+    "android/build.gradle",
+    "android/consumer-rules.pro",
+    "android/src",
+    "ios/OnloReactNative.podspec",
+    "ios/Sources",
+    "react-native.config.js",
+    "src"
+  ],
+  "codegenConfig": {
+    "name": "OnloSDKSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "android": {
+      "javaPackageName": "ai.onlo.reactnative"
+    }
+  },
+  "peerDependencies": {
+    "react-native": ">=0.79"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "tsc --ignoreConfig src/index.ts src/NativeOnloSDK.ts src/react-native-codegen-shim.d.ts --target ES2022 --module commonjs --moduleResolution node --ignoreDeprecations 6.0 --skipLibCheck --outDir /private/tmp/onlo-rn-facade-test && ONLO_FACADE_PATH=/private/tmp/onlo-rn-facade-test/index.js node --test test/*.test.mjs"
+  }
+}

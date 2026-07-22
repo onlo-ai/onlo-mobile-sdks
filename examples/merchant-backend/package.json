@@ -1,0 +1,11 @@
+{
+  "name": "onlo-local-merchant-backend",
+  "version": "0.0.0-local",
+  "private": true,
+  "description": "Local-only synthetic merchant-auth simulator for Onlo mobile SDK integration.",
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file=.env.local src/start-local.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}
