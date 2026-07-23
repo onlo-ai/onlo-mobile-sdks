@@ -14,7 +14,7 @@ public struct OnloMessengerOptions: Sendable {
 
     public init(
         colorMode: OnloMessengerColorMode = .system,
-        allowsImageAttachments: Bool = true
+        allowsImageAttachments: Bool = false
     ) {
         self.colorMode = colorMode
         self.allowsImageAttachments = allowsImageAttachments
@@ -1039,10 +1039,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
     }
 
     private var attachmentsAreAvailable: Bool {
-        options.allowsImageAttachments &&
-            config?.features.fileUpload == true &&
-            config?.mediaPolicy.enabled == true &&
-            maximumImagesPerMessage > 0
+        false
     }
 
     private var maximumImagesPerMessage: Int {
@@ -1104,18 +1101,30 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
             navigationItem.prompt = nil
             return
         }
-        let avatar = UILabel()
-        avatar.text = appearance.headerAvatar.text
-        avatar.textAlignment = .center
-        avatar.font = .preferredFont(forTextStyle: .caption1)
-        avatar.adjustsFontForContentSizeCategory = true
-        avatar.backgroundColor = color(appearance.accent) ?? .systemBlue
-        avatar.textColor = .white
+        let avatar: UIView
+        if appearance.headerAvatar.mode == .image,
+           let data = appearance.headerAvatar.data,
+           let image = image(fromDataURL: data) {
+            let imageView = UIImageView(image: image)
+            imageView.contentMode = .scaleAspectFill
+            imageView.isAccessibilityElement = true
+            imageView.accessibilityLabel = "\(appearance.botName) avatar"
+            avatar = imageView
+        } else {
+            let initials = UILabel()
+            initials.text = appearance.headerAvatar.text
+            initials.textAlignment = .center
+            initials.font = .preferredFont(forTextStyle: .caption1)
+            initials.adjustsFontForContentSizeCategory = true
+            initials.backgroundColor = color(appearance.accent) ?? .systemBlue
+            initials.textColor = .white
+            initials.accessibilityLabel = "\(appearance.botName) avatar"
+            avatar = initials
+        }
         avatar.layer.cornerRadius = 16
         avatar.clipsToBounds = true
         avatar.widthAnchor.constraint(equalToConstant: 32).isActive = true
         avatar.heightAnchor.constraint(equalToConstant: 32).isActive = true
-        avatar.accessibilityLabel = appearance.botName
 
         let name = UILabel()
         name.text = appearance.botName
@@ -1133,6 +1142,15 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
         header.alignment = .center
         header.spacing = 8
         navigationItem.titleView = header
+    }
+
+    private func image(fromDataURL value: String) -> UIImage? {
+        guard value.hasPrefix("data:image/"),
+              let comma = value.firstIndex(of: ","),
+              value[..<comma].hasSuffix(";base64"),
+              let data = Data(base64Encoded: String(value[value.index(after: comma)...]))
+        else { return nil }
+        return UIImage(data: data)
     }
 
     private func color(_ hex: String?) -> UIColor? {

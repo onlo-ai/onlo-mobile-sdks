@@ -20,10 +20,9 @@ final class OnloSDKTests: XCTestCase {
                 "persistent_outbox",
                 "foreground_stream",
                 "apns",
-                "media_picker",
-                "attachment_upload",
                 "identity_jwt",
                 "config_schema_v1",
+                "deep_link_routing",
             ]
         )
     }
@@ -49,7 +48,7 @@ final class OnloSDKTests: XCTestCase {
         logger.setLevel(.off)
     }
 
-    func testImageUploadCompletesIntentBeforeReturningDurableHandle() async throws {
+    func testImageUploadPrimitiveDoesNotEnableContractBlockedAttachmentSend() async throws {
         let imageData = Data("synthetic-image-bytes".utf8)
         let transport = AttachmentLifecycleTransport(imageData: imageData)
         let sdk = OnloSDK(
@@ -79,11 +78,14 @@ final class OnloSDKTests: XCTestCase {
         XCTAssertEqual(handle.attachment.type, "image/jpeg")
         XCTAssertEqual(handle.attachment.receipt, "synthetic-receipt")
         XCTAssertEqual(handle.receiptExpiresAt, "2099-07-24T10:00:00.000Z")
-        _ = try await sdk.sendMessage(message: "", attachments: [handle])
+        do {
+            _ = try await sdk.sendMessage(message: "", attachments: [handle])
+            XCTFail("attachment send must remain disabled until conversation binding is canonical")
+        } catch let error as OnloError {
+            XCTAssertEqual(error.safeCode, "invalid_configuration")
+        }
         let durableEntry = try await sdk.nextDurableTextDispatch()
-        let queued = try XCTUnwrap(durableEntry)
-        XCTAssertEqual(queued.message, "")
-        XCTAssertEqual(queued.attachments, [handle])
+        XCTAssertNil(durableEntry)
         let paths = await transport.requestPaths()
         XCTAssertEqual(
             paths.filter { $0.hasPrefix("/api/sdk/v1/attachments/") },

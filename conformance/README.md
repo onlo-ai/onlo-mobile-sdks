@@ -2,6 +2,12 @@
 
 Conformance proves that iOS, Android, React Native, and Flutter produce the same server-visible lifecycle. Native cores implement the behavior; framework bridges inherit it on their active OS.
 
+[`release-scenarios-v1.json`](release-scenarios-v1.json) is the single
+four-surface release scenario set. It maps each required observable journey to
+the canonical fixture-backed flows below. `covered` means native/bridge
+automation exists; it does not replace the physical-device evidence required
+for release.
+
 ## Contract coverage
 
 | Flow | Canonical source | Shared type | JSON fixture | Scenario | Readiness |

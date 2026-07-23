@@ -62,5 +62,6 @@ test('autolinking registers the Android package and local iOS pod', () => {
 
 test('Android core declares only available FCM push capability, never attachment capability', () => {
   assert.match(coreInitializerSource, /Capability\.FCM/);
+  assert.match(coreInitializerSource, /Capability\.DEEP_LINK_ROUTING/);
   assert.doesNotMatch(coreInitializerSource, /Capability\.(MEDIA_PICKER|ATTACHMENT_UPLOAD)/);
 });

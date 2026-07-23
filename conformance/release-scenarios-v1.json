@@ -1,0 +1,101 @@
+{
+  "protocolVersion": 1,
+  "surfaces": [
+    "ios-native",
+    "android-native",
+    "react-native",
+    "flutter"
+  ],
+  "scenarios": [
+    {
+      "id": "anonymous-chat",
+      "canonicalFlows": ["session-lifecycle", "outbox-idempotency"],
+      "nativeOutcome": "The native Core owns anonymous authority, durable send, and transcript convergence; every surface presents the native messenger.",
+      "automatedStatus": "covered"
+    },
+    {
+      "id": "identified-history",
+      "canonicalFlows": ["session-lifecycle", "customer-unread"],
+      "nativeOutcome": "The server-authorised identified owner sees the same native conversation list and transcript on every surface.",
+      "automatedStatus": "covered"
+    },
+    {
+      "id": "account-switch-isolation",
+      "canonicalFlows": ["account-switch-boundary"],
+      "nativeOutcome": "Owner A state is inaccessible before owner B authority can be used.",
+      "automatedStatus": "covered"
+    },
+    {
+      "id": "offline-enqueue-restart-reconnect",
+      "canonicalFlows": ["outbox-idempotency"],
+      "nativeOutcome": "One durable native row survives restart and is dispatched when current authority and connectivity are restored.",
+      "automatedStatus": "covered"
+    },
+    {
+      "id": "stable-id-duplicate-suppression",
+      "canonicalFlows": ["outbox-idempotency"],
+      "nativeOutcome": "Every retry keeps the original clientMessageId and duplicate acceptance converges through transcript reconciliation.",
+      "automatedStatus": "covered"
+    },
+    {
+      "id": "accepted-interruption-reconciliation",
+      "canonicalFlows": ["outbox-idempotency"],
+      "nativeOutcome": "An ACCEPTED row survives interruption and becomes RECONCILED without returning to the send path.",
+      "automatedStatus": "covered"
+    },
+    {
+      "id": "sse-disconnect-refetch",
+      "canonicalFlows": ["outbox-idempotency"],
+      "nativeOutcome": "A current-authority stream hint triggers authoritative refetch; a stale stream cannot mutate native state.",
+      "automatedStatus": "covered"
+    },
+    {
+      "id": "unread-read-ordering",
+      "canonicalFlows": ["customer-unread"],
+      "nativeOutcome": "Older observations cannot undo a newer list result or a successful rendered-through acknowledgement.",
+      "automatedStatus": "covered"
+    },
+    {
+      "id": "config-refresh-lkg",
+      "canonicalFlows": ["config-refresh"],
+      "nativeOutcome": "Conditional refresh updates the protected last-known-good projection and offline recovery retains it.",
+      "automatedStatus": "covered"
+    },
+    {
+      "id": "faq-help-rendering",
+      "canonicalFlows": ["config-refresh"],
+      "nativeOutcome": "The native messenger renders validated FAQ content locally and authorised Help Center responses directly.",
+      "automatedStatus": "partial"
+    },
+    {
+      "id": "image-boundaries",
+      "canonicalFlows": ["push-and-attachment"],
+      "nativeOutcome": "Attachment chat send remains unavailable on every surface until canonical conversation binding is defined.",
+      "automatedStatus": "contract-blocked"
+    },
+    {
+      "id": "push-registration-open-logout-isolation",
+      "canonicalFlows": ["push-and-attachment", "account-switch-boundary"],
+      "nativeOutcome": "The native Core registers the platform token, authorises every hint before presentation, and retires owner-scoped intent at logout.",
+      "automatedStatus": "covered"
+    },
+    {
+      "id": "deep-link-authorization",
+      "canonicalFlows": ["customer-unread"],
+      "nativeOutcome": "Every surface forwards the identifier to native Core and presents only after transcript authorisation succeeds.",
+      "automatedStatus": "covered"
+    },
+    {
+      "id": "permission-denial",
+      "canonicalFlows": ["config-refresh"],
+      "nativeOutcome": "Microphone and notification permission remain host or native-UI initiated; denial leaves text chat available.",
+      "automatedStatus": "partial"
+    },
+    {
+      "id": "log-redaction",
+      "canonicalFlows": ["session-lifecycle", "outbox-idempotency"],
+      "nativeOutcome": "Native and bridge diagnostics expose only structured safe fields and never content or credentials.",
+      "automatedStatus": "covered"
+    }
+  ]
+}

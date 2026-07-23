@@ -11,20 +11,31 @@ import ai.onlo.sdk.Onlo
 import ai.onlo.sdk.OnloClient
 import ai.onlo.sdk.OnloPhase
 import ai.onlo.sdk.OpenConversationOutcome
+import android.Manifest
 import android.app.Activity
 import android.app.Dialog
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Build
 import android.os.Looper
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
 import android.text.Html
+import android.util.Base64
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -37,6 +48,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 /**
  * Host-controlled Android Views presentation for the SDK-owned messenger. It creates no manifest
@@ -143,10 +155,22 @@ internal class MessengerDialog(
     private lateinit var progress: ProgressBar
     private lateinit var composer: EditText
     private lateinit var send: Button
+    private lateinit var voice: Button
+    private lateinit var speaker: Button
     private lateinit var composerRow: LinearLayout
+    private lateinit var root: LinearLayout
+    private lateinit var header: LinearLayout
+    private lateinit var headerAvatar: ImageView
+    private lateinit var headerInitials: TextView
+    private lateinit var headerName: TextView
+    private lateinit var headerSubtitle: TextView
     private var activeSurface = Surface.CONVERSATIONS
     private val streamedReplies = mutableMapOf<String, TextView>()
     private var showingEmptyState = false
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var textToSpeech: TextToSpeech? = null
+    private var isListening = false
+    private var speaksReplies = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -154,7 +178,16 @@ internal class MessengerDialog(
         setContentView(buildContent())
         setCanceledOnTouchOutside(true)
         setOnCancelListener { client.dismiss() }
-        setOnDismissListener { uiScope.cancel(); client.dismiss(); onClosed(this) }
+        setOnDismissListener {
+            stopVoice()
+            speechRecognizer?.destroy()
+            speechRecognizer = null
+            textToSpeech?.shutdown()
+            textToSpeech = null
+            uiScope.cancel()
+            client.dismiss()
+            onClosed(this)
+        }
         stateJob = uiScope.launch {
             client.presentationIntent.collect { intent ->
                 if (intent == MessengerPresentationIntent.HIDDEN && isShowing) dismiss()
@@ -170,6 +203,14 @@ internal class MessengerDialog(
         }
         uiScope.launch {
             client.messengerEvents.collect(::renderMessengerEvent)
+        }
+        client.mobileConfig?.let { snapshots ->
+            uiScope.launch {
+                snapshots.collect {
+                    applyAppearance()
+                    updateVoiceControls()
+                }
+            }
         }
     }
 
@@ -192,29 +233,70 @@ internal class MessengerDialog(
     }
 
     private fun buildContent(): View {
-        val root = LinearLayout(context).apply {
+        root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.WHITE)
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
         }
-        val header = LinearLayout(context).apply {
+        header = LinearLayout(context).apply {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(16), dp(12), dp(12), dp(12))
             background = rounded(Color.rgb(20, 89, 140), 0)
         }
-        title = TextView(context).apply {
+        headerAvatar = ImageView(context).apply {
+            contentDescription = "Support avatar"
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            visibility = View.GONE
+        }
+        headerInitials = TextView(context).apply {
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            textSize = 13f
+            background = rounded(Color.rgb(20, 89, 140), dp(16))
+            contentDescription = "Support avatar"
+        }
+        val avatarSize = LinearLayout.LayoutParams(dp(32), dp(32)).apply {
+            marginEnd = dp(8)
+        }
+        header.addView(headerAvatar, avatarSize)
+        header.addView(headerInitials, LinearLayout.LayoutParams(dp(32), dp(32)).apply {
+            marginEnd = dp(8)
+        })
+        headerName = TextView(context).apply {
             text = "Support"
             setTextColor(Color.WHITE)
             textSize = 20f
             contentDescription = "Onlo support messenger"
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) isAccessibilityHeading = true
         }
+        headerSubtitle = TextView(context).apply {
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            visibility = View.GONE
+        }
+        val headerLabels = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(headerName)
+            addView(headerSubtitle)
+        }
+        title = headerName
         val close = Button(context).apply {
             text = "Close"
             contentDescription = "Close support messenger"
             setOnClickListener { dismissFromHost() }
         }
-        header.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(headerLabels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        speaker = Button(context).apply {
+            text = "Speak"
+            contentDescription = "Speak completed support replies"
+            visibility = View.GONE
+            setOnClickListener {
+                speaksReplies = !speaksReplies
+                updateVoiceControls()
+                announce(if (speaksReplies) "Spoken replies enabled." else "Spoken replies disabled.")
+            }
+        }
+        header.addView(speaker)
         header.addView(close)
         root.addView(header)
 
@@ -282,9 +364,18 @@ internal class MessengerDialog(
             contentDescription = "Send message"
             setOnClickListener { enqueueComposer() }
         }
+        voice = Button(context).apply {
+            text = "Voice"
+            contentDescription = "Start voice input"
+            visibility = View.GONE
+            setOnClickListener { toggleVoiceInput() }
+        }
         composerRow.addView(composer, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        composerRow.addView(voice)
         composerRow.addView(send)
         root.addView(composerRow)
+        applyAppearance()
+        updateVoiceControls()
         return root
     }
 
@@ -292,6 +383,8 @@ internal class MessengerDialog(
         activeSurface = Surface.CONVERSATIONS
         activeConversationId = null
         title.text = client.mobileConfig?.value?.config?.appearance?.botName ?: "Support"
+        applyAppearance()
+        updateVoiceControls()
         composerRow.visibility = View.VISIBLE
         composer.visibility = View.VISIBLE
         send.visibility = View.VISIBLE
@@ -311,6 +404,8 @@ internal class MessengerDialog(
         activeSurface = Surface.CONVERSATIONS
         activeConversationId = conversationId
         title.text = client.mobileConfig?.value?.config?.appearance?.botName ?: "Support"
+        applyAppearance()
+        updateVoiceControls()
         composerRow.visibility = View.VISIBLE
         composer.visibility = View.VISIBLE
         send.visibility = View.VISIBLE
@@ -361,8 +456,10 @@ internal class MessengerDialog(
     }
 
     private fun selectSurface(surface: Surface) {
+        if (surface != Surface.CONVERSATIONS) stopVoice()
         activeSurface = surface
         composerRow.visibility = if (surface == Surface.CONVERSATIONS) View.VISIBLE else View.GONE
+        updateVoiceControls()
         when (surface) {
             Surface.CONVERSATIONS -> loadInbox()
             Surface.FAQ -> renderFaqs()
@@ -508,7 +605,10 @@ internal class MessengerDialog(
                 scrollToBottom()
             }
             is NativeMessengerEvent.Done -> {
-                streamedReplies.remove(event.clientMessageId)
+                val completedReply = streamedReplies.remove(event.clientMessageId)?.text?.toString()
+                if (speaksReplies && !completedReply.isNullOrBlank()) {
+                    speakCompletedReply(completedReply)
+                }
                 loadConversation(event.conversationId)
             }
             is NativeMessengerEvent.Failed -> {
@@ -546,7 +646,10 @@ internal class MessengerDialog(
         body.removeAllViews()
         if (conversations.isEmpty()) {
             showingEmptyState = true
-            body.addView(label("No conversations yet. Send a message to start one."))
+            val greeting = client.mobileConfig?.value?.config?.appearance?.greeting
+                ?.takeIf { it.isNotBlank() }
+                ?: "No conversations yet. Send a message to start one."
+            body.addView(label(greeting))
             hideStatus()
             return
         }
@@ -601,15 +704,201 @@ internal class MessengerDialog(
     private fun hideStatus() { status.visibility = View.GONE }
 
     private fun label(value: String, outgoing: Boolean = false): TextView = TextView(context).apply {
+        tag = if (outgoing) MESSAGE_OUTGOING else MESSAGE_INCOMING
         text = value
         textSize = 16f
-        setTextColor(if (outgoing) Color.WHITE else Color.rgb(25, 25, 25))
+        setTextColor(if (outgoing) outgoingTextColor() else incomingTextColor())
         setPadding(dp(12), dp(10), dp(12), dp(10))
-        background = rounded(if (outgoing) Color.rgb(20, 89, 140) else Color.rgb(239, 241, 243), dp(12))
+        background = rounded(if (outgoing) outgoingColor() else incomingColor(), dp(12))
         contentDescription = if (outgoing) "Your message" else "Support message"
         accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
     }
 
+    private fun toggleVoiceInput() {
+        if (!voiceEnabled()) return
+        if (isListening) {
+            stopVoice()
+            return
+        }
+        if (activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            activity.requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), VOICE_PERMISSION_REQUEST)
+            announce("Allow microphone access, then tap Voice again.")
+            return
+        }
+        if (!SpeechRecognizer.isRecognitionAvailable(activity)) {
+            announce("Voice input is unavailable. Text chat remains available.")
+            return
+        }
+        val recognizer = speechRecognizer ?: SpeechRecognizer.createSpeechRecognizer(activity).also {
+            speechRecognizer = it
+            it.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) = Unit
+                override fun onBeginningOfSpeech() = Unit
+                override fun onRmsChanged(rmsdB: Float) = Unit
+                override fun onBufferReceived(buffer: ByteArray?) = Unit
+                override fun onEndOfSpeech() = Unit
+                override fun onEvent(eventType: Int, params: Bundle?) = Unit
+                override fun onPartialResults(partialResults: Bundle?) {
+                    applyRecognizedText(partialResults)
+                }
+                override fun onResults(results: Bundle?) {
+                    applyRecognizedText(results)
+                    isListening = false
+                    updateVoiceControls()
+                }
+                override fun onError(error: Int) {
+                    isListening = false
+                    updateVoiceControls()
+                    announce("Voice input stopped. Text chat remains available.")
+                }
+            })
+        }
+        isListening = true
+        updateVoiceControls()
+        recognizer.startListening(
+            Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            },
+        )
+    }
+
+    private fun applyRecognizedText(results: Bundle?) {
+        val value = results
+            ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            ?.firstOrNull()
+            ?.trim()
+            .orEmpty()
+        if (value.isNotEmpty()) composer.setText(value)
+    }
+
+    private fun stopVoice() {
+        if (isListening) speechRecognizer?.stopListening()
+        isListening = false
+        if (::voice.isInitialized) updateVoiceControls()
+    }
+
+    private fun speakCompletedReply(reply: String) {
+        val existing = textToSpeech
+        if (existing != null) {
+            existing.speak(reply, TextToSpeech.QUEUE_FLUSH, null, "onlo-completed-reply")
+            return
+        }
+        var created: TextToSpeech? = null
+        created = TextToSpeech(activity) { status ->
+            if (status != TextToSpeech.SUCCESS) {
+                speaksReplies = false
+                updateVoiceControls()
+                announce("Spoken replies are unavailable. Text chat remains available.")
+            } else {
+                created?.language = Locale.getDefault()
+                created?.speak(reply, TextToSpeech.QUEUE_FLUSH, null, "onlo-completed-reply")
+            }
+        }
+        textToSpeech = created
+    }
+
+    private fun updateVoiceControls() {
+        if (!::voice.isInitialized || !::speaker.isInitialized) return
+        val available = voiceEnabled()
+        voice.visibility = if (available && activeSurface == Surface.CONVERSATIONS) View.VISIBLE else View.GONE
+        speaker.visibility = if (available && activeSurface == Surface.CONVERSATIONS) View.VISIBLE else View.GONE
+        voice.text = if (isListening) "Stop" else "Voice"
+        voice.contentDescription = if (isListening) "Stop voice input" else "Start voice input"
+        speaker.text = if (speaksReplies) "Mute" else "Speak"
+        speaker.contentDescription = if (speaksReplies) "Disable spoken replies" else "Enable spoken replies"
+    }
+
+    private fun voiceEnabled(): Boolean =
+        client.mobileConfig?.value?.config?.features?.voice == true
+
+    private fun applyAppearance() {
+        if (!::root.isInitialized || !::header.isInitialized) return
+        val appearance = client.mobileConfig?.value?.config?.appearance
+        val darkMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+            Configuration.UI_MODE_NIGHT_YES && appearance?.dark?.enabled == true
+        val background = if (darkMode) appearance?.dark?.background else appearance?.light?.background
+        root.setBackgroundColor(parseColor(background, if (darkMode) Color.BLACK else Color.WHITE))
+        header.background = rounded(parseColor(appearance?.accent, Color.rgb(20, 89, 140)), 0)
+        title.text = appearance?.botName?.ifBlank { "Support" } ?: "Support"
+        headerSubtitle.text = appearance?.botSubtitle.orEmpty()
+        headerSubtitle.visibility = if (headerSubtitle.text.isBlank()) View.GONE else View.VISIBLE
+        headerInitials.text = appearance?.headerAvatar?.text.orEmpty()
+        val avatarBitmap = appearance?.headerAvatar?.data?.let(::decodeDataImage)
+        val showsImage = appearance?.headerAvatar?.mode ==
+            ai.onlo.sdk.config.MobileConfig.HeaderAvatarMode.IMAGE && avatarBitmap != null
+        headerAvatar.visibility = if (showsImage) View.VISIBLE else View.GONE
+        headerInitials.visibility = if (showsImage) View.GONE else View.VISIBLE
+        headerAvatar.setImageBitmap(avatarBitmap)
+        val avatarDescription = appearance?.botName?.ifBlank { "Support" } ?: "Support"
+        headerAvatar.contentDescription = "$avatarDescription avatar"
+        headerInitials.contentDescription = "$avatarDescription avatar"
+        if (::body.isInitialized) {
+            for (index in 0 until body.childCount) {
+                val message = body.getChildAt(index) as? TextView ?: continue
+                when (message.tag) {
+                    MESSAGE_OUTGOING -> {
+                        message.setTextColor(outgoingTextColor())
+                        message.background = rounded(outgoingColor(), dp(12))
+                    }
+                    MESSAGE_INCOMING -> {
+                        message.setTextColor(incomingTextColor())
+                        message.background = rounded(incomingColor(), dp(12))
+                    }
+                }
+            }
+        }
+    }
+
+    private fun outgoingColor(): Int {
+        val appearance = client.mobileConfig?.value?.config?.appearance
+        val darkMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+            Configuration.UI_MODE_NIGHT_YES && appearance?.dark?.enabled == true
+        return parseColor(if (darkMode) appearance?.dark?.outgoing else appearance?.light?.outgoing, Color.rgb(20, 89, 140))
+    }
+
+    private fun outgoingTextColor(): Int {
+        val appearance = client.mobileConfig?.value?.config?.appearance
+        val darkMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+            Configuration.UI_MODE_NIGHT_YES && appearance?.dark?.enabled == true
+        return parseColor(if (darkMode) appearance?.dark?.outgoingText else appearance?.light?.outgoingText, Color.WHITE)
+    }
+
+    private fun incomingColor(): Int {
+        val appearance = client.mobileConfig?.value?.config?.appearance
+        val darkMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+            Configuration.UI_MODE_NIGHT_YES && appearance?.dark?.enabled == true
+        return parseColor(if (darkMode) appearance?.dark?.incoming else appearance?.light?.incoming, Color.rgb(239, 241, 243))
+    }
+
+    private fun incomingTextColor(): Int {
+        val appearance = client.mobileConfig?.value?.config?.appearance
+        val darkMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+            Configuration.UI_MODE_NIGHT_YES && appearance?.dark?.enabled == true
+        return parseColor(if (darkMode) appearance?.dark?.incomingText else appearance?.light?.incomingText, Color.rgb(25, 25, 25))
+    }
+
+    private fun parseColor(value: String?, fallback: Int): Int =
+        runCatching { Color.parseColor(value) }.getOrDefault(fallback)
+
+    private fun decodeDataImage(value: String): android.graphics.Bitmap? {
+        val payload = value.substringAfter(',', missingDelimiterValue = "")
+        if (!value.startsWith("data:image/") || !value.substringBefore(',').endsWith(";base64") ||
+            payload.isEmpty()
+        ) return null
+        return runCatching {
+            val bytes = Base64.decode(payload, Base64.DEFAULT)
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        }.getOrNull()
+    }
+
     private fun rounded(color: Int, radius: Int): GradientDrawable = GradientDrawable().apply { setColor(color); cornerRadius = radius.toFloat() }
     private fun dp(value: Int): Int = (value * context.resources.displayMetrics.density).toInt()
+
+    private companion object {
+        const val VOICE_PERMISSION_REQUEST = 0x0A10
+        const val MESSAGE_OUTGOING = "onlo_message_outgoing"
+        const val MESSAGE_INCOMING = "onlo_message_incoming"
+    }
 }

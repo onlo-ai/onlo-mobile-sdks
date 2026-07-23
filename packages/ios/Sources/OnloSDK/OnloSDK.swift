@@ -44,10 +44,9 @@ public actor OnloSDK {
         "persistent_outbox",
         "foreground_stream",
         "apns",
-        "media_picker",
-        "attachment_upload",
         "identity_jwt",
         "config_schema_v1",
+        "deep_link_routing",
     ]
     /// Internal dependency configuration used only by package tests and future
     /// native adapters. It is deliberately not part of the host-app API.
@@ -1330,18 +1329,10 @@ public actor OnloSDK {
         guard !message.isEmpty || !attachments.isEmpty else {
             throw OnloError.invalidConfiguration
         }
-        if !attachments.isEmpty {
-            let configState = try await configStore.loadConfigState()
-            guard let config = configState.config,
-                  config.features.fileUpload,
-                  config.mediaPolicy.enabled,
-                  attachments.count <= config.mediaPolicy.effectiveMaximumImagesPerMessage,
-                  attachments.allSatisfy({
-                      $0.attachment.size <= config.mediaPolicy.effectiveMaximumImageBytes
-                  }) else {
-                throw OnloError.invalidConfiguration
-            }
-        }
+        // Attachment upload primitives remain fixture-testable, but the current
+        // contract cannot bind a completed attachment to the canonical chat
+        // request. Keep native sending disabled until that wire gap is resolved.
+        guard attachments.isEmpty else { throw OnloError.invalidConfiguration }
         guard attachments.count <= OnloProtocol.maximumImagesPerMessage,
               attachments.allSatisfy({
                   !$0.attachment.url.isEmpty &&

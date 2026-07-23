@@ -2,4 +2,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Normal permission: enables optional connectivity recovery only. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Requested only after the customer taps the config-enabled native voice control. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 </manifest>

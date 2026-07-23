@@ -10,6 +10,7 @@ const root = fileURLToPath(new URL('../../', import.meta.url));
 const scenariosDirectory = path.join(root, 'conformance/scenarios/v1');
 const contractsDirectory = path.join(root, 'contracts/v1');
 const sharedManifestPath = path.join(root, 'conformance/shared-fixtures-v1.json');
+const releaseScenariosPath = path.join(root, 'conformance/release-scenarios-v1.json');
 const PLACEHOLDER = /(?:dummy|example|fake|mock|opaque|optional|placeholder|redacted|server-issued|synthetic)/i;
 const SENSITIVE_VALUE_KEY = /^(?:answer|authenticatedDownload|chatToken|content|intent|question|receipt|token|url|userJwt)$/i;
 const PRIVATE_KEY = /-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----/;
@@ -146,5 +147,54 @@ test('prohibited and traversing fixture paths fail before filesystem access', ()
     }));
     assert.equal(inspected, false);
     assert.equal(read, false);
+  }
+});
+
+test('the release conformance set is canonical and applies to all four surfaces', () => {
+  const release = loadJsonFile(releaseScenariosPath);
+  assert.equal(release.protocolVersion, 1);
+  assert.deepEqual(release.surfaces, [
+    'ios-native',
+    'android-native',
+    'react-native',
+    'flutter',
+  ]);
+
+  const requiredScenarios = [
+    'anonymous-chat',
+    'identified-history',
+    'account-switch-isolation',
+    'offline-enqueue-restart-reconnect',
+    'stable-id-duplicate-suppression',
+    'accepted-interruption-reconciliation',
+    'sse-disconnect-refetch',
+    'unread-read-ordering',
+    'config-refresh-lkg',
+    'faq-help-rendering',
+    'image-boundaries',
+    'push-registration-open-logout-isolation',
+    'deep-link-authorization',
+    'permission-denial',
+    'log-redaction',
+  ];
+  assert.deepEqual(release.scenarios.map(({ id }) => id), requiredScenarios);
+
+  const knownFlows = new Set(
+    readdirSync(scenariosDirectory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+      .map((entry) => entry.name.slice(0, -'.json'.length)),
+  );
+  for (const scenario of release.scenarios) {
+    assert.ok(Array.isArray(scenario.canonicalFlows) && scenario.canonicalFlows.length > 0);
+    scenario.canonicalFlows.forEach((flow) => assert.ok(
+      knownFlows.has(flow),
+      `${scenario.id} references unknown canonical flow ${flow}`,
+    ));
+    assert.equal(typeof scenario.nativeOutcome, 'string');
+    assert.ok(scenario.nativeOutcome.trim().length > 0);
+    assert.ok(
+      ['covered', 'partial', 'contract-blocked'].includes(scenario.automatedStatus),
+      `${scenario.id} has an invalid automated status`,
+    );
   }
 });

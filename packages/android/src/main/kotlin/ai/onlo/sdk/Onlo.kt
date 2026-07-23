@@ -72,6 +72,7 @@ public object Onlo {
                 ai.onlo.sdk.protocol.Capability.FCM,
                 ai.onlo.sdk.protocol.Capability.IDENTITY_JWT,
                 ai.onlo.sdk.protocol.Capability.CONFIG_SCHEMA_V1,
+                ai.onlo.sdk.protocol.Capability.DEEP_LINK_ROUTING,
             ),
         )
         val transport = OkHttpOnloTransport()
