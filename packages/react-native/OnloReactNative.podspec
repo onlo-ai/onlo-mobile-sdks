@@ -1,10 +1,10 @@
 Pod::Spec.new do |s|
-  s.name             = 'onlo_flutter'
+  s.name             = 'OnloReactNative'
   s.version          = '0.1.0'
-  s.summary          = 'Local Flutter bridge for the Onlo iOS native core.'
+  s.summary          = 'Local React Native bridge for the Onlo iOS native core.'
   s.description      = <<-DESC
-Unpublished local-development bridge. It depends on the checked-in OnloSDK pod;
-it does not download, publish, or substitute a server SDK.
+Unpublished local-development React Native bridge. It depends on the checked-in
+OnloSDK pod and never downloads, substitutes, or creates a second runtime.
   DESC
   s.homepage         = 'https://onlo.ai'
   s.license          = { :type => 'Proprietary' }
@@ -13,8 +13,9 @@ it does not download, publish, or substitute a server SDK.
   s.platform         = :ios, '15.0'
   s.swift_version    = '5.10'
   s.static_framework = true
+  s.module_name      = 'OnloReactNative'
 
-  s.source_files = 'Classes/**/*.{swift,h,m}'
-  s.dependency 'Flutter'
+  s.source_files = 'ios/Sources/**/*.{h,m,mm,swift}'
+  s.dependency 'React-Core'
   s.dependency 'OnloSDK', '0.1.0'
 end

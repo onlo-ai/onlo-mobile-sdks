@@ -32,6 +32,6 @@ Neither native link is an installable distribution artifact. The plugin is not p
 | Platform | Local link | Verification gate |
 | --- | --- | --- |
 | Android | Sibling `:onlo-android-sdk` Gradle project from `packages/android` | Android API 35 licence acceptance and a real Flutter Android host build. |
-| iOS | Sibling `packages/ios/Sources/OnloSDK` compiled into the `onlo_flutter` pod | Full Xcode/XCTest and a real Flutter iOS host build. Do not also add the SwiftPM product. |
+| iOS | `onlo_flutter` pod plus one sibling `OnloSDK` pod from `packages/ios` | Declare the local `OnloSDK` pod in the host Podfile; do not also add the SwiftPM product. |
 
 See the [API contract](../../docs/api-contract.md), [`@onlo/protocol`](../protocol/src/index.ts), and [delivery plan](../../docs/delivery-plan.md).

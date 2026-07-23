@@ -1,4 +1,5 @@
 import Foundation
+@_spi(FrameworkBridge) import OnloSDK
 
 #if canImport(UIKit)
 import UIKit

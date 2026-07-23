@@ -8,7 +8,11 @@ void main() {
     final source = await File(
       'ios/Classes/OnloFlutterPlugin.swift',
     ).readAsString();
+    final podspec = await File('ios/onlo_flutter.podspec').readAsString();
 
+    expect(source, contains('import OnloSDK'));
+    expect(podspec, contains("s.dependency 'OnloSDK', '0.1.0'"));
+    expect(podspec, isNot(contains('Sources/OnloSDK/**/*.swift')));
     expect(source, contains('observeFrameworkState()'));
     expect(source, contains('snapshot.unreadCount'));
     expect(source, contains('"unreadCount"'));

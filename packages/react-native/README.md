@@ -2,7 +2,7 @@
 
 Typed React Native facade over the iOS and Android Onlo native cores. JavaScript owns no session, credential, transcript, outbox, push registry, transport, or messenger UI state.
 
-> **Status:** Unpublished (`private: true`). Android and iOS adapters are implemented against their sibling native cores. iOS source has not yet completed a full Xcode/React Native host compile.
+> **Status:** Unpublished (`private: true`). Android and iOS adapters are implemented against their sibling native cores. Release-host validation still requires local native dependency declarations until publication coordinates exist.
 
 The typed native-event API requires React Native 0.79 or newer.
 
@@ -33,7 +33,7 @@ Neither native link is an installable distribution artifact. The package is not 
 | Platform | Local link | Host constraint |
 | --- | --- | --- |
 | Android | Sibling `:onlo-android-sdk` Gradle project from `packages/android` | A local host/example must include the same project dependency until release artifacts exist. |
-| iOS | Sibling `packages/ios/Sources/OnloSDK` compiled into the `OnloReactNative` pod | Do not add the SwiftPM `OnloSDK` product to the app target; that would create a second native core. Full Xcode and a React Native iOS host compile remain pending. |
+| iOS | `OnloReactNative` pod plus one sibling `OnloSDK` pod from `packages/ios` | Declare the local `OnloSDK` pod in the host Podfile; do not also add the SwiftPM product. |
 
 The host obtains `userJwt` from its Operator backend. Never generate or persist it in JavaScript. Expo Go cannot load this custom native module; use a development build.
 

@@ -1,7 +1,7 @@
 #import <React/RCTBridgeModule.h>
 #import <React/RCTEventEmitter.h>
 #import <React/RCTUtils.h>
-#import <OnloReactNative/OnloReactNative-Swift.h>
+#import "OnloReactNative-Swift.h"
 #import <UIKit/UIKit.h>
 
 #if __has_include(<OnloSDKSpec/OnloSDKSpec.h>)
@@ -30,9 +30,9 @@ RCT_EXPORT_MODULE(OnloSDK)
 
 - (instancetype)init {
   if ((self = [super init])) {
-    __weak typeof(self) weakSelf = self;
+    __weak __typeof__(self) weakSelf = self;
     _nativeBridge = [[OnloReactNativeIOSBridge alloc] initWithEventSink:^(NSDictionary *event) {
-      typeof(self) strongSelf = weakSelf;
+      __typeof__(self) strongSelf = weakSelf;
       if (strongSelf != nil) [strongSelf sendEventWithName:@"onOnloEvent" body:event];
     }];
   }

@@ -1,9 +1,10 @@
 import Flutter
 import Foundation
+@_spi(FrameworkBridge) import OnloSDK
 import UIKit
 
 /// Flutter's iOS boundary owns neither credentials nor customer content. The
-/// checked-in OnloSDK sources compile into this local development pod, so all
+/// the bridge imports the single native OnloSDK module, so all
 /// session, protected storage, push intent, lifecycle, and UI work stays native.
 @MainActor
 public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
@@ -20,7 +21,7 @@ public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHand
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = OnloFlutterPlugin()
-        instance.hostViewController = registrar.viewController()
+        instance.hostViewController = registrar.viewController
         let methods = FlutterMethodChannel(name: "ai.onlo/onlo_flutter", binaryMessenger: registrar.messenger())
         registrar.addMethodCallDelegate(instance, channel: methods)
         let events = FlutterEventChannel(name: "ai.onlo/onlo_flutter/state", binaryMessenger: registrar.messenger())

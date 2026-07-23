@@ -1,9 +1,12 @@
+import com.android.build.api.dsl.LibraryExtension
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     id("com.android.library")
     kotlin("android")
 }
 
-android {
+extensions.configure<LibraryExtension> {
     namespace = "ai.onlo.sdk"
     compileSdk = 35
     buildToolsVersion = "35.0.0"
@@ -23,8 +26,11 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
     }
 }
 

@@ -57,11 +57,12 @@ test('Android adapter contains no parallel storage, transport, or sensitive logg
 test('autolinking registers the Android package and local iOS pod', () => {
   assert.match(packageSource, /listOf\(OnloSDKModule\(reactContext\)\)/);
   assert.match(configSource, /sourceDir: '\.\/android'/);
-  assert.match(configSource, /podspecPath: '\.\/ios\/OnloReactNative\.podspec'/);
+  assert.match(configSource, /ios: \{\}/);
 });
 
-test('Android core declares only available FCM push capability, never attachment capability', () => {
+test('Android core declares native push and attachment capabilities', () => {
   assert.match(coreInitializerSource, /Capability\.FCM/);
   assert.match(coreInitializerSource, /Capability\.DEEP_LINK_ROUTING/);
-  assert.doesNotMatch(coreInitializerSource, /Capability\.(MEDIA_PICKER|ATTACHMENT_UPLOAD)/);
+  assert.match(coreInitializerSource, /Capability\.MEDIA_PICKER/);
+  assert.match(coreInitializerSource, /Capability\.ATTACHMENT_UPLOAD/);
 });

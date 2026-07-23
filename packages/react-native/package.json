@@ -10,7 +10,7 @@
     "android/build.gradle",
     "android/consumer-rules.pro",
     "android/src",
-    "ios/OnloReactNative.podspec",
+    "OnloReactNative.podspec",
     "ios/Sources",
     "react-native.config.js",
     "src"

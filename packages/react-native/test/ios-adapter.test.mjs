@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-const podspec = await readFile(new URL('../ios/OnloReactNative.podspec', import.meta.url), 'utf8');
+const podspec = await readFile(new URL('../OnloReactNative.podspec', import.meta.url), 'utf8');
 const swift = await readFile(new URL('../ios/Sources/OnloReactNativeIOSBridge.swift', import.meta.url), 'utf8');
 const module = await readFile(new URL('../ios/Sources/OnloSDKModule.mm', import.meta.url), 'utf8');
 const config = await readFile(new URL('../react-native.config.js', import.meta.url), 'utf8');
@@ -23,12 +23,10 @@ test('iOS adapter delegates the public RN surface to one native OnloSDK core', (
 });
 
 test('iOS adapter is a local autolinked pod with no parallel persistence, network, or content state', () => {
-  assert.match(config, /podspecPath: '\.\/ios\/OnloReactNative\.podspec'/);
-  assert.match(podspec, /\.\.\/\.\.\/ios\/Sources\/OnloSDK\/\*\*\/\*\.swift/);
-  assert.match(podspec, /do not add the SwiftPM product/);
-  assert.match(podspec, /SWIFT_INCLUDE_PATHS' => '\$\(PODS_TARGET_SRCROOT\)\/\.\.\/\.\.\/ios\/Sources\/CSQLite'/);
-  assert.match(podspec, /OTHER_SWIFT_FLAGS.*-fmodule-map-file=.*CSQLite\/module\.modulemap/);
-  assert.match(podspec, /OTHER_CFLAGS.*-fmodule-map-file=.*CSQLite\/module\.modulemap/);
+  assert.match(config, /ios: \{\}/);
+  assert.match(podspec, /s\.dependency 'OnloSDK', '0\.1\.0'/);
+  assert.match(swift, /import OnloSDK/);
+  assert.doesNotMatch(podspec, /Sources\/OnloSDK\/\*\*/);
   assert.doesNotMatch(swift, /UserDefaults|AsyncStorage|URLSession|SQLite|chatToken|clientMessageId|message\.text|print\(|NSLog/);
   assert.doesNotMatch(module, /UserDefaults|AsyncStorage|URLSession|SQLite|NSLog|printf|console/);
   assert.match(swift, /observeFrameworkState\(\)/);
