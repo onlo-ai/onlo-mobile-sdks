@@ -15,7 +15,7 @@ device evidence. The canonical capability status remains the
 | Candidate version | `0.1.0` |
 | Core freeze | `f402ddd` |
 | Server protocol | v1, unchanged |
-| Public client APIs | Unchanged by Core freeze; image option retained but disabled |
+| Public client APIs | Unchanged; native messenger image capability enabled through internal Widget adapters |
 | Persistence schema | Unchanged |
 | Release decision | Blocked pending the dependencies and approvals below |
 
@@ -33,7 +33,7 @@ device evidence. The canonical capability status remains the
 | Unread/read ordering | Deterministic Core pass | Deterministic Core pass | Aggregate mapping pass; host journey pending | Aggregate mapping pass; host journey pending | Pending |
 | Config refresh/LKG | Core/unit pass | Core/unit pass | Inherits native; host journey pending | Inherits native; host journey pending | Pending |
 | FAQ/Help rendering | Native logic/build pass; interaction pending | Native logic/build pass; interaction pending | Native presentation only | Native presentation only | Pending |
-| Image boundaries | Send path safely disabled | Send path safely disabled | Inherits disabled native path | Inherits disabled native path | Contract-blocked |
+| Image boundaries | Focused Widget grant/dispatcher tests pass | Focused Widget grant/dispatcher tests pass | Inherits native path; host journey pending | Inherits native path; host journey pending | Pending |
 | Push registration/open/logout isolation | Deterministic Core pass | Deterministic Core pass | Typed forwarding pass; provider journey pending | Typed forwarding pass; provider journey pending | Pending |
 | Deep-link authorization | Core/unit pass | Core/unit pass | Identifier forwarding pass; host journey pending | Identifier forwarding pass; host journey pending | Pending |
 | Permission denial | Build pass; interaction pending | Build pass; interaction pending | Native UI only | Native UI only | Pending |
@@ -47,8 +47,9 @@ the native journey.
 
 | Boundary | Command | Result |
 | --- | --- | --- |
-| Android phase boundary | `packages/android/gradlew -p packages/android testDebugUnitTest` | 110 passed, 0 failed |
-| iOS phase boundary | `swift test --package-path packages/ios` | 107 passed, 0 failed |
+| Server mobile suite | `node --import tsx --test src/lib/__tests__/mobile-sdk-*.test.ts` | 138 passed, 0 failed |
+| Android phase boundary | `packages/android/gradlew -p packages/android testDebugUnitTest` | 112 passed, 0 failed |
+| iOS phase boundary | `swift test --package-path packages/ios` | 108 passed, 0 failed |
 | React Native bridge | `npm --prefix packages/react-native test` | 17 passed, 0 failed |
 | Flutter bridge | `(cd packages/flutter && flutter test)` | 8 passed, 0 failed |
 | Shared release scenarios | `npm run test:conformance` | 3 passed, 0 failed |
@@ -103,17 +104,16 @@ required signed distribution configuration is absent.
 
 ## Remaining blockers by dependency
 
-1. **Server/product contract:** define attachment-to-conversation binding before
-   enabling images; define attestation proof shape and enforcement policy.
-2. **Release engineering:** approve package coordinates, public repositories,
+1. **Release engineering:** approve package coordinates, public repositories,
    signing identities, signing custody, and version/tag ownership.
-3. **Host builds:** compile release-mode native, React Native, and Flutter hosts
+2. **Host builds:** compile release-mode native, React Native, and Flutter hosts
    on both platforms with one native Core per app.
-4. **Physical devices:** execute every shared scenario, including APNs/FCM,
+3. **Physical devices:** execute every shared scenario, including attachment
+   picker/camera, expired-grant retry, policy toggles, APNs/FCM,
    permissions, background recovery, accessibility, and log inspection.
-5. **Controlled service access:** approve a pilot target, public/review release
+4. **Controlled service access:** approve a pilot target, public/review release
    state, synthetic accounts, and rollback owner.
-6. **Publication:** sign, publish, verify clean-host install commands, then copy
+5. **Publication:** sign, publish, verify clean-host install commands, then copy
    those exact verified commands into the dashboard.
 
 ## Approval and deployment actions

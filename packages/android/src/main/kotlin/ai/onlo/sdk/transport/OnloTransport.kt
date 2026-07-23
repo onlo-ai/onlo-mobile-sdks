@@ -144,6 +144,31 @@ internal class ProtocolRequestFactory(
             .build(),
     )
 
+    fun widgetAttachmentUpload(
+        chatToken: String,
+        conversationId: String?,
+        previousGrant: String? = null,
+        fileName: String,
+        mimeType: String,
+        file: java.io.File,
+    ): OnloHttpRequest = OnloHttpRequest(
+        method = "POST",
+        url = endpoint("api/widget/attachments"),
+        headers = mapOf("Authorization" to "Bearer $chatToken"),
+        body = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .apply {
+                conversationId?.takeIf(String::isNotBlank)?.let {
+                    addFormDataPart("conversationId", it)
+                }
+                previousGrant?.takeIf(String::isNotBlank)?.let {
+                    addFormDataPart("previousGrant", it)
+                }
+            }
+            .addFormDataPart("files", fileName, file.asRequestBody(mimeType.toMediaType()))
+            .build(),
+    )
+
     fun chat(chatToken: String, value: ChatRequest): OnloHttpRequest = jsonPost(
         path = "api/widget/chat",
         body = ProtocolJsonCodec.encodeChatRequest(value),

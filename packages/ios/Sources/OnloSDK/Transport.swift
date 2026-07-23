@@ -93,10 +93,18 @@ public final class URLSessionOnloTransport: OnloChatSSETransport, OnloForeground
                         // Widget failures intentionally have no v1 envelope.
                         guard let error = try? JSONDecoder().decode(WidgetErrorResponse.self, from: body),
                               !error.error.isEmpty else { throw OnloError.invalidResponse }
+                        let attachmentCodes = [
+                            "attachment_grant_expired",
+                            "invalid_attachment_grant",
+                            APIErrorCode.mediaUnavailable.rawValue,
+                        ]
+                        let safeCode = attachmentCodes.contains(error.error)
+                            ? error.error
+                            : "widget_http_\(response.statusCode)"
                         if let requestId {
-                            throw OnloError.correlatedTransport(code: "widget_http_\(response.statusCode)", requestId: requestId)
+                            throw OnloError.correlatedTransport(code: safeCode, requestId: requestId)
                         }
-                        throw OnloError.transport(code: "widget_http_\(response.statusCode)")
+                        throw OnloError.transport(code: safeCode)
                     }
                     var dataLines: [String] = []
                     for try await line in bytes.lines {
@@ -322,6 +330,48 @@ public struct OnloRequestFactory: Sendable {
         append("\r\n--\(boundary)--\r\n", to: &body)
 
         var request = try authorizedRequest(path: "/api/sdk/v1/attachments/complete", method: "POST", chatToken: chatToken)
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        return request
+    }
+
+    func widgetAttachmentUpload(
+        conversationId: String?,
+        previousGrant: String? = nil,
+        fileData: Data,
+        filename: String,
+        mimeType: ImageMimeType,
+        chatToken: String
+    ) throws -> URLRequest {
+        guard !filename.isEmpty,
+              !fileData.isEmpty,
+              fileData.count <= OnloProtocol.maximumImageBytes else {
+            throw OnloError.invalidConfiguration
+        }
+        let boundary = "OnloSDK-" + UUID().uuidString
+        var body = Data()
+        if let conversationId, !conversationId.isEmpty {
+            append("--\(boundary)\r\n", to: &body)
+            append("Content-Disposition: form-data; name=\"conversationId\"\r\n\r\n", to: &body)
+            append(conversationId, to: &body)
+            append("\r\n", to: &body)
+        }
+        if let previousGrant, !previousGrant.isEmpty {
+            append("--\(boundary)\r\n", to: &body)
+            append("Content-Disposition: form-data; name=\"previousGrant\"\r\n\r\n", to: &body)
+            append(previousGrant, to: &body)
+            append("\r\n", to: &body)
+        }
+        append("--\(boundary)\r\n", to: &body)
+        append(
+            "Content-Disposition: form-data; name=\"files\"; filename=\"\(sanitizedFilename(filename))\"\r\n",
+            to: &body
+        )
+        append("Content-Type: \(mimeType.rawValue)\r\n\r\n", to: &body)
+        body.append(fileData)
+        append("\r\n--\(boundary)--\r\n", to: &body)
+
+        var request = try authorizedRequest(path: "/api/widget/attachments", method: "POST", chatToken: chatToken)
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
         return request

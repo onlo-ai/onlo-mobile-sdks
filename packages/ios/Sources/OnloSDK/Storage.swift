@@ -293,10 +293,26 @@ public enum OutboxState: String, Codable, Sendable, Equatable {
 public struct OutboxAttachment: Codable, Sendable, Equatable {
     public let attachment: ChatAttachment
     public let receiptExpiresAt: String?
+    let stagedData: Data?
+    let uploadConversationId: String?
 
     public init(attachment: ChatAttachment, receiptExpiresAt: String? = nil) {
         self.attachment = attachment
         self.receiptExpiresAt = receiptExpiresAt
+        self.stagedData = nil
+        self.uploadConversationId = nil
+    }
+
+    init(
+        attachment: ChatAttachment,
+        grantExpiresAt: String,
+        stagedData: Data,
+        uploadConversationId: String?
+    ) {
+        self.attachment = attachment
+        self.receiptExpiresAt = grantExpiresAt
+        self.stagedData = stagedData
+        self.uploadConversationId = uploadConversationId
     }
 }
 
@@ -306,6 +322,7 @@ public struct OutboxEntry: Codable, Sendable, Equatable {
     public let clientMessageId: UUID
     public let ownerScope: OwnerScope
     public let conversationId: String?
+    public let routingSessionId: String?
     public let message: String
     public let attachments: [OutboxAttachment]
     public let createdAt: Date
@@ -321,6 +338,7 @@ public struct OutboxEntry: Codable, Sendable, Equatable {
         clientMessageId: UUID = UUID(),
         ownerScope: OwnerScope,
         conversationId: String? = nil,
+        routingSessionId: String? = nil,
         message: String,
         attachments: [OutboxAttachment] = [],
         createdAt: Date = Date(),
@@ -335,6 +353,7 @@ public struct OutboxEntry: Codable, Sendable, Equatable {
         self.clientMessageId = clientMessageId
         self.ownerScope = ownerScope
         self.conversationId = conversationId
+        self.routingSessionId = routingSessionId
         self.message = message
         self.attachments = attachments
         self.createdAt = createdAt
@@ -446,6 +465,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
 
     private struct EncryptedPayload: Codable, Sendable {
         let conversationId: String?
+        let routingSessionId: String?
         let message: String
         let attachments: [OutboxAttachment]
         let createdAt: Date
@@ -515,7 +535,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
             try bind([entry.ownerScope.id.uuidString], to: row)
             guard sqlite3_step(row) == SQLITE_ROW else { throw OnloError.persistenceUnavailable }
             let next = sqlite3_column_int64(row, 0) + 1
-            let value = OutboxEntry(clientMessageId: entry.clientMessageId, ownerScope: entry.ownerScope, conversationId: entry.conversationId, message: entry.message, attachments: entry.attachments, createdAt: entry.createdAt, orderingKey: next, state: entry.state, attemptCount: entry.attemptCount, nextAttemptAt: entry.nextAttemptAt, lastErrorCode: entry.lastErrorCode, serverMessageId: entry.serverMessageId, aiRunId: entry.aiRunId)
+            let value = OutboxEntry(clientMessageId: entry.clientMessageId, ownerScope: entry.ownerScope, conversationId: entry.conversationId, routingSessionId: entry.routingSessionId, message: entry.message, attachments: entry.attachments, createdAt: entry.createdAt, orderingKey: next, state: entry.state, attemptCount: entry.attemptCount, nextAttemptAt: entry.nextAttemptAt, lastErrorCode: entry.lastErrorCode, serverMessageId: entry.serverMessageId, aiRunId: entry.aiRunId)
             let payload = try encrypt(value)
             try execute("INSERT INTO outbox(client_message_id, scope_id, state, attempt_count, next_attempt_at, ordering_key, payload) VALUES(?, ?, ?, ?, ?, ?, ?)", values: [value.clientMessageId.uuidString, value.ownerScope.id.uuidString, value.state.rawValue, value.attemptCount, value.nextAttemptAt?.timeIntervalSince1970, value.orderingKey, payload], db: db)
             assigned = value
@@ -613,7 +633,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
                       let stateText = sqliteText(statement, 1), let state = OutboxState(rawValue: stateText),
                       let payloadData = sqliteData(statement, 5) else { throw OnloError.invalidState }
                 let payload = try decrypt(payloadData)
-                entries.append(OutboxEntry(clientMessageId: id, ownerScope: scope, conversationId: payload.conversationId, message: payload.message, attachments: payload.attachments, createdAt: payload.createdAt, orderingKey: sqlite3_column_int64(statement, 4), state: state, attemptCount: Int(sqlite3_column_int(statement, 2)), nextAttemptAt: sqlite3_column_type(statement, 3) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)), lastErrorCode: payload.lastErrorCode, serverMessageId: payload.serverMessageId, aiRunId: payload.aiRunId))
+                entries.append(OutboxEntry(clientMessageId: id, ownerScope: scope, conversationId: payload.conversationId, routingSessionId: payload.routingSessionId, message: payload.message, attachments: payload.attachments, createdAt: payload.createdAt, orderingKey: sqlite3_column_int64(statement, 4), state: state, attemptCount: Int(sqlite3_column_int(statement, 2)), nextAttemptAt: sqlite3_column_type(statement, 3) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)), lastErrorCode: payload.lastErrorCode, serverMessageId: payload.serverMessageId, aiRunId: payload.aiRunId))
                 stepResult = sqlite3_step(statement)
             }
         } catch {
@@ -816,7 +836,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
 
     private func encrypt(_ entry: OutboxEntry) throws -> Data {
         guard let encryptionKey else { throw OnloError.invalidState }
-        let payload = EncryptedPayload(conversationId: entry.conversationId, message: entry.message, attachments: entry.attachments, createdAt: entry.createdAt, lastErrorCode: entry.lastErrorCode, serverMessageId: entry.serverMessageId, aiRunId: entry.aiRunId)
+        let payload = EncryptedPayload(conversationId: entry.conversationId, routingSessionId: entry.routingSessionId, message: entry.message, attachments: entry.attachments, createdAt: entry.createdAt, lastErrorCode: entry.lastErrorCode, serverMessageId: entry.serverMessageId, aiRunId: entry.aiRunId)
         let data = try encoder.encode(payload)
         guard let combined = try AES.GCM.seal(data, using: encryptionKey).combined else {
             throw OnloError.credentialStore(code: "owner_store_encrypt_failed")
@@ -965,7 +985,7 @@ public actor InMemoryOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisti
     public func enqueueAssigningOrder(_ entry: OutboxEntry) async throws -> OutboxEntry {
         guard !blockedScopes.contains(entry.ownerScope) else { throw OnloError.invalidState }
         let next = (entries[entry.ownerScope, default: [:]].values.map(\.orderingKey).max() ?? 0) + 1
-        let value = OutboxEntry(clientMessageId: entry.clientMessageId, ownerScope: entry.ownerScope, conversationId: entry.conversationId, message: entry.message, attachments: entry.attachments, createdAt: entry.createdAt, orderingKey: next, state: entry.state, attemptCount: entry.attemptCount, nextAttemptAt: entry.nextAttemptAt, lastErrorCode: entry.lastErrorCode, serverMessageId: entry.serverMessageId, aiRunId: entry.aiRunId)
+        let value = OutboxEntry(clientMessageId: entry.clientMessageId, ownerScope: entry.ownerScope, conversationId: entry.conversationId, routingSessionId: entry.routingSessionId, message: entry.message, attachments: entry.attachments, createdAt: entry.createdAt, orderingKey: next, state: entry.state, attemptCount: entry.attemptCount, nextAttemptAt: entry.nextAttemptAt, lastErrorCode: entry.lastErrorCode, serverMessageId: entry.serverMessageId, aiRunId: entry.aiRunId)
         entries[entry.ownerScope, default: [:]][value.clientMessageId] = value
         return value
     }

@@ -215,6 +215,19 @@ export interface AttachmentCompleteResult {
   authenticatedDownload: string;
 }
 
+export interface WidgetAttachmentUploadResult {
+  success: true;
+  attachments: Array<{
+    id: string;
+    url: string;
+    type: ImageMimeType;
+    name: string;
+    size: number;
+    grant: string;
+    grantExpiresAt: string;
+  }>;
+}
+
 export interface UnsupportedSetting {
   code: string;
   setting: string;
@@ -355,6 +368,7 @@ export interface ChatAttachment {
   size: number;
   sha256?: string;
   receipt?: string;
+  grant?: string;
 }
 
 export interface ChatRequest {

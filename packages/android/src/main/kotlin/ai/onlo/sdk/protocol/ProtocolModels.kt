@@ -256,6 +256,17 @@ public data class ChatAttachment(
     val size: Long,
     val sha256: String? = null,
     val receipt: String? = null,
+    val grant: String? = null,
+)
+
+internal data class WidgetUploadedAttachment(
+    val id: String,
+    val url: String,
+    val type: String,
+    val name: String,
+    val size: Long,
+    val grant: String,
+    val grantExpiresAt: String,
 )
 
 public data class ChatRequest(

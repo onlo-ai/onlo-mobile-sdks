@@ -10,16 +10,21 @@ import ai.onlo.sdk.NativeMessengerEvent
 import ai.onlo.sdk.Onlo
 import ai.onlo.sdk.OnloClient
 import ai.onlo.sdk.OnloPhase
+import ai.onlo.sdk.OnloException
 import ai.onlo.sdk.OpenConversationOutcome
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.Dialog
+import android.app.Fragment
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.BitmapFactory
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.os.Build
 import android.os.Looper
@@ -49,6 +54,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import java.io.ByteArrayOutputStream
 
 /**
  * Host-controlled Android Views presentation for the SDK-owned messenger. It creates no manifest
@@ -115,6 +121,106 @@ public object OnloMessenger {
     }
 }
 
+@Suppress("DEPRECATION")
+internal class AttachmentPickerFragment : Fragment() {
+    enum class Source { LIBRARY, CAMERA }
+
+    var onImage: ((Bitmap) -> Unit)? = null
+    var onFailure: (() -> Unit)? = null
+    private var pendingSource: Source? = null
+
+    fun launch(source: Source) {
+        pendingSource = source
+        if (
+            source == Source.CAMERA &&
+            checkNotNull(activity).checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION)
+            return
+        }
+        launchIntent(source)
+    }
+
+    private fun launchIntent(source: Source) {
+        val intent = if (source == Source.LIBRARY) {
+            Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "image/*"
+            }
+        } else {
+            Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE)
+        }
+        runCatching { startActivityForResult(intent, if (source == Source.LIBRARY) LIBRARY else CAMERA) }
+            .onFailure { onFailure?.invoke() }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != CAMERA_PERMISSION) return
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            launchIntent(Source.CAMERA)
+        } else {
+            onFailure?.invoke()
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != Activity.RESULT_OK) return
+        val bitmap = when (requestCode) {
+            LIBRARY -> data?.data?.let(::decodeLibraryImage)
+            CAMERA -> if (Build.VERSION.SDK_INT >= 33) {
+                data?.getParcelableExtra("data", Bitmap::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                data?.getParcelableExtra("data") as? Bitmap
+            }
+            else -> null
+        }
+        if (bitmap != null) onImage?.invoke(bitmap) else onFailure?.invoke()
+    }
+
+    private fun decodeLibraryImage(uri: Uri): Bitmap? {
+        val resolver = activity?.contentResolver ?: return null
+        val source = resolver.openInputStream(uri)?.use { input ->
+            val output = ByteArrayOutputStream()
+            val buffer = ByteArray(16 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                output.write(buffer, 0, read)
+                if (output.size() > MAX_SOURCE_IMAGE_BYTES) return null
+            }
+            output.toByteArray()
+        } ?: return null
+        if (source.isEmpty()) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(source, 0, source.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sample = 1
+        while (
+            bounds.outWidth / sample > 4_096 ||
+            bounds.outHeight / sample > 4_096 ||
+            (bounds.outWidth.toLong() / sample) * (bounds.outHeight.toLong() / sample) > 16_000_000L
+        ) {
+            sample *= 2
+        }
+        val options = BitmapFactory.Options().apply { inSampleSize = sample }
+        return BitmapFactory.decodeByteArray(source, 0, source.size, options)
+    }
+
+    private companion object {
+        const val LIBRARY = 0x0A21
+        const val CAMERA = 0x0A22
+        const val CAMERA_PERMISSION = 0x0A23
+        const val MAX_SOURCE_IMAGE_BYTES = 25 * 1024 * 1024
+    }
+}
+
 internal data class ConversationOpenDecision(
     val outcome: OpenConversationOutcome,
     val attachMessenger: Boolean,
@@ -148,6 +254,8 @@ internal class MessengerDialog(
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var stateJob: Job? = null
     private var activeConversationId: String? = null
+    private var activeSessionId: String? = null
+    private val pendingAttachments = mutableListOf<OnloClient.PendingNativeAttachment>()
     private lateinit var title: TextView
     private lateinit var status: TextView
     private lateinit var body: LinearLayout
@@ -156,6 +264,7 @@ internal class MessengerDialog(
     private lateinit var composer: EditText
     private lateinit var send: Button
     private lateinit var voice: Button
+    private lateinit var attach: Button
     private lateinit var speaker: Button
     private lateinit var composerRow: LinearLayout
     private lateinit var root: LinearLayout
@@ -209,6 +318,7 @@ internal class MessengerDialog(
                 snapshots.collect {
                     applyAppearance()
                     updateVoiceControls()
+                    updateAttachmentControl()
                 }
             }
         }
@@ -370,18 +480,27 @@ internal class MessengerDialog(
             visibility = View.GONE
             setOnClickListener { toggleVoiceInput() }
         }
+        attach = Button(context).apply {
+            text = "Image"
+            contentDescription = "Add image"
+            setOnClickListener { chooseImageSource() }
+        }
+        composerRow.addView(attach)
         composerRow.addView(composer, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         composerRow.addView(voice)
         composerRow.addView(send)
         root.addView(composerRow)
         applyAppearance()
         updateVoiceControls()
+        updateAttachmentControl()
         return root
     }
 
     private fun loadInbox() {
         activeSurface = Surface.CONVERSATIONS
         activeConversationId = null
+        activeSessionId = null
+        pendingAttachments.clear()
         title.text = client.mobileConfig?.value?.config?.appearance?.botName ?: "Support"
         applyAppearance()
         updateVoiceControls()
@@ -415,6 +534,7 @@ internal class MessengerDialog(
             if (activeSurface != Surface.CONVERSATIONS) return@launch
             when (result) {
                 is MessengerTranscriptResult.Ready -> {
+                    activeSessionId = result.transcript.sessionId
                     renderTranscript(result.transcript)
                     result.transcript.messages.maxByOrNull { it.timestamp }?.let {
                         runCatching {
@@ -422,7 +542,11 @@ internal class MessengerDialog(
                         }
                     }
                 }
-                is MessengerTranscriptResult.Stale -> { renderTranscript(result.transcript); showStatus("Offline. Showing saved conversation.") }
+                is MessengerTranscriptResult.Stale -> {
+                    activeSessionId = result.transcript.sessionId
+                    renderTranscript(result.transcript)
+                    showStatus("Offline. Showing saved conversation.")
+                }
                 MessengerTranscriptResult.NoActiveSession -> renderUnavailable("Session changed. Reopen support to continue.")
                 MessengerTranscriptResult.NotAuthorised -> renderUnavailable("This conversation is unavailable.")
                 MessengerTranscriptResult.Unavailable -> renderUnavailable("Offline. Conversation refresh is unavailable.")
@@ -432,15 +556,21 @@ internal class MessengerDialog(
 
     private fun enqueueComposer() {
         val message = composer.text?.toString()?.trim().orEmpty()
-        if (message.isEmpty()) {
+        if (message.isEmpty() && pendingAttachments.isEmpty()) {
             announce("Enter a message before sending.")
             return
         }
         send.isEnabled = false
         uiScope.launch {
             try {
-                client.sendTextFromNativeUi(message) { clientMessageId ->
+                client.sendTextFromNativeUi(
+                    message = message,
+                    routingSessionId = activeSessionId,
+                    attachments = pendingAttachments.toList(),
+                ) { clientMessageId ->
                     composer.setText("")
+                    pendingAttachments.clear()
+                    updateAttachmentControl()
                     appendMessage(label(message, outgoing = true))
                     streamedReplies.remove(clientMessageId)
                 }
@@ -451,6 +581,89 @@ internal class MessengerDialog(
                 announce("Support is not ready. Try again shortly.")
             } finally {
                 send.isEnabled = true
+            }
+        }
+    }
+
+    private fun attachmentsEnabled(): Boolean {
+        val config = client.mobileConfig?.value?.config ?: return false
+        return config.features.fileUpload &&
+            config.mediaPolicy.enabled &&
+            config.compatibility.capabilities.contains(ai.onlo.sdk.protocol.Capability.MEDIA_PICKER) &&
+            config.compatibility.capabilities.contains(ai.onlo.sdk.protocol.Capability.ATTACHMENT_UPLOAD)
+    }
+
+    private fun updateAttachmentControl() {
+        if (!::attach.isInitialized) return
+        val config = client.mobileConfig?.value?.config
+        attach.visibility = if (attachmentsEnabled()) View.VISIBLE else View.GONE
+        attach.isEnabled = attachmentsEnabled() &&
+            pendingAttachments.size < (config?.mediaPolicy?.effectiveMaximumImagesPerMessage ?: 0)
+        attach.text = if (pendingAttachments.isEmpty()) "Image" else "Image (${pendingAttachments.size})"
+    }
+
+    private fun chooseImageSource() {
+        if (!attachmentsEnabled()) return
+        AlertDialog.Builder(activity)
+            .setItems(arrayOf("Photo library", "Camera")) { _, index ->
+                pickerFragment().launch(
+                    if (index == 0) AttachmentPickerFragment.Source.LIBRARY
+                    else AttachmentPickerFragment.Source.CAMERA,
+                )
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun pickerFragment(): AttachmentPickerFragment {
+        val tag = "onlo-attachment-picker"
+        val existing = activity.fragmentManager.findFragmentByTag(tag) as? AttachmentPickerFragment
+        return (existing ?: AttachmentPickerFragment().also {
+            activity.fragmentManager.beginTransaction().add(it, tag).commitNow()
+        }).apply {
+            onImage = ::prepareAndUpload
+            onFailure = { showStatus("Image could not be added.") }
+        }
+    }
+
+    private fun prepareAndUpload(bitmap: Bitmap) {
+        uiScope.launch {
+            try {
+                val config = client.mobileConfig?.value?.config ?: throw IllegalStateException()
+                val edgeScale = minOf(
+                    1.0,
+                    4_096.0 / bitmap.width.toDouble(),
+                    4_096.0 / bitmap.height.toDouble(),
+                    kotlin.math.sqrt(16_000_000.0 / (bitmap.width.toDouble() * bitmap.height.toDouble())),
+                )
+                val candidate = if (edgeScale < 1.0) Bitmap.createScaledBitmap(
+                    bitmap,
+                    maxOf(1, (bitmap.width * edgeScale).toInt()),
+                    maxOf(1, (bitmap.height * edgeScale).toInt()),
+                    true,
+                ) else bitmap
+                var prepared: ByteArray? = null
+                for (quality in listOf(90, 82, 74)) {
+                    val output = ByteArrayOutputStream()
+                    candidate.compress(Bitmap.CompressFormat.JPEG, quality, output)
+                    if (output.size() <= config.mediaPolicy.effectiveMaximumImageBytes) {
+                        prepared = output.toByteArray()
+                        break
+                    }
+                }
+                val bytes = prepared ?: throw IllegalArgumentException("attachment_size")
+                pendingAttachments += client.uploadImageFromNativeUi(
+                    conversationId = activeConversationId,
+                    bytes = bytes,
+                    mimeType = "image/jpeg",
+                    fileName = "onlo-image-${java.util.UUID.randomUUID()}.jpg",
+                )
+                updateAttachmentControl()
+                showStatus("Image ready to send.")
+            } catch (error: OnloException.Server) {
+                showStatus(if (error.code == "media_unavailable") "Image upload is disabled." else "Image is unauthorized.")
+            } catch (_: Exception) {
+                showStatus("Image could not be added.")
             }
         }
     }
@@ -614,8 +827,13 @@ internal class MessengerDialog(
             is NativeMessengerEvent.Failed -> {
                 streamedReplies.remove(event.clientMessageId)
                 announce(
-                    if (event.retryable) "Message is queued and will retry."
-                    else "Message could not be delivered.",
+                    when {
+                        event.retryable -> "Message is queued and will retry."
+                        event.safeCode == "attachment_grant_expired" -> "Image authorization expired. Add the image again."
+                        event.safeCode == "media_unavailable" -> "Image upload is disabled."
+                        event.safeCode == "invalid_attachment_grant" -> "Image is no longer authorized."
+                        else -> "Message could not be delivered."
+                    },
                 )
             }
         }

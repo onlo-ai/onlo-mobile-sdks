@@ -166,6 +166,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
     private let options: OnloMessengerOptions
     private var screenState: ScreenState = .loading
     private var selectedConversationId: String?
+    private var selectedSessionId: String?
     private var lastInbox: [ConversationSummary] = []
     /// Native-memory-only optimistic and streamed rows. They make a durable
     /// send visible immediately, while the authorised transcript remains the
@@ -368,6 +369,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
         stopDictation()
         speechSynthesizer.stopSpeaking(at: .immediate)
         selectedConversationId = nil
+        selectedSessionId = nil
         pendingOutgoingMessage = nil
         streamedReplyText = ""
         helpTopics.removeAll()
@@ -396,6 +398,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
                     guard !Task.isCancelled else { return }
                     screenState = transcript.map(ScreenState.transcript) ?? .offline
                     selectedConversationId = transcript == nil ? nil : intendedConversation
+                    selectedSessionId = transcript?.conversation.sessionId
                     render()
                     if let transcript { await acknowledgeRendered(transcript) }
                 } else {
@@ -440,6 +443,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
     @objc private func showInbox() {
         loadTask?.cancel()
         selectedConversationId = nil
+        selectedSessionId = nil
         pendingOutgoingMessage = nil
         streamedReplyText = ""
         screenState = lastInbox.isEmpty ? .loading : .inbox(lastInbox)
@@ -466,6 +470,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
 
     private func showConversation(_ conversationId: String) {
         selectedConversationId = conversationId
+        selectedSessionId = nil
         screenState = .loading
         render()
         loadTask?.cancel()
@@ -475,6 +480,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
                 let transcript = try await sdk.messengerTranscript(conversationId: conversationId)
                 guard !Task.isCancelled else { return }
                 screenState = transcript.map(ScreenState.transcript) ?? .offline
+                selectedSessionId = transcript?.conversation.sessionId
                 render()
                 if let transcript { await acknowledgeRendered(transcript) }
             } catch let error as OnloError {
@@ -519,7 +525,11 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
         sendTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let stream = try await sdk.sendMessage(message: message, attachments: attachments)
+                let stream = try await sdk.sendMessage(
+                    message: message,
+                    attachments: attachments,
+                    routingSessionId: selectedSessionId
+                )
                 // A durable enqueue completes before the server accepts the
                 // turn. Do not lock the composer while an offline item waits
                 // for lifecycle recovery; its stable clientMessageId remains
@@ -550,6 +560,19 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
                         break
                     }
                 }
+            } catch let error as OnloError {
+                uploadedAttachments = attachments
+                sendTask = nil
+                composer.isEnabled = true
+                sendButton.isEnabled = true
+                let message = switch error.safeCode {
+                case "attachment_grant_expired": "Image authorization expired. Add the image again."
+                case "media_unavailable": "Image upload is disabled."
+                case "invalid_attachment_grant", "forbidden_principal": "Image is no longer authorized."
+                default: "Message could not be saved. Try again."
+                }
+                statusLabel.text = message
+                statusLabel.accessibilityLabel = message
             } catch {
                 uploadedAttachments = attachments
                 sendTask = nil
@@ -774,7 +797,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
     }
 
     @objc private func selectAttachment() {
-        guard attachmentsAreAvailable, selectedConversationId != nil, uploadTask == nil else { return }
+        guard attachmentsAreAvailable, uploadTask == nil else { return }
         let sheet = UIAlertController(title: "Add image", message: nil, preferredStyle: .actionSheet)
         sheet.addAction(UIAlertAction(title: "Photo Library", style: .default) { [weak self] _ in
             self?.presentPhotoPicker()
@@ -850,7 +873,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
                 }
                 try await upload(images)
             } catch {
-                showMediaError("Image could not be added.")
+                showMediaError(error)
             }
             uploadTask = nil
             render()
@@ -872,7 +895,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
                 let prepared = try prepareImage(image)
                 try await upload([prepared])
             } catch {
-                showMediaError("Image could not be added.")
+                showMediaError(error)
             }
             uploadTask = nil
             render()
@@ -955,7 +978,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
     }
 
     private func upload(_ images: [PreparedImage]) async throws {
-        guard let conversationId = selectedConversationId else { throw OnloError.invalidState }
+        let conversationId = selectedConversationId
         for (index, image) in images.enumerated() {
             guard !Task.isCancelled else { return }
             statusLabel.text = "Uploading image \(index + 1) of \(images.count)"
@@ -973,6 +996,23 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
     private func showMediaError(_ message: String) {
         statusLabel.text = message
         statusLabel.accessibilityLabel = message
+    }
+
+    private func showMediaError(_ error: Error) {
+        guard let error = error as? OnloError else {
+            showMediaError("Image could not be added.")
+            return
+        }
+        switch error.safeCode {
+        case "media_unavailable":
+            showMediaError("Image upload is disabled.")
+        case "attachment_grant_expired":
+            showMediaError("Image authorization expired. Add the image again.")
+        case "invalid_attachment_grant", "forbidden_principal":
+            showMediaError("Image is no longer authorized.")
+        default:
+            showMediaError("Image could not be added.")
+        }
     }
 
     private func render() {
@@ -1039,7 +1079,10 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
     }
 
     private var attachmentsAreAvailable: Bool {
-        false
+        config?.features.fileUpload == true &&
+            config?.mediaPolicy.enabled == true &&
+            config?.compatibility.capabilities.contains(.mediaPicker) == true &&
+            config?.compatibility.capabilities.contains(.attachmentUpload) == true
     }
 
     private var maximumImagesPerMessage: Int {
@@ -1052,7 +1095,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
 
     private func renderComposerAvailability() {
         guard activeSurface == .conversations else { return }
-        attachmentButton.isHidden = !attachmentsAreAvailable || selectedConversationId == nil
+        attachmentButton.isHidden = !attachmentsAreAvailable
         attachmentButton.isEnabled = uploadTask == nil &&
             !isDictating &&
             uploadedAttachments.count < maximumImagesPerMessage

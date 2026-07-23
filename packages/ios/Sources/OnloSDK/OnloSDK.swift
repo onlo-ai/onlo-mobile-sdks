@@ -44,6 +44,8 @@ public actor OnloSDK {
         "persistent_outbox",
         "foreground_stream",
         "apns",
+        "media_picker",
+        "attachment_upload",
         "identity_jwt",
         "config_schema_v1",
         "deep_link_routing",
@@ -734,19 +736,100 @@ public actor OnloSDK {
                       let expiry = serverDate(expiresAt) else { return true }
                 return expiry <= now()
             }) {
-                sending.state = .failedTerminal
-                sending.lastErrorCode = APIErrorCode.mediaUnavailable.rawValue
-                sending.nextAttemptAt = nil
-                guard try await store.update(
-                          sending,
-                          expectedState: head.state,
-                          expectedAttemptCount: head.attemptCount,
-                          authority: persistence
-                      ) else { throw OnloError.invalidState }
-                finishObserver(
-                    for: sending,
-                    error: OnloError.transport(code: APIErrorCode.mediaUnavailable.rawValue)
-                )
+                var refreshed: [OutboxAttachment] = []
+                do {
+                    for attachment in sending.attachments {
+                        guard let expiresAt = attachment.receiptExpiresAt,
+                              let expiry = serverDate(expiresAt) else {
+                            throw OnloError.transport(code: "attachment_grant_invalid")
+                        }
+                        if expiry > now() {
+                            refreshed.append(attachment)
+                            continue
+                        }
+                        guard let stagedData = attachment.stagedData,
+                              let mime = ImageMimeType(rawValue: attachment.attachment.type) else {
+                            throw OnloError.transport(code: "attachment_staging_unavailable")
+                        }
+                        refreshed.append(try await uploadImage(
+                            conversationId: attachment.uploadConversationId,
+                            data: stagedData,
+                            mimeType: mime,
+                            filename: attachment.attachment.name,
+                            previousGrant: attachment.attachment.grant
+                        ))
+                        guard hasSelectionAuthority() else { throw OnloError.invalidState }
+                    }
+                    sending = OutboxEntry(
+                        clientMessageId: head.clientMessageId,
+                        ownerScope: head.ownerScope,
+                        conversationId: head.conversationId,
+                        routingSessionId: head.routingSessionId,
+                        message: head.message,
+                        attachments: refreshed,
+                        createdAt: head.createdAt,
+                        orderingKey: head.orderingKey,
+                        state: head.state,
+                        attemptCount: head.attemptCount,
+                        nextAttemptAt: head.nextAttemptAt,
+                        lastErrorCode: head.lastErrorCode,
+                        serverMessageId: head.serverMessageId,
+                        aiRunId: head.aiRunId
+                    )
+                    guard try await store.update(
+                        sending,
+                        expectedState: head.state,
+                        expectedAttemptCount: head.attemptCount,
+                        authority: persistence
+                    ) else { throw OnloError.invalidState }
+                } catch let error as OnloError {
+                    guard hasSelectionAuthority() else { throw OnloError.invalidState }
+                    let retryable = error == .requiresNetwork || isRetryableChatFailure(error)
+                    if retryable {
+                        sending.state = .failedRetryable
+                        sending.attemptCount += 1
+                        let exponent = min(max(sending.attemptCount - 1, 0), 6)
+                        let base = min(1_000.0 * pow(2, Double(exponent)), 60_000.0)
+                        let jitter = min(max(backoffJitter(sending.attemptCount), -0.2), 0.2)
+                        sending.nextAttemptAt = now().addingTimeInterval((base * (1 + jitter)) / 1_000)
+                    } else {
+                        sending.state = .failedTerminal
+                        sending.nextAttemptAt = nil
+                    }
+                    sending.lastErrorCode = error.safeCode
+                    guard try await store.update(
+                        sending,
+                        expectedState: head.state,
+                        expectedAttemptCount: head.attemptCount,
+                        authority: persistence
+                    ) else { throw OnloError.invalidState }
+                    guard hasSelectionAuthority() else { throw OnloError.invalidState }
+                    finishObserver(for: sending, error: error)
+                    if retryable, let dispatchID {
+                        await scheduleRetryWake(
+                            for: scope,
+                            dispatchID: dispatchID,
+                            authority: authority,
+                            session: session
+                        )
+                        return nil
+                    }
+                } catch is CancellationError {
+                    throw OnloError.invalidState
+                } catch {
+                    guard hasSelectionAuthority() else { throw OnloError.invalidState }
+                    sending.state = .failedTerminal
+                    sending.lastErrorCode = APIErrorCode.mediaUnavailable.rawValue
+                    sending.nextAttemptAt = nil
+                    guard try await store.update(
+                        sending,
+                        expectedState: head.state,
+                        expectedAttemptCount: head.attemptCount,
+                        authority: persistence
+                    ) else { throw OnloError.invalidState }
+                    guard hasSelectionAuthority() else { throw OnloError.invalidState }
+                    finishObserver(for: sending, error: error)
+                }
                 continue
             }
             sending.state = .sending
@@ -839,16 +922,17 @@ public actor OnloSDK {
         )
     }
 
-    /// Completes the contract-owned image intent/upload flow and returns only
-    /// the opaque handle that may be committed to the encrypted native outbox.
-    /// Raw image bytes are never persisted by the SDK.
+    /// Reuses the Widget upload route and retains staged bytes only inside the
+    /// encrypted owner-scoped outbox so an expired pre-acceptance grant can be
+    /// refreshed without changing the logical message ID.
     func uploadImage(
-        conversationId: String,
+        conversationId: String?,
         data: Data,
         mimeType: ImageMimeType,
-        filename: String
+        filename: String,
+        previousGrant: String? = nil
     ) async throws -> OutboxAttachment {
-        guard !conversationId.isEmpty,
+        guard conversationId?.isEmpty != true,
               !filename.isEmpty,
               !data.isEmpty else {
             throw OnloError.invalidConfiguration
@@ -873,68 +957,57 @@ public actor OnloSDK {
 
         let authority = configAuthority
         let scope = session.credential.ownerScope
-        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        let intentBody = AttachmentIntentRequest(
-            conversationId: conversationId,
-            mimeType: mimeType,
-            byteSize: data.count,
-            sha256: digest,
-            filename: filename
-        )
-        let intentResponse = try await transport.execute(
-            try requestFactory.attachmentIntent(intentBody, chatToken: session.chatToken)
-        )
-        let intent = try OnloResponseDecoder.envelope(AttachmentIntentResult.self, from: intentResponse).result
-        guard configAuthority == authority,
-              runtimeSession?.sessionId == session.sessionId,
-              runtimeSession?.credential.ownerScope == scope else {
-            throw OnloError.invalidState
-        }
-        guard !intent.attachmentId.isEmpty,
-              !intent.intent.isEmpty,
-              serverDate(intent.expiresAt) != nil,
-              intent.completion.method == "POST",
-              intent.completion.endpoint == "/api/sdk/v1/attachments/complete" else {
-            throw OnloError.invalidResponse
-        }
-
-        let completionResponse = try await transport.execute(
-            try requestFactory.attachmentCompletion(
-                intent: intent.intent,
+        let response = try await transport.execute(
+            try requestFactory.widgetAttachmentUpload(
+                conversationId: conversationId,
+                previousGrant: previousGrant,
                 fileData: data,
                 filename: filename,
                 mimeType: mimeType,
                 chatToken: session.chatToken
             )
         )
-        let completed = try OnloResponseDecoder.envelope(AttachmentCompleteResult.self, from: completionResponse).result
         guard configAuthority == authority,
               runtimeSession?.sessionId == session.sessionId,
               runtimeSession?.credential.ownerScope == scope else {
             throw OnloError.invalidState
         }
-        guard completed.attachment.id == intent.attachmentId,
-              completed.attachment.type == mimeType,
-              completed.attachment.name == filename,
-              completed.attachment.size == data.count,
-              completed.attachment.sha256.lowercased() == digest,
-              !completed.attachment.url.isEmpty,
-              !completed.receipt.isEmpty,
-              serverDate(completed.receiptExpiresAt).map({ $0 > now() }) == true,
-              !completed.authenticatedDownload.isEmpty else {
+        guard response.statusCode == 200 else {
+            let widgetCode = (try? JSONDecoder().decode(WidgetErrorResponse.self, from: response.body))?.error
+            let code: APIErrorCode = widgetCode == APIErrorCode.mediaUnavailable.rawValue
+                ? .mediaUnavailable
+                : .forbiddenPrincipal
+            throw OnloError.remote(APIError(
+                code: code,
+                message: code == .mediaUnavailable ? "Image upload is disabled." : "Image upload is unauthorized.",
+                retry: try APIRetry(directive: .never)
+            ))
+        }
+        let completed = try JSONDecoder().decode(WidgetAttachmentUploadResponse.self, from: response.body)
+        guard completed.success,
+              completed.attachments.count == 1,
+              let attachment = completed.attachments.first,
+              attachment.type == mimeType.rawValue,
+              attachment.name == filename,
+              attachment.size == data.count,
+              !attachment.id.isEmpty,
+              !attachment.url.isEmpty,
+              !attachment.grant.isEmpty,
+              serverDate(attachment.grantExpiresAt).map({ $0 > now() }) == true else {
             throw OnloError.invalidResponse
         }
         return OutboxAttachment(
             attachment: ChatAttachment(
-                id: completed.attachment.id,
-                url: completed.attachment.url,
-                type: completed.attachment.type.rawValue,
-                name: completed.attachment.name,
-                size: completed.attachment.size,
-                sha256: completed.attachment.sha256,
-                receipt: completed.receipt
+                id: attachment.id,
+                url: attachment.url,
+                type: attachment.type,
+                name: attachment.name,
+                size: attachment.size,
+                grant: attachment.grant
             ),
-            receiptExpiresAt: completed.receiptExpiresAt
+            grantExpiresAt: attachment.grantExpiresAt,
+            stagedData: data,
+            uploadConversationId: conversationId
         )
     }
 
@@ -1316,23 +1389,20 @@ public actor OnloSDK {
     func sendMessage(
         message: String
     ) async throws -> AsyncThrowingStream<ChatEvent, Error> {
-        try await sendMessage(message: message, attachments: [])
+        try await sendMessage(message: message, attachments: [], routingSessionId: nil)
     }
 
-    /// Internal-only until the attachment intent/completion lifecycle returns
-    /// an opaque completed handle. Host apps cannot supply arbitrary URLs.
+    /// Internal-only: native UI supplies only server-granted Widget attachment
+    /// handles. Host apps cannot inject raw attachment URLs.
     func sendMessage(
         message: String,
-        attachments: [OutboxAttachment]
+        attachments: [OutboxAttachment],
+        routingSessionId: String? = nil
     ) async throws -> AsyncThrowingStream<ChatEvent, Error> {
         try requireInitialized()
         guard !message.isEmpty || !attachments.isEmpty else {
             throw OnloError.invalidConfiguration
         }
-        // Attachment upload primitives remain fixture-testable, but the current
-        // contract cannot bind a completed attachment to the canonical chat
-        // request. Keep native sending disabled until that wire gap is resolved.
-        guard attachments.isEmpty else { throw OnloError.invalidConfiguration }
         guard attachments.count <= OnloProtocol.maximumImagesPerMessage,
               attachments.allSatisfy({
                   !$0.attachment.url.isEmpty &&
@@ -1340,7 +1410,8 @@ public actor OnloSDK {
                       !$0.attachment.name.isEmpty &&
                       $0.attachment.size > 0 &&
                       $0.attachment.size <= OnloProtocol.maximumImageBytes &&
-                      $0.attachment.receipt?.isEmpty == false &&
+                      $0.attachment.grant?.isEmpty == false &&
+                      $0.stagedData?.isEmpty == false &&
                       $0.receiptExpiresAt.flatMap(serverDate).map({ $0 > now() }) == true
               }) else {
             throw OnloError.invalidConfiguration
@@ -1362,7 +1433,13 @@ public actor OnloSDK {
         // dispatcher can otherwise run while this actor is suspended in the
         // store and accept the newly committed row before its caller has a
         // stream to receive that first SSE event.
-        let entry = OutboxEntry(ownerScope: ownerScope, message: message, attachments: attachments, orderingKey: 0)
+        let entry = OutboxEntry(
+            ownerScope: ownerScope,
+            routingSessionId: routingSessionId,
+            message: message,
+            attachments: attachments,
+            orderingKey: 0
+        )
         var observer: AsyncThrowingStream<ChatEvent, Error>.Continuation?
         let stream = AsyncThrowingStream<ChatEvent, Error> { observer = $0 }
         guard let observer else { throw OnloError.invalidState }
@@ -2026,7 +2103,7 @@ public actor OnloSDK {
                   ),
                   hasDispatchAuthority(dispatchID: dispatchID, scope: scope, authority: authority, session: session) else { return }
             let request = try requestFactory.chat(
-                ChatRequest(sessionId: session.sessionId, clientMessageId: entry.clientMessageId.uuidString, message: entry.message, attachments: entry.attachments.map(\.attachment)),
+                ChatRequest(sessionId: entry.routingSessionId ?? session.sessionId, clientMessageId: entry.clientMessageId.uuidString, message: entry.message, attachments: entry.attachments.map(\.attachment)),
                 chatToken: session.chatToken
             )
             let chatStartedAt = Date()
@@ -2506,6 +2583,7 @@ public actor OnloSDK {
                 clientMessageId: entry.clientMessageId,
                 ownerScope: entry.ownerScope,
                 conversationId: conversationId,
+                routingSessionId: entry.routingSessionId,
                 message: entry.message,
                 attachments: entry.attachments,
                 createdAt: entry.createdAt,
@@ -2533,8 +2611,22 @@ public actor OnloSDK {
         guard let accepted = try await ownerStore.outboxEntries(for: entry.ownerScope).first(where: {
             $0.clientMessageId == entry.clientMessageId && $0.state == .accepted
         }) else { return }
-        var reconciled = accepted
-        reconciled.state = .reconciled
+        let reconciled = OutboxEntry(
+            clientMessageId: accepted.clientMessageId,
+            ownerScope: accepted.ownerScope,
+            conversationId: accepted.conversationId,
+            routingSessionId: accepted.routingSessionId,
+            message: accepted.message,
+            attachments: [],
+            createdAt: accepted.createdAt,
+            orderingKey: accepted.orderingKey,
+            state: .reconciled,
+            attemptCount: accepted.attemptCount,
+            nextAttemptAt: nil,
+            lastErrorCode: nil,
+            serverMessageId: accepted.serverMessageId,
+            aiRunId: accepted.aiRunId
+        )
         guard let store = ownerStore as? any AuthorityFencedPersisting,
               try await store.update(
                   reconciled,
@@ -2629,8 +2721,17 @@ public actor OnloSDK {
                     session: session
                 )
             }
-        case .error(_, let retryable):
-            guard retryable else { throw OnloError.invalidResponse }
+        case .error(let code, let retryable):
+            guard retryable else {
+                if [
+                    "attachment_grant_expired",
+                    "invalid_attachment_grant",
+                    APIErrorCode.mediaUnavailable.rawValue,
+                ].contains(code) {
+                    throw OnloError.transport(code: code)
+                }
+                throw OnloError.invalidResponse
+            }
             throw OnloError.transport(code: "chat_retryable")
         }
     }

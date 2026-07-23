@@ -395,8 +395,9 @@ public struct ChatAttachment: Codable, Sendable, Equatable {
     public let size: Int
     public let sha256: String?
     public let receipt: String?
+    public let grant: String?
 
-    public init(id: String? = nil, url: String, type: String, name: String, size: Int, sha256: String? = nil, receipt: String? = nil) {
+    public init(id: String? = nil, url: String, type: String, name: String, size: Int, sha256: String? = nil, receipt: String? = nil, grant: String? = nil) {
         self.id = id
         self.url = url
         self.type = type
@@ -404,7 +405,23 @@ public struct ChatAttachment: Codable, Sendable, Equatable {
         self.size = size
         self.sha256 = sha256
         self.receipt = receipt
+        self.grant = grant
     }
+}
+
+struct WidgetAttachmentUploadResponse: Codable, Sendable, Equatable {
+    struct Uploaded: Codable, Sendable, Equatable {
+        let id: String
+        let url: String
+        let type: String
+        let name: String
+        let size: Int
+        let grant: String
+        let grantExpiresAt: String
+    }
+
+    let success: Bool
+    let attachments: [Uploaded]
 }
 
 public struct ChatRequest: Codable, Sendable, Equatable {

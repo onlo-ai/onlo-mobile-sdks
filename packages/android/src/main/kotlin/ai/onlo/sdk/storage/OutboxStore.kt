@@ -44,6 +44,7 @@ internal data class OutboxEntry(
     val localConversationId: String,
     val message: String,
     val attachments: List<ChatAttachment>,
+    val stagedAttachments: List<StagedAttachment> = emptyList(),
     val createdAtMs: Long,
     val orderingKey: Long,
     val state: OutboxState = OutboxState.QUEUED,
@@ -61,6 +62,14 @@ internal data class OutboxEntry(
     }
 }
 
+internal data class StagedAttachment(
+    val dataBase64: String,
+    val mimeType: String,
+    val fileName: String,
+    val conversationId: String?,
+    val grantExpiresAtMs: Long,
+)
+
 internal object OutboxEntryFactory {
     fun create(
         ownerScope: OwnerScope,
@@ -68,12 +77,14 @@ internal object OutboxEntryFactory {
         message: String,
         attachments: List<ChatAttachment>,
         nowMs: Long,
+        stagedAttachments: List<StagedAttachment> = emptyList(),
     ): OutboxEntry = OutboxEntry(
         ownerScope = ownerScope,
         clientMessageId = UUID.randomUUID().toString(),
         localConversationId = localConversationId,
         message = message,
         attachments = attachments,
+        stagedAttachments = stagedAttachments,
         createdAtMs = nowMs,
         orderingKey = nowMs,
     )
@@ -91,6 +102,10 @@ internal interface OwnerScopedOutboxStore {
         authority: PersistenceAuthority,
         clientMessageId: String,
     ): Boolean = markSending(authority.ownerScope, clientMessageId)
+    suspend fun replacePendingIfAuthorised(
+        authority: PersistenceAuthority,
+        entry: OutboxEntry,
+    ): Boolean = false
     suspend fun markAccepted(ownerScope: OwnerScope, clientMessageId: String, serverMessageId: String, conversationId: String): Boolean
     suspend fun markAcceptedIfSending(
         authority: PersistenceAuthority,

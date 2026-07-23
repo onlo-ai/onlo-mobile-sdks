@@ -111,6 +111,30 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
         activeAuthority == authority && markSending(authority.ownerScope, clientMessageId)
     }
 
+    override suspend fun replacePendingIfAuthorised(
+        authority: PersistenceAuthority,
+        entry: OutboxEntry,
+    ): Boolean = authorityMutex.withLock {
+        if (activeAuthority != authority || entry.ownerScope != authority.ownerScope) return@withLock false
+        onDatabase {
+            ensureUnblocked(it, authority.ownerScope)
+            it.update(
+                OUTBOX_TABLE,
+                ContentValues().apply {
+                    put("attachments_ciphertext", payloadCipher.encrypt(entry.attachmentsPayloadToJson()))
+                },
+                "owner_scope = ? AND client_message_id = ? AND attempt_count = ? AND state IN (?, ?)",
+                arrayOf(
+                    authority.ownerScope.storageKey(),
+                    entry.clientMessageId,
+                    entry.attemptCount.toString(),
+                    OutboxState.QUEUED.name,
+                    OutboxState.FAILED_RETRYABLE.name,
+                ),
+            ) == 1
+        }
+    }
+
     override suspend fun markAccepted(ownerScope: OwnerScope, clientMessageId: String, serverMessageId: String, conversationId: String): Boolean = onDatabase {
         ensureUnblocked(it, ownerScope)
         it.update(
@@ -182,19 +206,41 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
         expectedAttemptCount: Int,
     ): Boolean = authorityMutex.withLock {
         if (activeAuthority != authority) return@withLock false
-        onDatabase {
-            ensureUnblocked(it, authority.ownerScope)
-            it.update(
-                OUTBOX_TABLE,
-                ContentValues().apply { put("state", OutboxState.RECONCILED.name) },
-                "owner_scope = ? AND client_message_id = ? AND state = ? AND attempt_count = ?",
-                arrayOf(
-                    authority.ownerScope.storageKey(),
-                    clientMessageId,
-                    OutboxState.ACCEPTED.name,
-                    expectedAttemptCount.toString(),
-                ),
-            ) == 1
+        onDatabase { database ->
+            ensureUnblocked(database, authority.ownerScope)
+            database.beginTransaction()
+            try {
+                val encryptedAttachments = database.query(
+                    OUTBOX_TABLE,
+                    arrayOf("attachments_ciphertext"),
+                    "owner_scope = ? AND client_message_id = ? AND state = ? AND attempt_count = ?",
+                    arrayOf(
+                        authority.ownerScope.storageKey(),
+                        clientMessageId,
+                        OutboxState.ACCEPTED.name,
+                        expectedAttemptCount.toString(),
+                    ),
+                    null,
+                    null,
+                    null,
+                ).useCursor { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+                    ?: return@onDatabase false
+                val changed = database.update(
+                    OUTBOX_TABLE,
+                    reconciliationValues(encryptedAttachments),
+                    "owner_scope = ? AND client_message_id = ? AND state = ? AND attempt_count = ?",
+                    arrayOf(
+                        authority.ownerScope.storageKey(),
+                        clientMessageId,
+                        OutboxState.ACCEPTED.name,
+                        expectedAttemptCount.toString(),
+                    ),
+                ) == 1
+                if (changed) database.setTransactionSuccessful()
+                changed
+            } finally {
+                database.endTransaction()
+            }
         }
     }
 
@@ -426,7 +472,7 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
             try {
                 val encryptedServerMessageId = database.query(
                     OUTBOX_TABLE,
-                    arrayOf("server_message_id_ciphertext"),
+                    arrayOf("server_message_id_ciphertext", "attachments_ciphertext"),
                     "owner_scope = ? AND client_message_id = ? AND state = ?",
                     arrayOf(
                         authority.ownerScope.storageKey(),
@@ -436,9 +482,11 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
                     null,
                     null,
                     null,
-                ).useCursor { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+                ).useCursor { cursor ->
+                    if (cursor.moveToFirst()) cursor.getString(0) to cursor.getString(1) else null
+                }
                 if (encryptedServerMessageId == null ||
-                    payloadCipher.decrypt(encryptedServerMessageId) != expectedServerMessageId
+                    payloadCipher.decrypt(encryptedServerMessageId.first) != expectedServerMessageId
                 ) return@onDatabase false
                 val values = loadTranscriptMap(database, authority.ownerScope).apply {
                     put(conversationId, payload)
@@ -454,7 +502,7 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
                 )
                 val changed = database.update(
                     OUTBOX_TABLE,
-                    ContentValues().apply { put("state", OutboxState.RECONCILED.name) },
+                    reconciliationValues(encryptedServerMessageId.second),
                     "owner_scope = ? AND client_message_id = ? AND state = ?",
                     arrayOf(
                         authority.ownerScope.storageKey(),
@@ -557,7 +605,7 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
         put("client_message_id", clientMessageId)
         put("local_conversation_id_ciphertext", payloadCipher.encrypt(localConversationId))
         put("message_ciphertext", payloadCipher.encrypt(message))
-        put("attachments_ciphertext", payloadCipher.encrypt(attachments.toJson()))
+        put("attachments_ciphertext", payloadCipher.encrypt(attachmentsPayloadToJson()))
         put("created_at_ms", createdAtMs)
         put("ordering_key", orderingKey)
         put("state", state.name)
@@ -570,32 +618,79 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
             ?: putNull("server_conversation_id_ciphertext")
     }
 
-    private fun Cursor.toEntry(): OutboxEntry = OutboxEntry(
-        ownerScope = ownerScopeFromKey(getString(getColumnIndexOrThrow("owner_scope"))),
-        clientMessageId = getString(getColumnIndexOrThrow("client_message_id")),
-        localConversationId = payloadCipher.decrypt(getString(getColumnIndexOrThrow("local_conversation_id_ciphertext"))),
-        message = payloadCipher.decrypt(getString(getColumnIndexOrThrow("message_ciphertext"))),
-        attachments = payloadCipher.decrypt(
+    private fun Cursor.toEntry(): OutboxEntry {
+        val attachmentPayload = payloadCipher.decrypt(
             getString(getColumnIndexOrThrow("attachments_ciphertext")),
-        ).attachmentsFromJson(),
-        createdAtMs = getLong(getColumnIndexOrThrow("created_at_ms")),
-        orderingKey = getLong(getColumnIndexOrThrow("ordering_key")),
-        state = OutboxState.valueOf(getString(getColumnIndexOrThrow("state"))),
-        attemptCount = getInt(getColumnIndexOrThrow("attempt_count")),
-        nextAttemptAtMs = getNullableLong("next_attempt_at_ms"),
-        lastErrorCode = getNullableString("last_error_code"),
-        serverMessageId = getNullableString("server_message_id_ciphertext")?.let(payloadCipher::decrypt),
-        serverConversationId = getNullableString("server_conversation_id_ciphertext")?.let(payloadCipher::decrypt),
-    )
+        ).attachmentsPayloadFromJson()
+        return OutboxEntry(
+            ownerScope = ownerScopeFromKey(getString(getColumnIndexOrThrow("owner_scope"))),
+            clientMessageId = getString(getColumnIndexOrThrow("client_message_id")),
+            localConversationId = payloadCipher.decrypt(getString(getColumnIndexOrThrow("local_conversation_id_ciphertext"))),
+            message = payloadCipher.decrypt(getString(getColumnIndexOrThrow("message_ciphertext"))),
+            attachments = attachmentPayload.first,
+            stagedAttachments = attachmentPayload.second,
+            createdAtMs = getLong(getColumnIndexOrThrow("created_at_ms")),
+            orderingKey = getLong(getColumnIndexOrThrow("ordering_key")),
+            state = OutboxState.valueOf(getString(getColumnIndexOrThrow("state"))),
+            attemptCount = getInt(getColumnIndexOrThrow("attempt_count")),
+            nextAttemptAtMs = getNullableLong("next_attempt_at_ms"),
+            lastErrorCode = getNullableString("last_error_code"),
+            serverMessageId = getNullableString("server_message_id_ciphertext")?.let(payloadCipher::decrypt),
+            serverConversationId = getNullableString("server_conversation_id_ciphertext")?.let(payloadCipher::decrypt),
+        )
+    }
 
-    private fun List<ChatAttachment>.toJson(): String = JSONArray().apply {
-        forEach { put(ProtocolJsonCodec.encodeChatAttachment(it)) }
+    private fun OutboxEntry.attachmentsPayloadToJson(): String =
+        attachmentsPayloadToJson(attachments, stagedAttachments)
+
+    private fun attachmentsPayloadToJson(
+        attachments: List<ChatAttachment>,
+        stagedAttachments: List<StagedAttachment>,
+    ): String = org.json.JSONObject().apply {
+        put("attachments", JSONArray().apply {
+            attachments.forEach { put(ProtocolJsonCodec.encodeChatAttachment(it)) }
+        })
+        put("staged", JSONArray().apply {
+            stagedAttachments.forEach { staged ->
+                put(org.json.JSONObject().apply {
+                    put("data", staged.dataBase64)
+                    put("mimeType", staged.mimeType)
+                    put("fileName", staged.fileName)
+                    put("conversationId", staged.conversationId)
+                    put("grantExpiresAtMs", staged.grantExpiresAtMs)
+                })
+            }
+        })
     }.toString()
 
-    private fun String.attachmentsFromJson(): List<ChatAttachment> = JSONArray(this).let { values ->
-        buildList {
-            for (index in 0 until values.length()) {
-                add(ProtocolJsonCodec.decodeChatAttachment(values.getJSONObject(index)))
+    private fun reconciliationValues(encryptedAttachments: String): ContentValues {
+        val attachments = payloadCipher.decrypt(encryptedAttachments).attachmentsPayloadFromJson().first
+        return ContentValues().apply {
+            put("state", OutboxState.RECONCILED.name)
+            put("attachments_ciphertext", payloadCipher.encrypt(attachmentsPayloadToJson(attachments, emptyList())))
+        }
+    }
+
+    private fun String.attachmentsPayloadFromJson(): Pair<List<ChatAttachment>, List<StagedAttachment>> {
+        val root = trim()
+        val attachments = if (root.startsWith("[")) JSONArray(root) else org.json.JSONObject(root).getJSONArray("attachments")
+        val values = buildList {
+            for (index in 0 until attachments.length()) {
+                add(ProtocolJsonCodec.decodeChatAttachment(attachments.getJSONObject(index)))
+            }
+        }
+        if (root.startsWith("[")) return values to emptyList()
+        val staged = org.json.JSONObject(root).optJSONArray("staged") ?: JSONArray()
+        return values to buildList {
+            for (index in 0 until staged.length()) {
+                val value = staged.getJSONObject(index)
+                add(StagedAttachment(
+                    dataBase64 = value.getString("data"),
+                    mimeType = value.getString("mimeType"),
+                    fileName = value.getString("fileName"),
+                    conversationId = value.optString("conversationId").takeUnless { it.isBlank() || it == "null" },
+                    grantExpiresAtMs = value.getLong("grantExpiresAtMs"),
+                ))
             }
         }
     }

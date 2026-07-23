@@ -7,6 +7,7 @@ import ai.onlo.sdk.protocol.ApiFailure
 import ai.onlo.sdk.protocol.ApiRetry
 import ai.onlo.sdk.protocol.ApiSuccess
 import ai.onlo.sdk.protocol.Capability
+import ai.onlo.sdk.protocol.ChatAttachment
 import ai.onlo.sdk.protocol.IdentityClass
 import ai.onlo.sdk.protocol.PROTOCOL_VERSION
 import ai.onlo.sdk.protocol.ProtocolViolation
@@ -26,6 +27,7 @@ import ai.onlo.sdk.config.MobileConfigSnapshot
 import ai.onlo.sdk.storage.OwnerScope
 import ai.onlo.sdk.storage.OwnerScopedOutboxStore
 import ai.onlo.sdk.storage.PersistenceAuthority
+import ai.onlo.sdk.storage.StagedAttachment
 import ai.onlo.sdk.transport.OnloSessionApi
 import ai.onlo.sdk.chat.DurableChatOutbox
 import ai.onlo.sdk.chat.WidgetChatApi
@@ -41,8 +43,12 @@ import ai.onlo.sdk.push.PushPayloadOutcome
 import ai.onlo.sdk.push.PushRegistrationOutcome
 import ai.onlo.sdk.push.PushRegistry
 import java.io.IOException
+import java.io.File
 import java.security.SecureRandom
+import java.text.SimpleDateFormat
 import java.util.Base64
+import java.util.Locale
+import java.util.TimeZone
 import java.util.UUID
 import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
@@ -77,6 +83,8 @@ internal data class OnloConfiguration(
     val capabilities: List<Capability> = listOf(
         Capability.SECURE_STORAGE,
         Capability.PERSISTENT_OUTBOX,
+        Capability.MEDIA_PICKER,
+        Capability.ATTACHMENT_UPLOAD,
         Capability.IDENTITY_JWT,
     ),
 ) {
@@ -190,6 +198,7 @@ internal sealed interface NativeMessengerEvent {
     data class Failed(
         override val clientMessageId: String,
         val retryable: Boolean,
+        val safeCode: String,
     ) : NativeMessengerEvent
 }
 
@@ -224,6 +233,7 @@ public class OnloClient internal constructor(
     private val retryDelay: suspend (Long) -> Unit = { delay(it) },
     private val acceptedReconciliationDelayMs: Long = 5_000L,
     private val acceptedReconciliationBeforeEmptyCommit: suspend () -> Unit = {},
+    private val attachmentCacheDir: File? = null,
 ) {
     private val operationMutex = Mutex()
     private var protectedSession: ProtectedSession? = null
@@ -691,19 +701,92 @@ public class OnloClient internal constructor(
     }
 
     /** Native UI-only text composer. v1 has no conversation target, so ordering is owner-global. */
+    internal data class PendingNativeAttachment(
+        val attachment: ChatAttachment,
+        val staged: StagedAttachment,
+    )
+
+    internal suspend fun uploadImageFromNativeUi(
+        conversationId: String?,
+        bytes: ByteArray,
+        mimeType: String,
+        fileName: String,
+        previousGrant: String? = null,
+    ): PendingNativeAttachment = operationMutex.withLock {
+        require(mimeType in setOf("image/jpeg", "image/png", "image/webp")) { "attachment_type" }
+        val config = mobileConfig?.value?.config ?: throw OnloException.Unavailable
+        if (!config.features.fileUpload || !config.mediaPolicy.enabled) {
+            throw OnloException.Server("media_unavailable", RetryDirective.NEVER)
+        }
+        require(bytes.isNotEmpty() && bytes.size <= config.mediaPolicy.effectiveMaximumImageBytes) {
+            "attachment_size"
+        }
+        val session = checkNotNull(inMemorySession) { "onlo_not_ready" }
+        val api = checkNotNull(widgetChatApi) { "chat_unavailable" }
+        val cacheDir = checkNotNull(attachmentCacheDir) { "attachment_cache_unavailable" }
+        val authority = configSessionVersion
+        val owner = checkNotNull(protectedSession).ownerScope()
+        val file = File.createTempFile("onlo-upload-", ".img", cacheDir)
+        try {
+            file.writeBytes(bytes)
+            val uploaded = api.upload(
+                chatToken = session.chatToken,
+                conversationId = conversationId,
+                previousGrant = previousGrant,
+                fileName = fileName,
+                mimeType = mimeType,
+                file = file,
+            )
+            if (
+                configSessionVersion != authority ||
+                protectedSession?.ownerScope() != owner ||
+                inMemorySession != session
+            ) throw CancellationException("stale_attachment_upload")
+            val expiry = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }.parse(uploaded.grantExpiresAt)?.time ?: throw ProtocolViolation("attachment_expiry")
+            PendingNativeAttachment(
+                attachment = ChatAttachment(
+                    id = uploaded.id,
+                    url = uploaded.url,
+                    type = uploaded.type,
+                    name = uploaded.name,
+                    size = uploaded.size,
+                    grant = uploaded.grant,
+                ),
+                staged = StagedAttachment(
+                    dataBase64 = Base64.getEncoder().encodeToString(bytes),
+                    mimeType = mimeType,
+                    fileName = fileName,
+                    conversationId = conversationId,
+                    grantExpiresAtMs = expiry,
+                ),
+            )
+        } finally {
+            file.delete()
+        }
+    }
+
     internal suspend fun sendTextFromNativeUi(
         message: String,
+        routingSessionId: String? = null,
+        attachments: List<PendingNativeAttachment> = emptyList(),
         onEnqueued: (String) -> Unit = {},
     ): String = operationMutex.withLock {
-        require(message.isNotBlank()) { "message" }
+        require(message.isNotBlank() || attachments.isNotEmpty()) { "message" }
         val session = checkNotNull(inMemorySession) { "onlo_not_ready" }
         val stored = checkNotNull(protectedSession) { "onlo_not_ready" }
         val owner = stored.ownerScope()
         val outbox = checkNotNull(widgetChatApi) { "chat_unavailable" }
         val version = configSessionVersion
         val durable = durableChatOutbox(owner, session, version, outbox)
-        // ChatRequest has no conversation target in v1; this constant only scopes local FIFO storage.
-        val entry = durable.enqueue(owner, "v1-owner-global", message)
+        val entry = durable.enqueue(
+            owner,
+            routingSessionId ?: session.sessionId,
+            message,
+            attachments.map(PendingNativeAttachment::attachment),
+            attachments.map(PendingNativeAttachment::staged),
+        )
         // Let the native presenter render the durable row before transport can emit an event.
         onEnqueued(entry.clientMessageId)
         startChatFlushIfNeeded(owner, session, version, durable)
@@ -817,11 +900,34 @@ public class OnloClient internal constructor(
                 }
                 is ai.onlo.sdk.chat.ChatEvent.Error -> {
                     mutableMessengerEvents.emit(
-                        NativeMessengerEvent.Failed(entry.clientMessageId, event.retryable),
+                        NativeMessengerEvent.Failed(entry.clientMessageId, event.retryable, event.error),
                     )
                     requireEventAuthority()
                 }
             }
+        },
+        refreshExpiredAttachments = { entry, _ ->
+            val refreshed = entry.stagedAttachments.mapIndexed { index, staged ->
+                val prior = entry.attachments.getOrNull(index)
+                    ?: throw IllegalStateException("attachment_staging_mismatch")
+                val pending = uploadImageFromNativeUi(
+                    conversationId = staged.conversationId,
+                    bytes = Base64.getDecoder().decode(staged.dataBase64),
+                    mimeType = staged.mimeType,
+                    fileName = staged.fileName,
+                    previousGrant = prior.grant,
+                )
+                // The server reuses the attachment identity when previousGrant
+                // is supplied; call through the lower-level adapter to retain it.
+                if (pending.attachment.id != prior.id) {
+                    throw IllegalStateException("attachment_identity_changed")
+                }
+                pending
+            }
+            entry.copy(
+                attachments = refreshed.map(PendingNativeAttachment::attachment),
+                stagedAttachments = refreshed.map(PendingNativeAttachment::staged),
+            )
         },
         )
     }

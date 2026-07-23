@@ -180,7 +180,7 @@ The local merchant-backend simulator is **SDK-team-only** integration infrastruc
 | Account switch | Two synthetic test accounts; invoke logout before the second login. | Old history, outbox work, credentials, read state, and push association are inaccessible before the next account uses the SDK. | Platform-specific test status; public-service E2E release-gated |
 | Offline outbox | Disable network after creating a synthetic send. | One stable `clientMessageId` survives retry and a duplicate acceptance does not create another turn. | Platform-specific test status; public-service E2E release-gated |
 | Transcript/deep link | Synthetic conversation ID and authorised transcript response. | The core fetches the transcript before presentation; push/deep-link data is only a hint. | Native source/mock coverage; device evidence pending |
-| Attachments | Synthetic JPEG, PNG, or WebP up to 8 MiB; no more than three. | Intent, completion, receipt, and chat payload follow the confirmed fixture. | Blocked: `ChatRequest` has no required `conversationId` for attachment intent; do not implement until contract reconciliation |
+| Attachments | Synthetic JPEG, PNG, or WebP up to 8 MiB; no more than five. | Widget upload grant binds owner/session/metadata; first-message and authorised historical sends retain one `clientMessageId`. | Native/contract tests pass; physical picker, camera, expiry, policy-toggle, restart, and account-switch evidence pending |
 | Push | Synthetic APNs/FCM token fixture after explicit host-controlled permission and intent. | Opening a notification re-syncs the authorised transcript before showing content. | Native source/mock coverage; device evidence pending |
 | Configuration | Redacted configuration, ETag, and 304 fixtures. | Compatible revision applies atomically; offline cache remains valid. | Native source/mock coverage; platform execution evidence pending |
 
@@ -190,9 +190,9 @@ The local merchant-backend simulator is **SDK-team-only** integration infrastruc
 
    Expected result: the host app cannot override the origin, and the legacy prototype endpoint is never reused.
 
-2. Run the manual matrix on real iOS and Android devices using synthetic Operator accounts after the release gate permits public-service E2E. Exclude attachment sending until its contract gap is resolved.
+2. Run the manual matrix on real iOS and Android devices using synthetic Operator accounts after the release gate permits public-service E2E.
 
-   Expected result: evidence covers anonymous use, identity exchange, logout/account switch, offline recovery, push, config refresh, and deep-link authorization. Attachment evidence remains excluded until contract reconciliation.
+   Expected result: evidence covers anonymous use, identity exchange, logout/account switch, offline recovery, attachments, push, config refresh, and deep-link authorization.
 
 3. Review logs and artifacts for privacy.
 

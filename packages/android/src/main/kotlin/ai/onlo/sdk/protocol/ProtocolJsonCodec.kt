@@ -55,6 +55,7 @@ internal object ProtocolJsonCodec {
         put("size", value.size)
         value.sha256?.let { put("sha256", it) }
         value.receipt?.let { put("receipt", it) }
+        value.grant?.let { put("grant", it) }
     }
 
     fun decodeChatAttachment(value: JSONObject): ChatAttachment = ChatAttachment(
@@ -65,7 +66,25 @@ internal object ProtocolJsonCodec {
         size = value.requiredLong("size"),
         sha256 = value.optionalString("sha256"),
         receipt = value.optionalString("receipt"),
+        grant = value.optionalString("grant"),
     )
+
+    fun decodeWidgetAttachmentUpload(raw: String): WidgetUploadedAttachment {
+        val root = JSONObject(raw)
+        if (!root.getBoolean("success")) throw ProtocolViolation("attachment_upload")
+        val values = root.getJSONArray("attachments")
+        if (values.length() != 1) throw ProtocolViolation("attachment_upload")
+        val value = values.getJSONObject(0)
+        return WidgetUploadedAttachment(
+            id = value.requiredString("id"),
+            url = value.requiredString("url"),
+            type = value.requiredString("type"),
+            name = value.requiredString("name"),
+            size = value.requiredLong("size"),
+            grant = value.requiredString("grant"),
+            grantExpiresAt = value.requiredString("grantExpiresAt"),
+        )
+    }
 
     fun decodeSessionEnvelope(raw: String): ApiEnvelope<SessionResult> {
         return decodeEnvelope(raw, ::decodeSessionResult)

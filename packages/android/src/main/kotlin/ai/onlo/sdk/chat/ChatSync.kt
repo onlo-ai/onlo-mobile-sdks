@@ -3,11 +3,14 @@ package ai.onlo.sdk.chat
 import ai.onlo.sdk.protocol.ChatRequest
 import ai.onlo.sdk.protocol.ChatAttachment
 import ai.onlo.sdk.protocol.ConversationPageQuery
+import ai.onlo.sdk.protocol.ProtocolJsonCodec
+import ai.onlo.sdk.protocol.WidgetUploadedAttachment
 import ai.onlo.sdk.storage.OutboxEntry
 import ai.onlo.sdk.storage.OutboxEntryFactory
 import ai.onlo.sdk.storage.OwnerScope
 import ai.onlo.sdk.storage.OwnerScopedOutboxStore
 import ai.onlo.sdk.storage.PersistenceAuthority
+import ai.onlo.sdk.storage.StagedAttachment
 import ai.onlo.sdk.transport.OnloSseTransport
 import ai.onlo.sdk.transport.SseStreamResult
 import ai.onlo.sdk.transport.OnloTransport
@@ -70,6 +73,33 @@ internal class WidgetChatApi(
     private val requests: ProtocolRequestFactory,
     private val sseTransport: OnloSseTransport? = transport as? OnloSseTransport,
 ) {
+    suspend fun upload(
+        chatToken: String,
+        conversationId: String?,
+        previousGrant: String? = null,
+        fileName: String,
+        mimeType: String,
+        file: java.io.File,
+    ): WidgetUploadedAttachment {
+        val response = transport.execute(
+            requests.widgetAttachmentUpload(chatToken, conversationId, previousGrant, fileName, mimeType, file),
+        )
+        if (response.status !in 200..299) {
+            val code = runCatching { JSONObject(response.body).optString("error") }.getOrNull()
+            throw WidgetAttachmentFailure(
+                when {
+                    response.status == 403 && (
+                        code == "media_unavailable" ||
+                            code?.contains("disabled", ignoreCase = true) == true
+                        ) -> "media_unavailable"
+                    response.status == 401 || response.status == 403 || response.status == 404 -> "forbidden_principal"
+                    else -> "attachment_upload_failed"
+                },
+            )
+        }
+        return ProtocolJsonCodec.decodeWidgetAttachmentUpload(response.body)
+    }
+
     suspend fun send(
         chatToken: String,
         request: ChatRequest,
@@ -278,6 +308,8 @@ internal class WidgetChatApi(
     private data object WidgetFailure : java.io.IOException("widget_failure")
 }
 
+internal class WidgetAttachmentFailure(val safeCode: String) : IllegalStateException(safeCode)
+
 /** Sends only rows from the current owner partition, retaining the pre-persisted UUID on retry. */
 internal class DurableChatOutbox(
     private val store: OwnerScopedOutboxStore,
@@ -285,9 +317,23 @@ internal class DurableChatOutbox(
     private val nowMs: () -> Long,
     private val onDuplicateAccepted: suspend (String) -> Unit = {},
     private val onEvent: suspend (OutboxEntry, ChatEvent) -> Unit = { _, _ -> },
+    private val refreshExpiredAttachments: suspend (OutboxEntry, String) -> OutboxEntry = { entry, _ -> entry },
 ) {
-    suspend fun enqueue(owner: OwnerScope, conversationId: String, message: String, attachments: List<ChatAttachment> = emptyList()): OutboxEntry {
-        val entry = OutboxEntryFactory.create(owner, conversationId, message, attachments, nowMs())
+    suspend fun enqueue(
+        owner: OwnerScope,
+        conversationId: String,
+        message: String,
+        attachments: List<ChatAttachment> = emptyList(),
+        stagedAttachments: List<StagedAttachment> = emptyList(),
+    ): OutboxEntry {
+        val entry = OutboxEntryFactory.create(
+            owner,
+            conversationId,
+            message,
+            attachments,
+            nowMs(),
+            stagedAttachments,
+        )
         store.enqueue(entry)
         return entry
     }
@@ -315,6 +361,64 @@ internal class DurableChatOutbox(
                 if (entry.nextAttemptAtMs != null && entry.nextAttemptAtMs > nowMs()) {
                     return entry.nextAttemptAtMs
                 }
+                if (entry.stagedAttachments.any { it.grantExpiresAtMs <= nowMs() }) {
+                    val refreshed = try {
+                        refreshExpiredAttachments(entry, chatToken)
+                    } catch (failure: CancellationException) {
+                        throw failure
+                    } catch (_: java.io.IOException) {
+                        requireAuthority()
+                        val marked = persistenceAuthority?.let {
+                            store.markSendingIfAuthorised(it, entry.clientMessageId)
+                        } ?: store.markSending(owner, entry.clientMessageId)
+                        val retryAtMs = retryAt(entry)
+                        if (marked) {
+                            persistenceAuthority?.let {
+                                store.markRetryableFailureIfSending(
+                                    it,
+                                    entry.clientMessageId,
+                                    entry.attemptCount + 1,
+                                    "attachment_transport_unavailable",
+                                    retryAtMs,
+                                )
+                            } ?: store.markRetryableFailure(
+                                owner,
+                                entry.clientMessageId,
+                                "attachment_transport_unavailable",
+                                retryAtMs,
+                            )
+                        }
+                        requireAuthority()
+                        return retryAtMs
+                    } catch (error: Exception) {
+                        val marked = persistenceAuthority?.let {
+                            store.markSendingIfAuthorised(it, entry.clientMessageId)
+                        } ?: store.markSending(owner, entry.clientMessageId)
+                        if (marked) {
+                            persistenceAuthority?.let {
+                                store.markTerminalFailureIfSending(
+                                    it,
+                                    entry.clientMessageId,
+                                    entry.attemptCount + 1,
+                                    (error as? WidgetAttachmentFailure)?.safeCode ?: "attachment_refresh_failed",
+                                )
+                            } ?: store.markTerminalFailure(
+                                owner,
+                                entry.clientMessageId,
+                                (error as? WidgetAttachmentFailure)?.safeCode ?: "attachment_refresh_failed",
+                            )
+                        }
+                        requireAuthority()
+                        continue
+                    }
+                    requireAuthority()
+                    val replaced = persistenceAuthority?.let {
+                        store.replacePendingIfAuthorised(it, refreshed)
+                    } ?: false
+                    if (!replaced) throw CancellationException("stale_attachment_refresh")
+                    requireAuthority()
+                    continue
+                }
                 val markedSending = persistenceAuthority?.let {
                     store.markSendingIfAuthorised(it, entry.clientMessageId)
                 } ?: store.markSending(owner, entry.clientMessageId)
@@ -324,7 +428,7 @@ internal class DurableChatOutbox(
                 val outcome = try {
                     api.send(
                         chatToken = chatToken,
-                        request = ChatRequest(sessionId, entry.clientMessageId, entry.message, entry.attachments),
+                        request = ChatRequest(entry.localConversationId, entry.clientMessageId, entry.message, entry.attachments),
                         onAccepted = { accepted ->
                             requireAuthority()
                             if (accepted.clientMessageId != entry.clientMessageId) {
@@ -420,15 +524,22 @@ internal class DurableChatOutbox(
                         return retryAtMs
                     }
                     else -> {
+                        val errorCode = outcome.error?.error?.takeIf {
+                            it in setOf(
+                                "attachment_grant_expired",
+                                "invalid_attachment_grant",
+                                "media_unavailable",
+                            )
+                        } ?: "widget_rejected"
                         if (persistenceAuthority != null) {
                             store.markTerminalFailureIfSending(
                                 persistenceAuthority,
                                 entry.clientMessageId,
                                 entry.attemptCount + 1,
-                                "widget_rejected",
+                                errorCode,
                             )
                         } else {
-                            store.markTerminalFailure(owner, entry.clientMessageId, "widget_rejected")
+                            store.markTerminalFailure(owner, entry.clientMessageId, errorCode)
                         }
                         requireAuthority()
                         continue

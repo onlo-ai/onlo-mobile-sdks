@@ -7,6 +7,7 @@
     "contracts/v1/attachments.intent.webp.request.json",
     "contracts/v1/attachments.intent.response.json",
     "contracts/v1/attachments.complete.response.json",
+    "contracts/v1/widget.attachments.response.json",
     "contracts/v1/push-token.register.request.json",
     "contracts/v1/push-token.register.response.json",
     "contracts/v1/push-token.register-fcm.request.json",
@@ -16,8 +17,8 @@
     "contracts/v1/push.notification-payload.json"
   ],
   "assertions": [
-    "Allow only up to three JPEG, PNG, or WebP attachments no larger than 8 MiB each.",
-    "Render a completed attachment only through authenticated download.",
+    "Allow only up to five JPEG, PNG, or WebP attachments no larger than 8 MiB each.",
+    "Require the installation-bound Widget upload grant when native chat submits an attachment.",
     "Register push only after host-controlled permission and intent.",
     "Refetch the authorised transcript before displaying or navigating from a push payload."
   ]

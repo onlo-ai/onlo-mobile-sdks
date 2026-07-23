@@ -84,6 +84,12 @@ test('attachment fixture enforces the image-only v1 boundary', async () => {
   }
   assert.ok(policy.maximumImagesPerMessage >= 0 && policy.maximumImagesPerMessage <= 5);
   assert.ok(policy.maximumImageBytes >= 1 && policy.maximumImageBytes <= 8 * 1024 * 1024);
+  const widgetUpload = await fixture('widget.attachments.response.json');
+  assert.equal(widgetUpload.success, true);
+  assert.equal(widgetUpload.attachments.length, 1);
+  assert.equal(typeof widgetUpload.attachments[0].grant, 'string');
+  assert.ok(widgetUpload.attachments[0].grant.length > 0);
+  assert.equal(typeof widgetUpload.attachments[0].grantExpiresAt, 'string');
 });
 
 test('chat and foreground stream fixtures cover every declared event variant', async () => {

@@ -158,7 +158,7 @@ or request rate limits.
 
 ```ts
 type ChatRequest = { sessionId: string; clientMessageId: string; message: string;
-  attachments?: Array<{ id?: string; url: string; type: string; name: string; size: number; sha256?: string; receipt?: string }> };
+  attachments?: Array<{ id?: string; url: string; type: string; name: string; size: number; grant?: string }> };
 type ChatEvent =
   | { type: 'accepted'; clientMessageId: string; messageId: string; conversationId: string; acceptedAt: string; duplicate: boolean; processingStatus: string }
   | { type: 'text'; content: string }
@@ -210,8 +210,9 @@ FAQ answers are not presented as published FAQ content.
 
 | Flow | Contract |
 | --- | --- |
-| Image intent | `POST /api/sdk/v1/attachments/intent`: `{ conversationId, mimeType: 'image/jpeg'|'image/png'|'image/webp', byteSize, sha256, filename }` → `{ attachmentId, intent, expiresAt, completion: { method: 'POST', endpoint: '/api/sdk/v1/attachments/complete' } }`. `byteSize` must not exceed `mediaPolicy.maximumImageBytes` or the 8 MiB SDK ceiling. Intent lasts 5 minutes. |
-| Image completion | Bearer `multipart/form-data`: `intent`, `file` → `{ attachment: { id,url,type,name,size,sha256 }, receipt, receiptExpiresAt, authenticatedDownload }`. Receipt lasts 24 hours. Render only `authenticatedDownload`; include attachment data plus receipt in chat. Chat must not exceed `mediaPolicy.maximumImagesPerMessage` or the 5-image SDK ceiling. |
+| Native image upload | Installation-v1 bearer `POST /api/widget/attachments` with `multipart/form-data`: optional owner-authorised `conversationId`, optional prior `previousGrant`, and `files` → `{ success:true, attachments:[{ id,url,type,name,size,grant,grantExpiresAt }] }`. The 10-minute grant binds the current installation generation, canonical owner, Widget target, routing session, optional conversation, attachment identity, exact URL, MIME, size, and name. A first-message upload omits `conversationId`. |
+| Native image send | Include the returned attachment reference and `grant` in `POST /api/widget/chat`. The server resolves the authoritative conversation from `sessionId`, verifies any historical session against the canonical owner, rechecks `enableFileUpload`, and rejects altered, expired, wrong-owner, wrong-generation, or wrong-target grants. A refreshed grant retains the attachment ID and `clientMessageId`; grant and URL rotation do not change logical-message idempotency. |
+| Legacy mobile image routes | `/api/sdk/v1/attachments/intent` and `/complete` remain available for compatibility, but native v0.1 clients use the Widget upload/send path. |
 | Push register | `POST /api/sdk/v1/push-token`: `{ action:'register', provider:'apns'|'fcm', token, notificationPreference?:'enabled'|'muted', locale?:string }` → `{ state:'active'|'muted', provider, environment:'sandbox'|'production', fingerprint, registeredAt }`. |
 | Push unregister | `{ action:'unregister' }` → `{ state:'inactive' }`. |
 | Push payload | `{ conversationId, messageId, notificationType:'message_available' }`. Re-authorise/refetch transcript before displaying or navigating. |
@@ -220,6 +221,6 @@ FAQ answers are not presented as published FAQ content.
 
 - Do not log tokens, JWTs, message text, PII, attachment URLs, or raw push tokens.
 - Session credentials and identity state must be cleared before a different host-app user can use the SDK.
-- Image-only v1: reject PDF, text, GIF, SVG, video, and arbitrary remote URLs.
+- Image-only v1: reject PDF, text, GIF, SVG, video, and arbitrary remote URLs; accept only server-granted Widget attachment references from native clients.
 - Apply `min(mediaPolicy, SDK safety maximum)` locally; never interpret server values as permission to exceed 5 images or 8 MiB.
 - This contract is server-owned. Any server discrepancy blocks client implementation until corrected here.

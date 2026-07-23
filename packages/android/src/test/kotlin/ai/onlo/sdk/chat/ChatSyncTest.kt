@@ -8,6 +8,7 @@ import ai.onlo.sdk.storage.OutboxState
 import ai.onlo.sdk.storage.OwnerScope
 import ai.onlo.sdk.storage.OwnerScopedOutboxStore
 import ai.onlo.sdk.storage.PersistenceAuthority
+import ai.onlo.sdk.storage.StagedAttachment
 import ai.onlo.sdk.transport.OnloHttpRequest
 import ai.onlo.sdk.transport.OnloHttpResponse
 import ai.onlo.sdk.transport.OnloTransport
@@ -76,10 +77,101 @@ class ChatSyncTest {
     fun `enqueue preserves contract attachment data for durable send`() = runBlocking {
         val store = MemoryOutbox()
         val outbox = DurableChatOutbox(store, WidgetChatApi(FixtureTransport(emptyList()), requests()), nowMs = { 10 })
-        val attachment = ChatAttachment(id = "fixture-id", url = "https://fixture.invalid/download", type = "image/png", name = "image.png", size = 1, receipt = "fixture-receipt")
+        val attachment = ChatAttachment(id = "fixture-id", url = "https://fixture.invalid/download", type = "image/png", name = "image.png", size = 1, grant = "fixture-grant")
         val entry = outbox.enqueue(OwnerScope.Anonymous("owner"), "conversation", "", listOf(attachment))
         assertEquals(listOf(attachment), entry.attachments)
         assertEquals(listOf(attachment), store.rows.single().attachments)
+    }
+
+    @Test
+    fun `Widget upload adapter accepts first-message grant without conversation target`() = runBlocking {
+        val file = java.io.File.createTempFile("onlo-attachment-", ".png")
+        try {
+            file.writeBytes(byteArrayOf(1, 2, 3))
+            val transport = FixtureTransport(listOf(OnloHttpResponse(
+                200,
+                emptyMap(),
+                """{"success":true,"attachments":[{"id":"attachment-1","url":"https://fixture.invalid/object","type":"image/png","name":"image.png","size":3,"grant":"signed-grant","grantExpiresAt":"2099-01-01T00:00:00.000Z"}]}""",
+            )))
+
+            val uploaded = WidgetChatApi(transport, requests()).upload(
+                chatToken = "fixture-bearer",
+                conversationId = null,
+                fileName = "image.png",
+                mimeType = "image/png",
+                file = file,
+            )
+
+            assertEquals("attachment-1", uploaded.id)
+            assertEquals("signed-grant", uploaded.grant)
+            val multipart = okio.Buffer().also(checkNotNull(transport.requests.single().body)::writeTo).readUtf8()
+            assertTrue(!multipart.contains("conversationId"))
+            assertTrue(multipart.contains("name=\"files\"; filename=\"image.png\""))
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
+    fun `expired grant refresh preserves durable id and historical session routing`() = runBlocking {
+        val owner = OwnerScope.Anonymous("owner")
+        val authority = PersistenceAuthority(owner, 1, "current-session", "bearer-context")
+        val store = MemoryOutbox()
+        store.activateAuthority(authority)
+        var refreshes = 0
+        val transport = FixtureTransport(listOf(accepted()))
+        val outbox = DurableChatOutbox(
+            store,
+            WidgetChatApi(transport, requests()),
+            nowMs = { 100 },
+            refreshExpiredAttachments = { entry, _ ->
+                refreshes += 1
+                entry.copy(
+                    attachments = listOf(entry.attachments.single().copy(
+                        url = "https://fixture.invalid/refreshed",
+                        grant = "fresh-grant",
+                    )),
+                    stagedAttachments = listOf(entry.stagedAttachments.single().copy(
+                        grantExpiresAtMs = 1_000,
+                    )),
+                )
+            },
+        )
+        val entry = outbox.enqueue(
+            owner = owner,
+            conversationId = "historical-session",
+            message = "",
+            attachments = listOf(ChatAttachment(
+                id = "attachment-1",
+                url = "https://fixture.invalid/expired",
+                type = "image/png",
+                name = "image.png",
+                size = 3,
+                grant = "expired-grant",
+            )),
+            stagedAttachments = listOf(StagedAttachment(
+                dataBase64 = "AQID",
+                mimeType = "image/png",
+                fileName = "image.png",
+                conversationId = "conversation-1",
+                grantExpiresAtMs = 50,
+            )),
+        )
+
+        outbox.flush(
+            owner,
+            sessionId = "current-session",
+            chatToken = "fixture-bearer",
+            persistenceAuthority = authority,
+        )
+
+        assertEquals(1, refreshes)
+        assertEquals(entry.clientMessageId, store.acceptedId)
+        assertEquals(listOf(entry.clientMessageId), store.sentIds)
+        val sent = requestBody(transport.requests.single())
+        assertEquals("historical-session", sent.getString("sessionId"))
+        assertEquals(entry.clientMessageId, sent.getString("clientMessageId"))
+        assertEquals("fresh-grant", sent.getJSONArray("attachments").getJSONObject(0).getString("grant"))
     }
 
     @Test
@@ -656,6 +748,19 @@ class ChatSyncTest {
             clientMessageId: String,
         ): Boolean = activeAuthority == authority &&
             markSending(authority.ownerScope, clientMessageId)
+        override suspend fun replacePendingIfAuthorised(
+            authority: PersistenceAuthority,
+            entry: OutboxEntry,
+        ): Boolean {
+            if (activeAuthority != authority) return false
+            val current = rows.singleOrNull {
+                it.ownerScope == authority.ownerScope &&
+                    it.clientMessageId == entry.clientMessageId &&
+                    it.state in setOf(OutboxState.QUEUED, OutboxState.FAILED_RETRYABLE)
+            } ?: return false
+            rows.replaceAll { if (it === current) entry else it }
+            return true
+        }
         override suspend fun markAcceptedIfSending(
             authority: PersistenceAuthority,
             clientMessageId: String,
@@ -670,6 +775,7 @@ class ChatSyncTest {
                     it.state == OutboxState.SENDING &&
                     it.attemptCount == expectedAttemptCount
             } ?: return false
+            acceptedId = clientMessageId
             rows.replaceAll {
                 if (it === current) it.copy(
                     state = OutboxState.ACCEPTED,

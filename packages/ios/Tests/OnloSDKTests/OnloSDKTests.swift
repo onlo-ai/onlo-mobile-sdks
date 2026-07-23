@@ -20,6 +20,8 @@ final class OnloSDKTests: XCTestCase {
                 "persistent_outbox",
                 "foreground_stream",
                 "apns",
+                "media_picker",
+                "attachment_upload",
                 "identity_jwt",
                 "config_schema_v1",
                 "deep_link_routing",
@@ -48,14 +50,16 @@ final class OnloSDKTests: XCTestCase {
         logger.setLevel(.off)
     }
 
-    func testImageUploadPrimitiveDoesNotEnableContractBlockedAttachmentSend() async throws {
+    func testFirstMessageWidgetUploadQueuesGrantedAttachmentThroughDurableDispatcher() async throws {
         let imageData = Data("synthetic-image-bytes".utf8)
         let transport = AttachmentLifecycleTransport(imageData: imageData)
+        let ownerStore = InMemoryOwnerScopedStore()
+        let credentials = InMemoryCredentialStore()
         let sdk = OnloSDK(
-            credentialStore: InMemoryCredentialStore(),
+            credentialStore: credentials,
             configStore: InMemoryConfigStore(),
             pushIntentStore: InMemoryPushIntentStore(),
-            ownerStore: InMemoryOwnerScopedStore(),
+            ownerStore: ownerStore,
             transport: transport,
             hostAppIdentifier: "com.example.host"
         )
@@ -66,9 +70,10 @@ final class OnloSDKTests: XCTestCase {
                 apiBaseURL: URL(string: "https://sdk.example.test")!
             )
         )
+        try await Task.sleep(nanoseconds: 10_000_000)
 
         let handle = try await sdk.uploadImage(
-            conversationId: "conversation-1",
+            conversationId: nil,
             data: imageData,
             mimeType: .jpeg,
             filename: "synthetic.jpg"
@@ -76,21 +81,58 @@ final class OnloSDKTests: XCTestCase {
 
         XCTAssertEqual(handle.attachment.id, "attachment-1")
         XCTAssertEqual(handle.attachment.type, "image/jpeg")
-        XCTAssertEqual(handle.attachment.receipt, "synthetic-receipt")
+        XCTAssertEqual(handle.attachment.grant, "synthetic-grant")
         XCTAssertEqual(handle.receiptExpiresAt, "2099-07-24T10:00:00.000Z")
-        do {
-            _ = try await sdk.sendMessage(message: "", attachments: [handle])
-            XCTFail("attachment send must remain disabled until conversation binding is canonical")
-        } catch let error as OnloError {
-            XCTAssertEqual(error.safeCode, "invalid_configuration")
-        }
-        let durableEntry = try await sdk.nextDurableTextDispatch()
-        XCTAssertNil(durableEntry)
+        await Task.yield()
+        let stream = try await sdk.sendMessage(message: "", attachments: [handle])
+        _ = stream
+        let didSend = await waitUntil { await transport.chatRequest() != nil }
+        XCTAssertTrue(didSend)
         let paths = await transport.requestPaths()
         XCTAssertEqual(
-            paths.filter { $0.hasPrefix("/api/sdk/v1/attachments/") },
-            ["/api/sdk/v1/attachments/intent", "/api/sdk/v1/attachments/complete"]
+            paths.filter { $0 == "/api/widget/attachments" || $0 == "/api/widget/chat" },
+            ["/api/widget/attachments", "/api/widget/chat"]
         )
+        let capturedChat = await transport.chatRequest()
+        let chat = try XCTUnwrap(capturedChat)
+        XCTAssertEqual(chat.attachments?.first?.grant, "synthetic-grant")
+        XCTAssertEqual(chat.attachments?.first?.id, "attachment-1")
+    }
+
+    func testHistoricalComposerRoutesGrantedAttachmentWithHistoricalSession() async throws {
+        let imageData = Data("synthetic-image-bytes".utf8)
+        let transport = AttachmentLifecycleTransport(imageData: imageData)
+        let sdk = OnloSDK(
+            credentialStore: InMemoryCredentialStore(),
+            configStore: InMemoryConfigStore(),
+            pushIntentStore: InMemoryPushIntentStore(),
+            ownerStore: InMemoryOwnerScopedStore(),
+            transport: transport,
+            hostAppIdentifier: "com.example.host"
+        )
+        _ = try await sdk.initialize(OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        ))
+        try await Task.sleep(nanoseconds: 10_000_000)
+        let handle = try await sdk.uploadImage(
+            conversationId: "conversation-1",
+            data: imageData,
+            mimeType: .jpeg,
+            filename: "synthetic.jpg"
+        )
+        await Task.yield()
+        let stream = try await sdk.sendMessage(
+            message: "",
+            attachments: [handle],
+            routingSessionId: "historical-session"
+        )
+        _ = stream
+        let didSend = await waitUntil { await transport.chatRequest() != nil }
+        XCTAssertTrue(didSend)
+        let capturedChat = await transport.chatRequest()
+        XCTAssertEqual(capturedChat?.sessionId, "historical-session")
     }
 
     func testInstallationCredentialMatchesServerContract() {
@@ -1282,7 +1324,7 @@ final class OnloSDKTests: XCTestCase {
         let failed = try XCTUnwrap(entries.first)
         XCTAssertEqual(failed.clientMessageId, queued.clientMessageId)
         XCTAssertEqual(failed.state, .failedTerminal)
-        XCTAssertEqual(failed.lastErrorCode, "media_unavailable")
+        XCTAssertEqual(failed.lastErrorCode, "attachment_grant_invalid")
     }
 
     func testDurableDispatcherConsumesExpiredAttachmentHeadAndDispatchesQueuedTextWithoutDuplicateDispatcher() async throws {
@@ -1315,7 +1357,7 @@ final class OnloSDKTests: XCTestCase {
 
         XCTAssertEqual(entries.first?.clientMessageId, expired.clientMessageId)
         XCTAssertEqual(entries.first?.state, .failedTerminal)
-        XCTAssertEqual(entries.first?.lastErrorCode, APIErrorCode.mediaUnavailable.rawValue)
+        XCTAssertEqual(entries.first?.lastErrorCode, "attachment_staging_unavailable")
         XCTAssertEqual(transport.chatClientMessageIDs(), [queuedText.clientMessageId.uuidString])
         try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(transport.chatEventRequestCount(), 1)
@@ -3118,19 +3160,19 @@ private final class ControlledChatTransport: OnloChatSSETransport, @unchecked Se
     }
 }
 
-private actor AttachmentLifecycleTransport: OnloHTTPTransport {
+private final class AttachmentLifecycleTransport: OnloChatSSETransport, @unchecked Sendable {
     private let imageData: Data
-    private let digest: String
+    private let lock = NSLock()
     private var paths: [String] = []
+    private var capturedChat: ChatRequest?
 
     init(imageData: Data) {
         self.imageData = imageData
-        self.digest = SHA256.hash(data: imageData).map { String(format: "%02x", $0) }.joined()
     }
 
     func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
         let path = request.url?.path ?? ""
-        paths.append(path)
+        lock.withLock { paths.append(path) }
         switch path {
         case "/api/sdk/v1/session":
             return sessionResponseMatchingRequest(delayedSessionResponse(generation: 1), request: request)
@@ -3145,26 +3187,13 @@ private actor AttachmentLifecycleTransport: OnloHTTPTransport {
             return OnloHTTPResponse(statusCode: 200, headers: ["ETag": "etag"], body: Data(enabled.utf8))
         case "/api/widget/conversations":
             return emptyInboxResponse()
-        case "/api/sdk/v1/attachments/intent":
-            let body = try XCTUnwrap(request.httpBody)
-            let decoded = try JSONDecoder().decode(AttachmentIntentRequest.self, from: body)
-            guard decoded.conversationId == "conversation-1",
-                  decoded.byteSize == imageData.count,
-                  decoded.sha256 == digest,
-                  decoded.filename == "synthetic.jpg" else {
-                throw OnloError.invalidConfiguration
-            }
-            let json = """
-            {"requestId":"attachment-intent","serverTime":"2026-07-23T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"attachmentId":"attachment-1","intent":"synthetic-intent","expiresAt":"2099-07-23T10:05:00.000Z","completion":{"method":"POST","endpoint":"/api/sdk/v1/attachments/complete"}}}
-            """
-            return OnloHTTPResponse(statusCode: 200, body: Data(json.utf8))
-        case "/api/sdk/v1/attachments/complete":
+        case "/api/widget/attachments":
             guard request.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("multipart/form-data; boundary=") == true,
                   request.httpBody?.range(of: imageData) != nil else {
                 throw OnloError.invalidConfiguration
             }
             let json = """
-            {"requestId":"attachment-complete","serverTime":"2026-07-23T10:00:01.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"attachment":{"id":"attachment-1","url":"opaque-upload-reference","type":"image/jpeg","name":"synthetic.jpg","size":\(imageData.count),"sha256":"\(digest)"},"receipt":"synthetic-receipt","receiptExpiresAt":"2099-07-24T10:00:00.000Z","authenticatedDownload":"opaque-authenticated-download"}}
+            {"success":true,"attachments":[{"id":"attachment-1","url":"opaque-upload-reference","type":"image/jpeg","name":"synthetic.jpg","size":\(imageData.count),"grant":"synthetic-grant","grantExpiresAt":"2099-07-24T10:00:00.000Z"}]}
             """
             return OnloHTTPResponse(statusCode: 200, body: Data(json.utf8))
         default:
@@ -3172,7 +3201,27 @@ private actor AttachmentLifecycleTransport: OnloHTTPTransport {
         }
     }
 
-    func requestPaths() -> [String] { paths }
+    func chatEvents(for request: URLRequest) -> AsyncThrowingStream<ChatEvent, Error> {
+        let chat = request.httpBody.flatMap { try? JSONDecoder().decode(ChatRequest.self, from: $0) }
+        lock.withLock {
+            paths.append(request.url?.path ?? "")
+            capturedChat = chat
+        }
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.accepted(
+                clientMessageId: chat?.clientMessageId ?? "invalid",
+                messageId: "message-1",
+                conversationId: "conversation-1",
+                acceptedAt: "2026-07-24T10:00:00.000Z",
+                duplicate: false,
+                processingStatus: "accepted"
+            ))
+            continuation.finish()
+        }
+    }
+
+    func requestPaths() async -> [String] { lock.withLock { paths } }
+    func chatRequest() async -> ChatRequest? { lock.withLock { capturedChat } }
 }
 
 private actor MockTransport: OnloHTTPTransport {
