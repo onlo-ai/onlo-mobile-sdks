@@ -21,6 +21,7 @@ internal enum class OutboxState {
     QUEUED,
     SENDING,
     ACCEPTED,
+    RECONCILED,
     FAILED_RETRYABLE,
     FAILED_TERMINAL,
     CANCELLED,
@@ -43,6 +44,7 @@ internal data class OutboxEntry(
     val nextAttemptAtMs: Long? = null,
     val lastErrorCode: String? = null,
     val serverMessageId: String? = null,
+    val serverConversationId: String? = null,
 ) {
     init {
         require(runCatching { UUID.fromString(clientMessageId) }.isSuccess) { "client_message_id" }
@@ -78,7 +80,9 @@ internal interface OwnerScopedOutboxStore {
     suspend fun enqueue(entry: OutboxEntry)
     suspend fun eligible(ownerScope: OwnerScope, nowMs: Long, limit: Int): List<OutboxEntry>
     suspend fun markSending(ownerScope: OwnerScope, clientMessageId: String): Boolean
-    suspend fun markAccepted(ownerScope: OwnerScope, clientMessageId: String, serverMessageId: String)
+    suspend fun markAccepted(ownerScope: OwnerScope, clientMessageId: String, serverMessageId: String, conversationId: String): Boolean
+    suspend fun acceptedAwaitingReconciliation(ownerScope: OwnerScope): List<OutboxEntry>
+    suspend fun markReconciled(ownerScope: OwnerScope, clientMessageId: String)
     suspend fun markRetryableFailure(
         ownerScope: OwnerScope,
         clientMessageId: String,

@@ -1,6 +1,8 @@
 # Copy this file to .env.local. Do not commit .env.local.
 NODE_ENVIRONMENT=development
 MERCHANT_BACKEND_LOGIN_CODE=choose-a-local-test-code
+MERCHANT_BACKEND_LOGIN_USERNAME=Onlo SDK Local Tester
+MERCHANT_BACKEND_LOGIN_EMAIL=onlo-sdk-local-tester@example.invalid
 ONLO_MOBILE_IDENTITY_SECRET=replace-with-matching-local-onlo-secret
 ONLO_SDK_KEY=replace-with-local-public-sdk-key
 

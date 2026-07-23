@@ -22,3 +22,22 @@ test('mints a short-lived HS256 Onlo proof with only required claims', () => {
   });
   assert.ok(signature.length > 0);
 });
+
+test('includes the configured synthetic profile in documented JWT claims', () => {
+  const jwt = mintOnloUserJwt({
+    subject: 'synthetic-customer-a',
+    signingSecret: 'synthetic-local-signing-material',
+    nowSeconds: 1_700_000_000,
+    profile: {
+      name: 'Synthetic Customer A',
+      email: 'synthetic-a@example.invalid',
+      locale: 'en',
+    },
+  });
+  const [, encodedPayload] = jwt.split('.');
+  const payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8'));
+
+  assert.equal(payload.name, 'Synthetic Customer A');
+  assert.equal(payload.email, 'synthetic-a@example.invalid');
+  assert.equal(payload.locale, 'en');
+});

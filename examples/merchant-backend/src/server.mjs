@@ -9,11 +9,6 @@ const MAX_BODY_BYTES = 4096;
 const MAX_SESSION_RESPONSE_INSPECTION_BYTES = 64 * 1024;
 const SESSION_LIFETIME_MS = 5 * 60 * 1000;
 const LOCAL_TEST_SUBJECT = 'sdk-local-test-user';
-const LOCAL_TEST_PROFILE = Object.freeze({
-  name: 'Onlo SDK Local Tester',
-  email: 'onlo-sdk-local-tester@example.invalid',
-  locale: 'en',
-});
 const configuration = loadConfiguration(process.env);
 const merchantSessions = new Map();
 
@@ -24,6 +19,10 @@ createServer(
     minVersion: 'TLSv1.2',
   },
   async (request, response) => {
+    const startedAt = Date.now();
+    response.once('finish', () => {
+      safeLog('merchant_http', safeHTTPStatus(response.statusCode), elapsedMs(startedAt));
+    });
     try {
       await handle(request, response);
     } catch {
@@ -66,7 +65,7 @@ async function handle(request, response) {
       merchantSession,
       sdkKey: configuration.sdkKey,
       onloDevelopmentOrigin: configuration.onloDevelopmentOrigin,
-      userJwt: mintOnloUserJwt({ subject: LOCAL_TEST_SUBJECT, signingSecret: configuration.onloIdentitySecret, profile: LOCAL_TEST_PROFILE }),
+      userJwt: mintOnloUserJwt({ subject: LOCAL_TEST_SUBJECT, signingSecret: configuration.onloIdentitySecret, profile: configuration.localTestProfile }),
     });
   }
 
@@ -81,7 +80,7 @@ async function handle(request, response) {
     }
     safeLog('merchant_jwt', 'issued');
     return respond(response, 200, {
-      userJwt: mintOnloUserJwt({ subject: session.customer, signingSecret: configuration.onloIdentitySecret, profile: LOCAL_TEST_PROFILE }),
+      userJwt: mintOnloUserJwt({ subject: session.customer, signingSecret: configuration.onloIdentitySecret, profile: configuration.localTestProfile }),
     });
   }
 
@@ -99,6 +98,8 @@ function loadConfiguration(environment) {
     'MERCHANT_BACKEND_TLS_CERT_PATH',
     'MERCHANT_BACKEND_TLS_KEY_PATH',
     'MERCHANT_BACKEND_LOGIN_CODE',
+    'MERCHANT_BACKEND_LOGIN_USERNAME',
+    'MERCHANT_BACKEND_LOGIN_EMAIL',
     'ONLO_MOBILE_IDENTITY_SECRET',
     'ONLO_SDK_KEY',
     'ONLO_DEVELOPMENT_ORIGIN',
@@ -114,6 +115,10 @@ function loadConfiguration(environment) {
       port === onloProxyPort) {
     throw new Error('invalid local proxy or merchant backend port');
   }
+  if (environment.MERCHANT_BACKEND_LOGIN_USERNAME.length > 200 ||
+      environment.MERCHANT_BACKEND_LOGIN_EMAIL.length > 254) {
+    throw new Error('local test profile exceeds the mobile identity contract');
+  }
   const onloUpstreamOrigin = new URL(environment.ONLO_DEVELOPMENT_ORIGIN);
   if (onloUpstreamOrigin.protocol !== 'http:' && onloUpstreamOrigin.protocol !== 'https:') {
     throw new Error('local Onlo upstream origin must use HTTP or HTTPS');
@@ -126,6 +131,11 @@ function loadConfiguration(environment) {
     loginCode: environment.MERCHANT_BACKEND_LOGIN_CODE,
     onloIdentitySecret: environment.ONLO_MOBILE_IDENTITY_SECRET,
     sdkKey: environment.ONLO_SDK_KEY,
+    localTestProfile: Object.freeze({
+      name: environment.MERCHANT_BACKEND_LOGIN_USERNAME,
+      email: environment.MERCHANT_BACKEND_LOGIN_EMAIL,
+      locale: 'en',
+    }),
     onloDevelopmentOrigin: `https://127.0.0.1:${onloProxyPort}`,
     onloProxyPort,
     onloUpstreamOrigin,
@@ -134,6 +144,7 @@ function loadConfiguration(environment) {
 }
 
 function proxyToLocalOnlo(request, response) {
+  const startedAt = Date.now();
   const upstream = configuration.onloUpstreamOrigin;
   const route = safeRouteCategory(request.url);
   safeLog(`proxy_${route}`, 'started');
@@ -147,18 +158,18 @@ function proxyToLocalOnlo(request, response) {
     path: upstreamPath,
     headers: { ...request.headers, host: upstream.host },
   }, (upstreamResponse) => {
-    safeLog(`proxy_${route}`, safeHTTPStatus(upstreamResponse.statusCode));
+    safeLog(`proxy_${route}`, safeHTTPStatus(upstreamResponse.statusCode), elapsedMs(startedAt));
     const sessionResponse = route === 'session' ? createSafeSessionResponseInspector() : null;
     if (sessionResponse) {
       upstreamResponse.on('data', (chunk) => sessionResponse.observe(chunk));
-      upstreamResponse.on('end', () => safeLog('proxy_session_result', sessionResponse.classification()));
-      upstreamResponse.on('error', () => safeLog('proxy_session_result', 'stream_error'));
+      upstreamResponse.on('end', () => safeLog('proxy_session_result', sessionResponse.classification(), elapsedMs(startedAt)));
+      upstreamResponse.on('error', () => safeLog('proxy_session_result', 'stream_error', elapsedMs(startedAt)));
     }
     response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
     upstreamResponse.pipe(response);
   });
   upstreamRequest.on('error', () => {
-    safeLog(`proxy_${route}`, 'upstream_unavailable');
+    safeLog(`proxy_${route}`, 'upstream_unavailable', elapsedMs(startedAt));
     if (!response.headersSent) respond(response, 502, { error: 'local_onlo_unavailable' });
     else response.destroy();
   });
@@ -218,16 +229,23 @@ function safeHTTPStatus(status) {
   return Number.isInteger(status) && status >= 100 && status <= 599 ? `http_${status}` : 'invalid_status';
 }
 
-function safeLog(operation, code) {
+function safeLog(operation, code, durationMs) {
+  const durationField = Number.isFinite(durationMs)
+    ? ` durationMs=${Math.max(0, Math.round(durationMs))}`
+    : '';
   try {
     appendFileSync(
       configuration.safeLogPath,
-      `${new Date().toISOString()} operation=${operation} code=${code}\n`,
+      `${new Date().toISOString()} operation=${operation} code=${code}${durationField}\n`,
       { encoding: 'utf8', mode: 0o600 },
     );
   } catch {
     // Diagnostics must never change the simulated merchant flow.
   }
+}
+
+function elapsedMs(startedAt) {
+  return Date.now() - startedAt;
 }
 
 function isLoginCodeValid(candidate, expected) {

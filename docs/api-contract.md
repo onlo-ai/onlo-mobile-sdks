@@ -221,5 +221,5 @@ FAQ answers are not presented as published FAQ content.
 - Do not log tokens, JWTs, message text, PII, attachment URLs, or raw push tokens.
 - Session credentials and identity state must be cleared before a different host-app user can use the SDK.
 - Image-only v1: reject PDF, text, GIF, SVG, video, and arbitrary remote URLs.
-- Apply `min(mediaPolicy, SDK safety maximum)` locally; never interpret server values as permission to exceed 3 images or 8 MiB.
+- Apply `min(mediaPolicy, SDK safety maximum)` locally; never interpret server values as permission to exceed 5 images or 8 MiB.
 - This contract is server-owned. Any server discrepancy blocks client implementation until corrected here.

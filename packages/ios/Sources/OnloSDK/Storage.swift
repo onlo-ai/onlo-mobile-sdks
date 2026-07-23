@@ -283,6 +283,7 @@ public enum OutboxState: String, Codable, Sendable, Equatable {
     case queued
     case sending
     case accepted
+    case reconciled
     case failedRetryable = "failed_retryable"
     case failedTerminal = "failed_terminal"
     case cancelled

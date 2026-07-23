@@ -45,6 +45,29 @@ final class MessengerSecurityTests: XCTestCase {
         XCTAssertEqual(persistedTranscript?.conversation.id, "conversation-history")
     }
 
+    func testAuthorisedTranscriptUsesOwnerScopedCacheAfterFirstNetworkFetch() async throws {
+        let transport = HistoricalConversationTransport()
+        let sdk = OnloSDK(
+            credentialStore: InMemoryCredentialStore(),
+            ownerStore: InMemoryOwnerScopedStore(),
+            transport: transport,
+            hostAppIdentifier: "com.example.host",
+            lifecycleBindingEnabled: false
+        )
+        _ = try await sdk.initialize(OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        ))
+
+        let first = try await sdk.messengerTranscript(conversationId: "conversation-history")
+        let second = try await sdk.messengerTranscript(conversationId: "conversation-history")
+        let requestCount = await transport.transcriptRequestCount()
+
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(requestCount, 1)
+    }
+
     func testAnonymousHistoricalPushIsDeferredAndNeverPersistsTranscript() async throws {
         let store = InMemoryOwnerScopedStore()
         let credentialStore = InMemoryCredentialStore()
@@ -211,6 +234,10 @@ final class MessengerSecurityTests: XCTestCase {
         let readBody = await transport.lastReadBody()
         XCTAssertEqual(readsAfterRender, 1)
         XCTAssertEqual(readBody, #"{"throughMessageId":"message-1"}"#)
+        let frameworkStates = await sdk.observeFrameworkState()
+        var frameworkIterator = frameworkStates.makeAsyncIterator()
+        let convergedState = await frameworkIterator.next()
+        XCTAssertEqual(convergedState?.unreadCount, 0)
     }
 
     func testNormalOwnerFreshBearerIntentUsesOneResumeThenOnePush() async throws {
@@ -337,7 +364,7 @@ private actor ReadAcknowledgementTransport: OnloHTTPTransport {
         case ("PUT", "/api/widget/conversations/conversation-1/read"):
             readBodies.append(String(data: request.httpBody ?? Data(), encoding: .utf8) ?? "")
             return OnloHTTPResponse(statusCode: 200, body: Data("""
-            {"conversationId":"conversation-1","readThroughMessageId":"message-1","unread":false,"unreadCount":0}
+            {"conversationId":"conversation-1","readThroughMessageId":"message-1","unread":true,"unreadCount":1}
             """.utf8))
         case ("GET", "/api/widget/conversations"):
             return OnloHTTPResponse(statusCode: 200, body: Data("""
@@ -353,6 +380,8 @@ private actor ReadAcknowledgementTransport: OnloHTTPTransport {
 }
 
 private actor HistoricalConversationTransport: OnloHTTPTransport {
+    private var transcriptRequests = 0
+
     func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
         switch request.url?.path {
         case "/api/sdk/v1/session":
@@ -364,6 +393,7 @@ private actor HistoricalConversationTransport: OnloHTTPTransport {
             {"conversations":[{"id":"conversation-history","sessionId":"session-history","title":"synthetic","unread":true,"unreadCount":1,"status":"open","updatedAt":"2026-07-21T10:00:00.000Z","messageCount":1,"lastMessageRole":"assistant"}],"totalUnreadCount":1}
             """.utf8))
         case "/api/widget/conversations/conversation-history":
+            transcriptRequests += 1
             return OnloHTTPResponse(statusCode: 200, body: Data("""
             {"conversation":{"id":"conversation-history","sessionId":"session-history","status":"open","isHumanTakeover":false},"messages":[{"id":"message-history","externalId":null,"role":"assistant","senderType":null,"senderName":null,"senderTeam":null,"text":"synthetic","attachments":[],"timestamp":1}],"sync":{"previousCursor":null,"nextCursor":null,"limit":100}}
             """.utf8))
@@ -371,6 +401,8 @@ private actor HistoricalConversationTransport: OnloHTTPTransport {
             return OnloHTTPResponse(statusCode: 503, body: Data("{}".utf8))
         }
     }
+
+    func transcriptRequestCount() -> Int { transcriptRequests }
 
     private func response(_ json: String) -> OnloHTTPResponse {
         OnloHTTPResponse(statusCode: 200, body: Data(json.utf8))

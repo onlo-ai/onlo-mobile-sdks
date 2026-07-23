@@ -24,6 +24,12 @@ public struct SDKFrameworkState: Sendable, Equatable {
     }
 }
 
+struct MessengerRealtimeUpdate: Sendable {
+    let conversationId: String
+    let transcript: ConversationTranscriptResult?
+    let conversations: [ConversationSummary]
+}
+
 /// An adapter-safe request to present native messenger UI. The core authorizes a
 /// supplied conversation ID before returning it; a UIKit or SwiftUI adapter owns
 /// the actual presentation.
@@ -93,12 +99,15 @@ public actor OnloSDK {
     private let hostAppBuild: String?
     private let now: @Sendable () -> Date
     private let backoffJitter: @Sendable (Int) -> Double
+    private let foregroundReconnectDelay: @Sendable (Int) -> TimeInterval
+    private let acceptedReconciliationDelay: @Sendable () -> TimeInterval
     private let lifecycleBindingEnabled: Bool
     private var configuration: Configuration?
     private var requestFactory: OnloRequestFactory?
     private var runtimeSession: RuntimeSession?
     private var stateObservers: [UUID: AsyncStream<SDKState>.Continuation] = [:]
     private var frameworkStateObservers: [UUID: AsyncStream<SDKFrameworkState>.Continuation] = [:]
+    private var messengerUpdateObservers: [UUID: AsyncStream<MessengerRealtimeUpdate>.Continuation] = [:]
     private var unreadCount: Int? {
         didSet {
             guard oldValue != unreadCount else { return }
@@ -117,12 +126,35 @@ public actor OnloSDK {
     private var activeDispatchIDs: [OwnerScope: UUID] = [:]
     private var sendObservers: [OwnerScope: [UUID: AsyncThrowingStream<ChatEvent, Error>.Continuation]] = [:]
     private var retryWakeTasks: [OwnerScope: Task<Void, Never>] = [:]
+    private var acceptedReconciliationRetryTasks: [OwnerScope: Task<Void, Never>] = [:]
     private var foregroundStreamTask: Task<Void, Never>?
     private var foregroundStreamScope: OwnerScope?
     private var foregroundStreamID: UUID?
+    private var foregroundReconnectTask: Task<Void, Never>?
+    private var foregroundReconnectScope: OwnerScope?
+    private var foregroundReconnectID: UUID?
+    private var foregroundReconnectAttempt = 0
     private var configRetryTask: Task<Void, Never>?
     private var suppressAutomaticConfigRefresh = false
     private var configAuthority = UUID()
+    private var configurationValidationAuthority: UUID?
+    private struct MessengerInboxCache: Sendable {
+        let authority: UUID
+        let ownerScope: OwnerScope
+        let conversations: [ConversationSummary]
+    }
+    private struct HelpCenterCache: Sendable {
+        let authority: UUID
+        let ownerScope: OwnerScope
+        let topics: [HelpCenterTopic]
+    }
+    private var messengerInboxCache: MessengerInboxCache?
+    private var helpCenterCache: HelpCenterCache?
+    /// A persisted transcript is reusable online only after the current
+    /// in-memory bearer authority has authorised it. Owner-scoped storage
+    /// protects account boundaries; this map prevents a prior session's cache
+    /// from bypassing the first authorization fetch of a resumed session.
+    private var transcriptValidationAuthorities: [String: UUID] = [:]
     private var pushRetryTask: Task<Void, Never>?
     private var pushReconciliationInProgress = false
     private struct PendingAPNsRegistration: Sendable {
@@ -151,6 +183,10 @@ public actor OnloSDK {
         self.hostAppBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
         self.now = Date.init
         self.backoffJitter = { _ in Double.random(in: -0.2...0.2) }
+        self.foregroundReconnectDelay = { attempt in
+            min(pow(2, Double(max(attempt - 1, 0))), 60)
+        }
+        self.acceptedReconciliationDelay = { 5 }
         self.lifecycleBindingEnabled = true
     }
 
@@ -166,6 +202,10 @@ public actor OnloSDK {
         hostAppBuild: String? = nil,
         now: @escaping @Sendable () -> Date = Date.init,
         backoffJitter: @escaping @Sendable (Int) -> Double = { _ in Double.random(in: -0.2...0.2) },
+        foregroundReconnectDelay: @escaping @Sendable (Int) -> TimeInterval = {
+            min(pow(2, Double(max($0 - 1, 0))), 60)
+        },
+        acceptedReconciliationDelay: @escaping @Sendable () -> TimeInterval = { 5 },
         lifecycleBindingEnabled: Bool = true
     ) {
         self.credentialStore = credentialStore
@@ -179,6 +219,8 @@ public actor OnloSDK {
         self.hostAppBuild = hostAppBuild
         self.now = now
         self.backoffJitter = backoffJitter
+        self.foregroundReconnectDelay = foregroundReconnectDelay
+        self.acceptedReconciliationDelay = acceptedReconciliationDelay
         self.lifecycleBindingEnabled = lifecycleBindingEnabled
     }
 
@@ -349,6 +391,13 @@ public actor OnloSDK {
     public func loginIdentifiedUser(userJwt: String) async throws -> SDKState {
         guard isCompactJWT(userJwt) else { throw OnloError.invalidUserJWT }
         try requireInitialized()
+        // Hosts may repeat their login integration after view/scene recovery.
+        // The current identified owner remains authoritative until the host
+        // explicitly calls logout for an account switch.
+        if state == .identifiedReady,
+           runtimeSession?.credential.identityClass == .identified {
+            return state
+        }
         // A previous offline bootstrap leaves a protected pending transition
         // rather than inventing an anonymous owner. An identified host retry
         // must first finish that exact bootstrap, just as
@@ -376,13 +425,10 @@ public actor OnloSDK {
            stored.identityClass == .anonymous {
             return try await replayPendingIdentify(pending, previous: stored, userJwt: userJwt)
         }
-        guard let current = runtimeSession else { throw state == .offlineReady ? OnloError.requiresNetwork : OnloError.invalidState }
-
-        // An account change must unlink the old contact before the new proof is exchanged.
-        if current.credential.identityClass == .identified {
-            cancelConfigRetry()
-            _ = try await logout()
+        guard runtimeSession != nil else {
+            throw state == .offlineReady ? OnloError.requiresNetwork : OnloError.invalidState
         }
+
         guard let anonymousSession = runtimeSession,
               anonymousSession.credential.identityClass == .anonymous else {
             throw OnloError.invalidState
@@ -394,8 +440,20 @@ public actor OnloSDK {
         do {
             try await ensurePendingReplayAllowed(pending, userJwtProvided: true)
             result = try await sendSession(try pending.sessionOperation(userJwt: userJwt), installationId: pending.installationId)
-        } catch {
+        } catch let error as OnloError {
             try await resolveDefinitiveSessionFailure(error, credential: anonymousSession.credential)
+            if case let .remote(remote) = error, remote.code == .identityDisabled {
+                state = .anonymousReady
+                configAuthority = UUID()
+                await refreshConfigurationAfterSessionSuccess()
+                startDurableDispatchIfNeeded()
+                startForegroundStreamIfAvailable()
+                return state
+            }
+            state = .anonymousReady
+            startForegroundStreamIfAvailable()
+            throw error
+        } catch {
             state = .anonymousReady
             startForegroundStreamIfAvailable()
             throw error
@@ -507,6 +565,24 @@ public actor OnloSDK {
         for observer in frameworkStateObservers.values { observer.yield(snapshot) }
     }
 
+    func observeMessengerUpdates() -> AsyncStream<MessengerRealtimeUpdate> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            messengerUpdateObservers[id] = continuation
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.removeMessengerUpdateObserver(id) }
+            }
+        }
+    }
+
+    private func removeMessengerUpdateObserver(_ id: UUID) {
+        messengerUpdateObservers[id] = nil
+    }
+
+    private func publishMessengerUpdate(_ update: MessengerRealtimeUpdate) {
+        for observer in messengerUpdateObservers.values { observer.yield(update) }
+    }
+
     func registerMessengerPresentationInvalidator(_ invalidator: @escaping @MainActor @Sendable () -> Void) -> UUID {
         let id = UUID()
         messengerPresentationInvalidators[id] = invalidator
@@ -526,8 +602,9 @@ public actor OnloSDK {
 
 
     /// Selects exactly one durable text send for the native transport layer.
-    /// v1 has no conversation target, so ordering is conservatively global per
-    /// owner: a blocked head never permits a later row to overtake it.
+    /// v1 has no conversation target, so dispatchable rows remain globally
+    /// ordered per owner. Terminal rows stay available for UI diagnostics but
+    /// cannot permanently deadlock later customer messages.
     func nextDurableTextDispatch() async throws -> OutboxEntry? {
         guard let session = runtimeSession, state == .anonymousReady || state == .identifiedReady else { throw OnloError.invalidState }
         let authority = configAuthority
@@ -535,9 +612,9 @@ public actor OnloSDK {
         guard configAuthority == authority,
               runtimeSession?.credential.ownerScope == session.credential.ownerScope else { throw OnloError.invalidState }
         let all = try await ownerStore.outboxEntries(for: session.credential.ownerScope)
-        // A terminal failure is still the FIFO head. Until the native UI offers
-        // an explicit resolution/removal policy, later rows must not overtake it.
-        guard let head = all.first(where: { $0.state != .accepted && $0.state != .cancelled }) else { return nil }
+        guard let head = all.first(where: {
+            $0.state == .queued || $0.state == .sending || $0.state == .failedRetryable
+        }) else { return nil }
         guard entries.contains(where: { $0.clientMessageId == head.clientMessageId }) else { return nil }
         var sending = head
         if sending.attachments.contains(where: { attachment in
@@ -582,7 +659,39 @@ public actor OnloSDK {
     /// Token-free last-known-good configuration for native presentation and
     /// bridge adapters. It remains available while offline.
     public func currentConfiguration() async throws -> MobileConfig? {
-        try await configStore.loadConfigState().config
+        try await loadConfigurationStateRecoveringCorruptCache().config
+    }
+
+    /// Session establishment, foreground recovery, and config-change events
+    /// validate configuration. Reopening Support within that active runtime
+    /// uses the protected projection and session-scoped Help Center cache.
+    func messengerPresentationResources() async -> (
+        config: MobileConfig?,
+        helpTopics: [HelpCenterTopic],
+        faqContentIsCurrent: Bool
+    ) {
+        let ready = state == .anonymousReady || state == .identifiedReady
+        var configIsCurrent = configurationValidationAuthority == configAuthority
+        if ready, !configIsCurrent {
+            do {
+                try await refreshConfiguration()
+                configIsCurrent = true
+            } catch {
+                configIsCurrent = false
+            }
+        }
+        let config = try? await currentConfiguration()
+        let helpTopics: [HelpCenterTopic]
+        if ready {
+            helpTopics = (try? await messengerHelpCenter()) ?? []
+        } else {
+            helpTopics = []
+        }
+        return (
+            config: config,
+            helpTopics: helpTopics,
+            faqContentIsCurrent: ready && configIsCurrent
+        )
     }
 
     /// Completes the contract-owned image intent/upload flow and returns only
@@ -703,11 +812,17 @@ public actor OnloSDK {
                   let session = runtimeSession else {
                 throw state == .offlineReady ? OnloError.requiresNetwork : OnloError.invalidState
             }
+            if let cached = messengerInboxCache,
+               cached.authority == configAuthority,
+               cached.ownerScope == session.credential.ownerScope {
+                await record(operation: "inbox", code: "cache_hit", requestId: nil, startedAt: startedAt)
+                return cached.conversations
+            }
             let inbox = try await authorisedInbox(for: session)
-            await record(operation: "inbox", code: "ok", requestId: nil, startedAt: startedAt)
+            await record(operation: "inbox", code: "ok", requestId: inbox.requestId, startedAt: startedAt)
             return inbox.conversations
         } catch let error as OnloError {
-            await record(operation: "inbox", code: error.safeCode, requestId: nil, startedAt: startedAt)
+            await record(operation: "inbox", code: error.safeCode, requestId: error.requestId, startedAt: startedAt)
             throw error
         } catch {
             await record(operation: "inbox", code: "network_unavailable", requestId: nil, startedAt: startedAt)
@@ -717,7 +832,7 @@ public actor OnloSDK {
 
     /// The list remains session-authorised. Customer unread state is exposed
     /// only for a verified identity; anonymous summaries are scrubbed.
-    private func authorisedInbox(for session: RuntimeSession) async throws -> ConversationListResult {
+    private func authorisedInbox(for session: RuntimeSession) async throws -> (conversations: [ConversationSummary], requestId: String?) {
         guard let requestFactory else { throw OnloError.invalidState }
         let response = try await transport.execute(try requestFactory.conversations(chatToken: session.chatToken, limit: 50))
         let inbox = try OnloResponseDecoder.widget(ConversationListResult.self, from: response)
@@ -738,79 +853,134 @@ public actor OnloSDK {
         }
         if session.credential.identityClass == .identified {
             unreadCount = inbox.totalUnreadCount
-            return inbox
+            messengerInboxCache = MessengerInboxCache(
+                authority: configAuthority,
+                ownerScope: session.credential.ownerScope,
+                conversations: inbox.conversations
+            )
+            return (
+                conversations: inbox.conversations,
+                requestId: Self.header("x-onlo-request-id", in: response.headers)
+            )
         }
         unreadCount = nil
-        return ConversationListResult(
-            conversations: inbox.conversations.map {
-                ConversationSummary(
-                    id: $0.id,
-                    sessionId: $0.sessionId,
-                    title: $0.title,
-                    unread: false,
-                    unreadCount: 0,
-                    status: $0.status,
-                    updatedAt: $0.updatedAt,
-                    messageCount: $0.messageCount,
-                    lastMessageRole: $0.lastMessageRole
-                )
-            },
-            totalUnreadCount: 0
+        let scrubbedConversations = inbox.conversations.map {
+            ConversationSummary(
+                id: $0.id,
+                sessionId: $0.sessionId,
+                title: $0.title,
+                unread: false,
+                unreadCount: 0,
+                status: $0.status,
+                updatedAt: $0.updatedAt,
+                messageCount: $0.messageCount,
+                lastMessageRole: $0.lastMessageRole
+            )
+        }
+        messengerInboxCache = MessengerInboxCache(
+            authority: configAuthority,
+            ownerScope: session.credential.ownerScope,
+            conversations: scrubbedConversations
+        )
+        return (
+            conversations: scrubbedConversations,
+            requestId: Self.header("x-onlo-request-id", in: response.headers)
         )
     }
 
     func messengerHelpCenter() async throws -> [HelpCenterTopic] {
-        guard state == .anonymousReady || state == .identifiedReady,
-              let session = runtimeSession,
-              let requestFactory else {
-            throw state == .offlineReady ? OnloError.requiresNetwork : OnloError.invalidState
+        let startedAt = Date()
+        do {
+            guard state == .anonymousReady || state == .identifiedReady,
+                  let session = runtimeSession,
+                  let requestFactory else {
+                throw state == .offlineReady ? OnloError.requiresNetwork : OnloError.invalidState
+            }
+            if let cached = helpCenterCache,
+               cached.authority == configAuthority,
+               cached.ownerScope == session.credential.ownerScope {
+                await record(operation: "help_center", code: "cache_hit", requestId: nil, startedAt: startedAt)
+                return cached.topics
+            }
+            let authority = configAuthority
+            let response = try await transport.execute(
+                try requestFactory.helpCenter(chatToken: session.chatToken)
+            )
+            let catalog = try OnloResponseDecoder.widget(HelpCenterCatalog.self, from: response)
+            var topicIDs = Set<String>()
+            var articleIDs = Set<String>()
+            let isValid = catalog.topics.count <= 100 && catalog.topics.allSatisfy { topic in
+                !topic.id.isEmpty &&
+                    !topic.name.isEmpty &&
+                    topic.count == topic.articles.count &&
+                    topicIDs.insert(topic.id).inserted &&
+                    topic.articles.allSatisfy { article in
+                        !article.id.isEmpty &&
+                            !article.title.isEmpty &&
+                            articleIDs.insert(article.id).inserted
+                    }
+            }
+            guard isValid,
+                  configAuthority == authority,
+                  runtimeSession?.sessionId == session.sessionId else {
+                throw OnloError.invalidResponse
+            }
+            helpCenterCache = HelpCenterCache(
+                authority: authority,
+                ownerScope: session.credential.ownerScope,
+                topics: catalog.topics
+            )
+            await record(
+                operation: "help_center",
+                code: "ok",
+                requestId: Self.header("x-onlo-request-id", in: response.headers),
+                startedAt: startedAt
+            )
+            return catalog.topics
+        } catch let error as OnloError {
+            await record(operation: "help_center", code: error.safeCode, requestId: error.requestId, startedAt: startedAt)
+            throw error
+        } catch {
+            await record(operation: "help_center", code: "network_unavailable", requestId: nil, startedAt: startedAt)
+            throw OnloError.transport(code: "network_unavailable")
         }
-        let authority = configAuthority
-        let response = try await transport.execute(
-            try requestFactory.helpCenter(chatToken: session.chatToken)
-        )
-        let catalog = try OnloResponseDecoder.widget(HelpCenterCatalog.self, from: response)
-        var topicIDs = Set<String>()
-        var articleIDs = Set<String>()
-        let isValid = catalog.topics.count <= 100 && catalog.topics.allSatisfy { topic in
-            !topic.id.isEmpty &&
-                !topic.name.isEmpty &&
-                topic.count == topic.articles.count &&
-                topicIDs.insert(topic.id).inserted &&
-                topic.articles.allSatisfy { article in
-                    !article.id.isEmpty &&
-                        !article.title.isEmpty &&
-                        articleIDs.insert(article.id).inserted
-                }
-        }
-        guard isValid,
-              configAuthority == authority,
-              runtimeSession?.sessionId == session.sessionId else {
-            throw OnloError.invalidResponse
-        }
-        return catalog.topics
     }
 
     func messengerHelpCenterArticle(articleId: String) async throws -> HelpCenterArticle {
-        guard !articleId.isEmpty,
-              state == .anonymousReady || state == .identifiedReady,
-              let session = runtimeSession,
-              let requestFactory else {
-            throw state == .offlineReady ? OnloError.requiresNetwork : OnloError.invalidState
+        let startedAt = Date()
+        do {
+            guard !articleId.isEmpty,
+                  state == .anonymousReady || state == .identifiedReady,
+                  let session = runtimeSession,
+                  let requestFactory else {
+                throw state == .offlineReady ? OnloError.requiresNetwork : OnloError.invalidState
+            }
+            let authority = configAuthority
+            let response = try await transport.execute(
+                try requestFactory.helpCenterArticle(articleId: articleId, chatToken: session.chatToken)
+            )
+            let result = try OnloResponseDecoder.widget(HelpCenterArticleResult.self, from: response)
+            guard result.article.id == articleId,
+                  !result.article.title.isEmpty,
+                  result.article.body.count <= 1_000_000,
+                  configAuthority == authority,
+                  runtimeSession?.sessionId == session.sessionId else {
+                throw OnloError.invalidResponse
+            }
+            await record(
+                operation: "help_center_article",
+                code: "ok",
+                requestId: Self.header("x-onlo-request-id", in: response.headers),
+                startedAt: startedAt
+            )
+            return result.article
+        } catch let error as OnloError {
+            await record(operation: "help_center_article", code: error.safeCode, requestId: error.requestId, startedAt: startedAt)
+            throw error
+        } catch {
+            await record(operation: "help_center_article", code: "network_unavailable", requestId: nil, startedAt: startedAt)
+            throw OnloError.transport(code: "network_unavailable")
         }
-        let authority = configAuthority
-        let response = try await transport.execute(
-            try requestFactory.helpCenterArticle(articleId: articleId, chatToken: session.chatToken)
-        )
-        let result = try OnloResponseDecoder.widget(HelpCenterArticleResult.self, from: response)
-        guard result.article.id == articleId,
-              !result.article.title.isEmpty,
-              result.article.body.count <= 1_000_000,
-              configAuthority == authority,
-              runtimeSession?.sessionId == session.sessionId else {
-            throw OnloError.invalidResponse
-        }
-        return result.article
     }
 
     /// Called by the native presenter only after it has committed the fetched
@@ -819,28 +989,46 @@ public actor OnloSDK {
         conversationId: String,
         throughMessageId: String
     ) async throws {
-        guard state == .identifiedReady,
-              let session = runtimeSession,
-              session.credential.identityClass == .identified,
-              let requestFactory else { return }
-        let authority = configAuthority
-        let response = try await transport.execute(
-            try requestFactory.acknowledgeRead(
-                conversationId: conversationId,
-                throughMessageId: throughMessageId,
-                chatToken: session.chatToken
+        let startedAt = Date()
+        do {
+            guard state == .identifiedReady,
+                  let session = runtimeSession,
+                  session.credential.identityClass == .identified,
+                  let requestFactory else { return }
+            let authority = configAuthority
+            let response = try await transport.execute(
+                try requestFactory.acknowledgeRead(
+                    conversationId: conversationId,
+                    throughMessageId: throughMessageId,
+                    chatToken: session.chatToken
+                )
             )
-        )
-        let result = try OnloResponseDecoder.widget(ConversationReadResult.self, from: response)
-        guard result.conversationId == conversationId,
-              result.readThroughMessageId == throughMessageId,
-              !result.unread,
-              result.unreadCount == 0,
-              configAuthority == authority,
-              runtimeSession?.sessionId == session.sessionId else {
-            throw OnloError.invalidResponse
+            let result = try OnloResponseDecoder.widget(ConversationReadResult.self, from: response)
+            guard result.conversationId == conversationId,
+                  result.readThroughMessageId == throughMessageId,
+                  result.unreadCount >= 0,
+                  result.unread == (result.unreadCount > 0),
+                  configAuthority == authority,
+                  runtimeSession?.sessionId == session.sessionId else {
+                throw OnloError.invalidResponse
+            }
+            // The acknowledgement result is a point-in-time snapshot. A newer
+            // unread message may already exist, so converge the badge from the
+            // authoritative inbox instead of requiring this response to be zero.
+            _ = try await authorisedInbox(for: session)
+            await record(
+                operation: "read_acknowledgement",
+                code: "ok",
+                requestId: Self.header("x-onlo-request-id", in: response.headers),
+                startedAt: startedAt
+            )
+        } catch let error as OnloError {
+            await record(operation: "read_acknowledgement", code: error.safeCode, requestId: error.requestId, startedAt: startedAt)
+            throw error
+        } catch {
+            await record(operation: "read_acknowledgement", code: "network_unavailable", requestId: nil, startedAt: startedAt)
+            throw OnloError.transport(code: "network_unavailable")
         }
-        _ = try await authorisedInbox(for: session)
     }
 
     /// Native messenger-only transcript fetch. Offline presentation may render
@@ -863,6 +1051,19 @@ public actor OnloSDK {
         guard state == .anonymousReady || state == .identifiedReady,
               let session = runtimeSession,
               let requestFactory else { throw OnloError.invalidState }
+        if transcriptValidationAuthorities[conversationId] == configAuthority,
+           let cached = try await transcriptStore.transcript(
+               conversationId: conversationId,
+               for: session.credential.ownerScope
+           ) {
+            await record(
+                operation: "transcript",
+                code: "cache_hit",
+                requestId: nil,
+                startedAt: startedAt
+            )
+            return cached
+        }
         let response = try await transport.execute(try requestFactory.transcript(conversationId: conversationId, query: .latest(limit: 100), chatToken: session.chatToken))
         let transcript = try OnloResponseDecoder.widget(ConversationTranscriptResult.self, from: response)
         guard isAuthorisedTranscript(transcript, conversationId: conversationId, session: session) else {
@@ -873,10 +1074,16 @@ public actor OnloSDK {
               runtimeSession?.credential.ownerScope == session.credential.ownerScope else {
             return nil
         }
-        await record(operation: "transcript", code: "ok", requestId: nil, startedAt: startedAt)
+        transcriptValidationAuthorities[conversationId] = configAuthority
+        await record(
+            operation: "transcript",
+            code: "ok",
+            requestId: Self.header("x-onlo-request-id", in: response.headers),
+            startedAt: startedAt
+        )
         return transcript
         } catch let error as OnloError {
-            await record(operation: "transcript", code: error.safeCode, requestId: nil, startedAt: startedAt)
+            await record(operation: "transcript", code: error.safeCode, requestId: error.requestId, startedAt: startedAt)
             throw error
         } catch {
             await record(operation: "transcript", code: "network_unavailable", requestId: nil, startedAt: startedAt)
@@ -999,12 +1206,14 @@ public actor OnloSDK {
         observer.onTermination = { [weak self] _ in
             Task { await self?.removeObserver(for: entry) }
         }
+        let queuedAt = Date()
         do {
             _ = try await ownerStore.enqueueAssigningOrder(entry)
         } catch {
             finishObserver(for: entry, error: error)
             throw error
         }
+        await record(operation: "chat", code: "queued", requestId: nil, startedAt: queuedAt)
         if canDispatchNow { startDurableDispatchIfNeeded() }
         return stream
     }
@@ -1146,9 +1355,10 @@ public actor OnloSDK {
             guard configAuthority == authority,
                   runtimeSession?.sessionId == session.sessionId,
                   runtimeSession?.credential.ownerScope == scope else { return .deferred }
+            transcriptValidationAuthorities[payload.conversationId] = authority
             return .handled(.messenger(conversationId: payload.conversationId))
         } catch let error as OnloError {
-            if case .transport = error { return .deferred }
+            if error.transportCode != nil { return .deferred }
             throw error
         } catch {
             return .deferred
@@ -1298,7 +1508,9 @@ public actor OnloSDK {
             // A transport outcome is ambiguous. Both operations are
             // idempotent, so retain the exact protected intent with bounded
             // local backoff rather than treating it as server-directed retry.
-            if case .transport = error { return try await deferPushIntent(intent, serverRetryAfterMs: nil, directive: nil) }
+            if error.transportCode != nil {
+                return try await deferPushIntent(intent, serverRetryAfterMs: nil, directive: nil)
+            }
             throw error
         } catch {
             return try await deferPushIntent(intent, serverRetryAfterMs: nil, directive: nil)
@@ -1425,6 +1637,7 @@ public actor OnloSDK {
         }
         tasks.forEach { $0.cancel() }
         retryWakeTasks.removeValue(forKey: scope)?.cancel()
+        acceptedReconciliationRetryTasks.removeValue(forKey: scope)?.cancel()
         activeDispatchIDs[scope] = nil
         if let observers = sendObservers.removeValue(forKey: scope) {
             observers.values.forEach { $0.finish() }
@@ -1451,8 +1664,10 @@ public actor OnloSDK {
     }
 
     /// The only network path for durable text rows. It is deliberately owner- and
-    /// session-authority-bound: one unresolved row owns the FIFO slot, while an
-    /// accepted row releases it even if its UI observer continues receiving text.
+    /// session-authority-bound: one unresolved transport turn owns the FIFO
+    /// slot through stream completion. Acceptance makes the row durable but
+    /// does not allow a later customer message to overlap the server's active
+    /// response for this turn.
     private func startDurableDispatchIfNeeded() {
         guard let session = runtimeSession,
               state == .anonymousReady || state == .identifiedReady,
@@ -1462,6 +1677,8 @@ public actor OnloSDK {
         let dispatchID = UUID()
         let scope = session.credential.ownerScope
         let authority = configAuthority
+        acceptedReconciliationRetryTasks[scope]?.cancel()
+        acceptedReconciliationRetryTasks[scope] = nil
         activeDispatchIDs[scope] = dispatchID
         // Dispatch must make forward progress independently of the caller that
         // just queued the row. A task inheriting this actor's executor can be
@@ -1480,49 +1697,120 @@ public actor OnloSDK {
     }
 
     private func runDurableDispatch(dispatchID: UUID, scope: OwnerScope, authority: UUID) async {
+        let dispatchStartedAt = Date()
+        var shouldAdvanceQueue = false
         defer {
             releaseDurableDispatch(dispatchID, scope: scope)
             finishSend(dispatchID, scope: scope)
+            if shouldAdvanceQueue {
+                startDurableDispatchIfNeeded()
+            }
         }
         do {
             guard configAuthority == authority,
                   let session = runtimeSession,
                   session.credential.ownerScope == scope,
                   let requestFactory,
-                  let streamTransport = transport as? any OnloChatSSETransport,
-                  let entry = try await nextDurableTextDispatch() else { return }
+                  let streamTransport = transport as? any OnloChatSSETransport else { return }
+            guard await reconcileAcceptedOutbox(session: session) else {
+                scheduleAcceptedReconciliationRetry(
+                    scope: scope,
+                    authority: authority,
+                    sessionId: session.sessionId
+                )
+                return
+            }
+            guard let entry = try await nextDurableTextDispatch() else { return }
             let request = try requestFactory.chat(
                 ChatRequest(sessionId: session.sessionId, clientMessageId: entry.clientMessageId.uuidString, message: entry.message, attachments: entry.attachments.map(\.attachment)),
                 chatToken: session.chatToken
             )
             let chatStartedAt = Date()
             var accepted = false
+            var acceptedConversationId: String?
             var recordedFirstToken = false
+            let chatCorrelator = streamTransport as? any OnloChatRequestCorrelating
+            defer {
+                chatCorrelator?.clearChatRequestId(
+                    for: entry.clientMessageId.uuidString
+                )
+            }
             do {
                 for try await event in streamTransport.chatEvents(for: request) {
                     guard !Task.isCancelled,
                           configAuthority == authority,
                           runtimeSession?.credential.ownerScope == scope else { return }
                     if case let .accepted(clientMessageId, messageId, conversationId, _, duplicate, _) = event {
+                        guard !accepted else {
+                            throw OnloError.transport(code: "duplicate_accepted_event")
+                        }
+                        await record(
+                            operation: "chat",
+                            code: "accepted_received",
+                            requestId: chatCorrelator?.chatRequestId(
+                                for: entry.clientMessageId.uuidString
+                            ),
+                            startedAt: chatStartedAt
+                        )
                         try await markChatAccepted(clientMessageId: clientMessageId, messageId: messageId, conversationId: conversationId, entry: entry)
                         accepted = true
-                        await record(operation: "chat", code: "accepted", requestId: nil, startedAt: chatStartedAt)
+                        acceptedConversationId = conversationId
+                        await record(
+                            operation: "chat",
+                            code: "accepted",
+                            requestId: chatCorrelator?.chatRequestId(
+                                for: entry.clientMessageId.uuidString
+                            ),
+                            startedAt: chatStartedAt
+                        )
                         yield(event, for: entry)
-                        releaseDurableDispatch(dispatchID, scope: scope)
-                        startDurableDispatchIfNeeded()
                         // Receipt durability is authoritative. A duplicate's
                         // transcript fetch is convergence work and must never
                         // reclassify or resend this accepted logical message.
-                        if duplicate { try? await reconcileTranscript(conversationId: conversationId, session: session) }
+                        if duplicate {
+                            _ = try? await reconcileTranscript(
+                                conversationId: conversationId,
+                                session: session
+                            )
+                        }
                     } else {
-                        if case .text = event, !recordedFirstToken {
-                            recordedFirstToken = true
-                            await record(operation: "chat", code: "first_token", requestId: nil, startedAt: chatStartedAt)
+                        switch event {
+                        case .text:
+                            guard accepted else {
+                                throw OnloError.transport(code: "text_before_accepted")
+                            }
+                            if !recordedFirstToken {
+                                recordedFirstToken = true
+                                await record(
+                                    operation: "chat",
+                                    code: "first_token",
+                                    requestId: chatCorrelator?.chatRequestId(
+                                        for: entry.clientMessageId.uuidString
+                                    ),
+                                    startedAt: chatStartedAt
+                                )
+                            }
+                        case let .done(conversationId, _, _, _, _):
+                            guard acceptedConversationId == conversationId else {
+                                throw OnloError.transport(code: "done_conversation_mismatch")
+                            }
+                            try await markChatReconciled(entry: entry)
+                        case .error:
+                            break
+                        case .accepted:
+                            break
                         }
                         try await handleChatEvent(event, entry: entry, session: session)
                         yield(event, for: entry)
                         if case .done = event {
-                            await record(operation: "chat", code: "complete", requestId: nil, startedAt: chatStartedAt)
+                            await record(
+                                operation: "chat",
+                                code: "complete",
+                                requestId: chatCorrelator?.chatRequestId(
+                                    for: entry.clientMessageId.uuidString
+                                ),
+                                startedAt: chatStartedAt
+                            )
                         }
                     }
                 }
@@ -1533,33 +1821,68 @@ public actor OnloSDK {
                     await scheduleRetryWake(for: scope)
                 } else {
                     finishObserver(for: entry)
+                    shouldAdvanceQueue = true
                 }
             } catch let error as OnloError {
                 guard !Task.isCancelled, configAuthority == authority,
                       runtimeSession?.credential.ownerScope == scope else { return }
-                await record(operation: "chat", code: error.safeCode, requestId: nil, startedAt: chatStartedAt)
+                await record(
+                    operation: "chat",
+                    code: error.safeCode,
+                    requestId: error.requestId ?? chatCorrelator?.chatRequestId(
+                        for: entry.clientMessageId.uuidString
+                    ),
+                    startedAt: chatStartedAt
+                )
                 if !accepted {
                     let retryable = isRetryableChatFailure(error)
                     try? await recordDurableDispatchFailure(entry, retryable: retryable, safeCode: error.safeCode)
                     finishObserver(for: entry, error: error)
-                    if retryable { await scheduleRetryWake(for: scope) }
+                    if retryable {
+                        await scheduleRetryWake(for: scope)
+                    } else {
+                        shouldAdvanceQueue = true
+                    }
                 } else {
                     finishObserver(for: entry, error: error)
+                    shouldAdvanceQueue = true
                 }
             } catch {
                 guard !Task.isCancelled, configAuthority == authority,
                       runtimeSession?.credential.ownerScope == scope else { return }
                 let error = OnloError.transport(code: "network_unavailable")
-                await record(operation: "chat", code: error.safeCode, requestId: nil, startedAt: chatStartedAt)
+                await record(
+                    operation: "chat",
+                    code: error.safeCode,
+                    requestId: chatCorrelator?.chatRequestId(
+                        for: entry.clientMessageId.uuidString
+                    ),
+                    startedAt: chatStartedAt
+                )
                 if accepted {
                     finishObserver(for: entry, error: error)
+                    shouldAdvanceQueue = true
                 } else {
                     try? await recordDurableDispatchFailure(entry, retryable: true, safeCode: error.safeCode)
                     finishObserver(for: entry, error: error)
                     await scheduleRetryWake(for: scope)
                 }
             }
-        } catch { }
+        } catch let error as OnloError {
+            await record(
+                operation: "chat",
+                code: error.safeCode,
+                requestId: error.requestId,
+                startedAt: dispatchStartedAt
+            )
+        } catch {
+            await record(
+                operation: "chat",
+                code: "network_unavailable",
+                requestId: nil,
+                startedAt: dispatchStartedAt
+            )
+        }
     }
 
     private func scheduleRetryWake(for scope: OwnerScope) async {
@@ -1617,7 +1940,16 @@ public actor OnloSDK {
         request: URLRequest,
         transport: any OnloForegroundSSETransport
     ) async {
-        defer { finishForegroundStream(streamID, authority: authority) }
+        defer {
+            finishForegroundStream(
+                streamID,
+                authority: authority,
+                scope: scope,
+                sessionId: session.sessionId
+            )
+        }
+        let startedAt = Date()
+        var recordedReady = false
         do {
             for try await event in transport.streamEvents(for: request) {
                 guard !Task.isCancelled,
@@ -1625,38 +1957,121 @@ public actor OnloSDK {
                       runtimeSession?.credential.ownerScope == scope else { return }
                 switch event {
                 case .ready:
+                    foregroundReconnectAttempt = 0
+                    if !recordedReady {
+                        recordedReady = true
+                        await record(operation: "stream", code: "ok", requestId: nil, startedAt: startedAt)
+                    }
                     continue
                 case .configChanged:
+                    helpCenterCache = nil
                     try? await refreshConfiguration()
                     guard configAuthority == authority,
                           runtimeSession?.credential.ownerScope == scope else { return }
                 case let .inboxConversation(conversationId), let .inboxMessage(conversationId):
-                    try? await reconcileTranscript(conversationId: conversationId, session: session)
+                    let transcript = try? await reconcileTranscript(
+                        conversationId: conversationId,
+                        session: session
+                    )
+                    startDurableDispatchIfNeeded()
                     guard configAuthority == authority,
                           runtimeSession?.credential.ownerScope == scope else { return }
-                    _ = try? await authorisedInbox(for: session)
+                    guard let inbox = try? await authorisedInbox(for: session) else { continue }
                     guard configAuthority == authority,
                           runtimeSession?.credential.ownerScope == scope else { return }
+                    publishMessengerUpdate(MessengerRealtimeUpdate(
+                        conversationId: conversationId,
+                        transcript: transcript,
+                        conversations: inbox.conversations
+                    ))
                 }
             }
-        } catch { }
+        } catch let error as OnloError {
+            await record(operation: "stream", code: error.safeCode, requestId: error.requestId, startedAt: startedAt)
+        } catch {
+            await record(operation: "stream", code: "network_unavailable", requestId: nil, startedAt: startedAt)
+        }
     }
 
-    private func finishForegroundStream(_ streamID: UUID, authority: UUID) {
+    private func finishForegroundStream(
+        _ streamID: UUID,
+        authority: UUID,
+        scope: OwnerScope,
+        sessionId: String
+    ) {
         guard foregroundStreamID == streamID else { return }
         foregroundStreamTask = nil
         foregroundStreamScope = nil
         foregroundStreamID = nil
         // An authority rotation (for example config's bounded token refresh)
-        // deliberately replaces the bearer stream. Do not reconnect after an
-        // ordinary server close, which has no authority change.
+        // deliberately replaces the bearer stream immediately.
         if configAuthority != authority,
            state == .anonymousReady || state == .identifiedReady {
             startForegroundStreamIfAvailable()
+            return
+        }
+        guard configAuthority == authority,
+              state == .anonymousReady || state == .identifiedReady,
+              runtimeSession?.sessionId == sessionId,
+              runtimeSession?.credential.ownerScope == scope else { return }
+        scheduleForegroundReconnect(
+            authority: authority,
+            scope: scope,
+            sessionId: sessionId
+        )
+    }
+
+    private func scheduleForegroundReconnect(
+        authority: UUID,
+        scope: OwnerScope,
+        sessionId: String
+    ) {
+        guard foregroundReconnectTask == nil else { return }
+        foregroundReconnectAttempt = min(foregroundReconnectAttempt + 1, 7)
+        let proposedDelay = foregroundReconnectDelay(foregroundReconnectAttempt)
+        let delay = proposedDelay.isFinite ? min(max(0, proposedDelay), 60) : 60
+        let reconnectID = UUID()
+        foregroundReconnectID = reconnectID
+        foregroundReconnectScope = scope
+        foregroundReconnectTask = Task { [weak self] in
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+            guard !Task.isCancelled else { return }
+            await self?.resumeForegroundStream(
+                reconnectID: reconnectID,
+                authority: authority,
+                scope: scope,
+                sessionId: sessionId
+            )
         }
     }
 
+    private func resumeForegroundStream(
+        reconnectID: UUID,
+        authority: UUID,
+        scope: OwnerScope,
+        sessionId: String
+    ) {
+        guard foregroundReconnectID == reconnectID else { return }
+        foregroundReconnectTask = nil
+        foregroundReconnectScope = nil
+        foregroundReconnectID = nil
+        guard configAuthority == authority,
+              state == .anonymousReady || state == .identifiedReady,
+              runtimeSession?.sessionId == sessionId,
+              runtimeSession?.credential.ownerScope == scope else { return }
+        startForegroundStreamIfAvailable()
+    }
+
     private func cancelForegroundStream(for scope: OwnerScope) {
+        if foregroundReconnectScope == scope {
+            foregroundReconnectTask?.cancel()
+            foregroundReconnectTask = nil
+            foregroundReconnectScope = nil
+            foregroundReconnectID = nil
+            foregroundReconnectAttempt = 0
+        }
         guard foregroundStreamScope == scope else { return }
         foregroundStreamTask?.cancel()
         foregroundStreamTask = nil
@@ -1665,12 +2080,14 @@ public actor OnloSDK {
     }
 
     private func isRetryableChatFailure(_ error: OnloError) -> Bool {
-        guard case let .transport(code) = error else { return false }
+        guard let code = error.transportCode else { return false }
         return code == "network_unavailable" || code == "chat_retryable"
     }
 
     private func markChatAccepted(clientMessageId: String, messageId: String, conversationId: String, entry: OutboxEntry) async throws {
-        guard clientMessageId == entry.clientMessageId.uuidString else { throw OnloError.invalidResponse }
+        guard UUID(uuidString: clientMessageId) == entry.clientMessageId else {
+            throw OnloError.transport(code: "accepted_client_message_mismatch")
+        }
         let accepted = OutboxEntry(
                 clientMessageId: entry.clientMessageId,
                 ownerScope: entry.ownerScope,
@@ -1689,6 +2106,80 @@ public actor OnloSDK {
         try await ownerStore.update(accepted)
     }
 
+    private func markChatReconciled(entry: OutboxEntry) async throws {
+        guard let accepted = try await ownerStore.outboxEntries(for: entry.ownerScope).first(where: {
+            $0.clientMessageId == entry.clientMessageId && $0.state == .accepted
+        }) else { return }
+        var reconciled = accepted
+        reconciled.state = .reconciled
+        try await ownerStore.update(reconciled)
+        acceptedReconciliationRetryTasks.removeValue(forKey: entry.ownerScope)?.cancel()
+    }
+
+    private func reconcileAcceptedOutbox(session: RuntimeSession) async -> Bool {
+        let entries: [OutboxEntry]
+        do {
+            entries = try await ownerStore.outboxEntries(for: session.credential.ownerScope)
+                .filter { $0.state == .accepted }
+        } catch {
+            return false
+        }
+        for entry in entries {
+            guard let conversationId = entry.conversationId,
+                  let serverMessageId = entry.serverMessageId else { return false }
+            do {
+                let transcript = try await reconcileTranscript(
+                    conversationId: conversationId,
+                    session: session
+                )
+                guard let acceptedIndex = transcript.messages.firstIndex(where: {
+                    $0.id == serverMessageId
+                }), transcript.messages.dropFirst(acceptedIndex + 1).contains(where: {
+                    $0.role != "user" && $0.role != "customer"
+                }) else { return false }
+                var reconciled = entry
+                reconciled.state = .reconciled
+                try await ownerStore.update(reconciled)
+            } catch {
+                return false
+            }
+        }
+        acceptedReconciliationRetryTasks.removeValue(forKey: session.credential.ownerScope)?.cancel()
+        return true
+    }
+
+    private func scheduleAcceptedReconciliationRetry(
+        scope: OwnerScope,
+        authority: UUID,
+        sessionId: String
+    ) {
+        guard acceptedReconciliationRetryTasks[scope] == nil else { return }
+        let delay = max(0, min(acceptedReconciliationDelay(), 30))
+        acceptedReconciliationRetryTasks[scope] = Task { [weak self] in
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+            guard let self, !Task.isCancelled else { return }
+            await self.fireAcceptedReconciliationRetry(
+                scope: scope,
+                authority: authority,
+                sessionId: sessionId
+            )
+        }
+    }
+
+    private func fireAcceptedReconciliationRetry(
+        scope: OwnerScope,
+        authority: UUID,
+        sessionId: String
+    ) {
+        acceptedReconciliationRetryTasks[scope] = nil
+        guard configAuthority == authority,
+              runtimeSession?.sessionId == sessionId,
+              runtimeSession?.credential.ownerScope == scope else { return }
+        startDurableDispatchIfNeeded()
+    }
+
     private func handleChatEvent(_ event: ChatEvent, entry: OutboxEntry, session: RuntimeSession) async throws {
         switch event {
         case .accepted:
@@ -1696,23 +2187,40 @@ public actor OnloSDK {
         case .text:
             return
         case .done(let conversationId, let duplicate, _, _, _):
-            if duplicate == true { try await reconcileTranscript(conversationId: conversationId, session: session) }
+            if duplicate == true {
+                _ = try await reconcileTranscript(
+                    conversationId: conversationId,
+                    session: session
+                )
+            }
         case .error(_, let retryable):
             guard retryable else { throw OnloError.invalidResponse }
             throw OnloError.transport(code: "chat_retryable")
         }
     }
 
-    private func reconcileTranscript(conversationId: String, session: RuntimeSession) async throws {
+    private func reconcileTranscript(
+        conversationId: String,
+        session: RuntimeSession
+    ) async throws -> ConversationTranscriptResult {
         guard let requestFactory else { throw OnloError.notInitialized }
+        let authority = configAuthority
         let request = try requestFactory.transcript(conversationId: conversationId, query: .latest(limit: 100), chatToken: session.chatToken)
         let response = try await transport.execute(request)
         let transcript = try OnloResponseDecoder.widget(ConversationTranscriptResult.self, from: response)
-        guard isAuthorisedTranscript(transcript, conversationId: conversationId, session: session) else {
+        guard configAuthority == authority,
+              isAuthorisedTranscript(transcript, conversationId: conversationId, session: session) else {
             throw OnloError.invalidResponse
         }
         guard let transcriptStore = ownerStore as? any TranscriptPersisting else { throw OnloError.persistenceUnavailable }
         try await transcriptStore.replaceTranscript(transcript, for: session.credential.ownerScope)
+        guard configAuthority == authority,
+              runtimeSession?.sessionId == session.sessionId,
+              runtimeSession?.credential.ownerScope == session.credential.ownerScope else {
+            throw OnloError.invalidState
+        }
+        transcriptValidationAuthorities[conversationId] = authority
+        return transcript
     }
 
     /// The server authorises the requested conversation against the active
@@ -1749,7 +2257,7 @@ public actor OnloSDK {
             guard pending.accepts(result.result) else { throw OnloError.invalidResponse }
             try await applyResumedSession(result.result, previous: stored)
         } catch let error as OnloError {
-            if case .transport = error {
+            if error.transportCode != nil {
                 state = .offlineReady
                 return
             }
@@ -1806,7 +2314,7 @@ public actor OnloSDK {
         // owner. Release its old stream before publishing the replacement so
         // foreground recovery cannot remain attached to stale authority.
         if runtimeSession?.credential.ownerScope == scope {
-            cancelForegroundStream(for: scope)
+            cancelActiveSends(for: scope)
         }
         let credential = StoredSessionCredential(
             installationId: result.installationId,
@@ -1875,8 +2383,27 @@ public actor OnloSDK {
             await reconcilePushAfterSessionSuccess()
             await registerPendingAPNsAfterIdentify()
             return state
-        } catch {
+        } catch let error as OnloError {
             try await resolveDefinitiveSessionFailure(error, credential: previous)
+            if case let .remote(remote) = error, remote.code == .identityDisabled {
+                guard let anonymousSession = runtimeSession,
+                      anonymousSession.credential.identityClass == .anonymous,
+                      anonymousSession.credential.ownerScope == previous.ownerScope,
+                      !anonymousSession.sessionId.isEmpty,
+                      !anonymousSession.chatToken.isEmpty else {
+                    state = .reauthRequired
+                    throw OnloError.invalidState
+                }
+                state = .anonymousReady
+                configAuthority = UUID()
+                await refreshConfigurationAfterSessionSuccess()
+                startDurableDispatchIfNeeded()
+                startForegroundStreamIfAvailable()
+                return state
+            }
+            state = .reauthRequired
+            throw error
+        } catch {
             state = .reauthRequired
             throw error
         }
@@ -2006,15 +2533,16 @@ public actor OnloSDK {
     /// malformed response can never replace last-known-good state.
     private func refreshConfiguration(allowTokenRefresh: Bool = true) async throws {
         guard let session = runtimeSession, let requestFactory else { throw OnloError.requiresNetwork }
-        let authority = configAuthority
-        let persisted = try await configStore.loadConfigState()
-        guard hasConfigurationAuthority(authority, session: session) else { throw OnloError.invalidState }
-        if case let .afterBackoff(eligibleAt, _) = persisted.retry, now() < eligibleAt {
-            throw OnloError.requiresNetwork
-        }
-        let request = try requestFactory.config(chatToken: session.chatToken, etag: persisted.etag)
         let startedAt = Date()
+        let authority = configAuthority
+        var persisted = ProtectedMobileConfigState(config: nil, etag: nil, retry: nil)
         do {
+            persisted = try await loadConfigurationStateRecoveringCorruptCache()
+            guard hasConfigurationAuthority(authority, session: session) else { throw OnloError.invalidState }
+            if case let .afterBackoff(eligibleAt, _) = persisted.retry, now() < eligibleAt {
+                throw OnloError.requiresNetwork
+            }
+            let request = try requestFactory.config(chatToken: session.chatToken, etag: persisted.etag)
             let response = try await transport.execute(request)
             guard hasConfigurationAuthority(authority, session: session) else { throw OnloError.invalidState }
             if response.statusCode == 304 {
@@ -2024,16 +2552,18 @@ public actor OnloSDK {
                 guard returnedETag == nil || returnedETag == persisted.etag else { throw OnloError.invalidResponse }
                 let etag = persisted.etag
                 try await configStore.saveConfigState(ProtectedMobileConfigState(config: persisted.config, etag: etag, retry: nil))
+                configurationValidationAuthority = authority
                 await record(operation: "config", code: "not_modified", requestId: nil, startedAt: startedAt)
                 return
             }
             let envelope = try OnloResponseDecoder.envelope(MobileConfig.self, from: response)
             guard let etag = Self.header("etag", in: response.headers), !etag.isEmpty else { throw OnloError.invalidResponse }
             try await configStore.saveConfigState(ProtectedMobileConfigState(config: envelope.result, etag: etag, retry: nil))
+            configurationValidationAuthority = authority
             configRetryTask?.cancel(); configRetryTask = nil
             await record(operation: "config", code: "ok", requestId: envelope.requestId, startedAt: startedAt)
         } catch let error as OnloError {
-            await record(operation: "config", code: error.safeCode, requestId: nil, startedAt: startedAt)
+            await record(operation: "config", code: error.safeCode, requestId: error.requestId, startedAt: startedAt)
             if try await resolveConfigurationFailure(error, previous: persisted, allowTokenRefresh: allowTokenRefresh) { return }
             throw error
         } catch {
@@ -2041,6 +2571,28 @@ public actor OnloSDK {
             await record(operation: "config", code: safe.safeCode, requestId: nil, startedAt: startedAt)
             // Offline is not a protocol failure: retain the protected LKG.
             throw safe
+        }
+    }
+
+    private func loadConfigurationStateRecoveringCorruptCache() async throws -> ProtectedMobileConfigState {
+        do {
+            return try await configStore.loadConfigState()
+        } catch let error as OnloError {
+            guard case let .credentialStore(code) = error,
+                  code == "config_keychain_decode_failed" || code == "config_state_invariant_failed" else {
+                throw error
+            }
+            let empty = ProtectedMobileConfigState(config: nil, etag: nil, retry: nil)
+            try await configStore.saveConfigState(empty)
+            configurationValidationAuthority = nil
+            await logger.record(SDKLogEvent(
+                operation: "config",
+                code: "cache_reset",
+                requestId: nil,
+                sdkVersion: configuration?.sdkVersion ?? "unknown",
+                durationMs: 0
+            ))
+            return empty
         }
     }
 
@@ -2144,7 +2696,7 @@ public actor OnloSDK {
             await record(operation: "session", code: "ok", requestId: envelope.requestId, startedAt: startedAt)
             return envelope
         } catch let error as OnloError {
-            await record(operation: "session", code: error.safeCode, requestId: nil, startedAt: startedAt)
+            await record(operation: "session", code: error.safeCode, requestId: error.requestId, startedAt: startedAt)
             throw error
         } catch {
             await record(operation: "session", code: "network_unavailable", requestId: nil, startedAt: startedAt)

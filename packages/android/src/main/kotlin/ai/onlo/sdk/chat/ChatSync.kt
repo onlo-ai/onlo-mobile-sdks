@@ -286,45 +286,62 @@ internal class DurableChatOutbox(
         return entry
     }
 
-    suspend fun flush(owner: OwnerScope, sessionId: String, chatToken: String) {
-        for (entry in store.eligible(owner, nowMs(), 20)) {
-            if (entry.nextAttemptAtMs != null && entry.nextAttemptAtMs > nowMs()) break
-            if (!store.markSending(owner, entry.clientMessageId)) continue
-            var acceptedPersisted = false
-            val outcome = try {
-                api.send(
-                    chatToken = chatToken,
-                    request = ChatRequest(sessionId, entry.clientMessageId, entry.message, entry.attachments),
-                    onAccepted = { accepted ->
-                        if (accepted.clientMessageId != entry.clientMessageId) {
-                            throw ai.onlo.sdk.protocol.ProtocolViolation("accepted_client_message_id")
-                        }
-                        store.markAccepted(owner, entry.clientMessageId, accepted.messageId)
-                        acceptedPersisted = true
-                        if (accepted.duplicate) onDuplicateAccepted(accepted.conversationId)
-                    },
-                    onEvent = { event -> onEvent(entry, event) },
-                )
-            } catch (failure: CancellationException) {
-                throw failure
-            } catch (_: ai.onlo.sdk.protocol.ProtocolViolation) {
+    /** Returns the persisted retry deadline when the owner FIFO is blocked by its head. */
+    suspend fun flush(owner: OwnerScope, sessionId: String, chatToken: String): Long? {
+        while (true) {
+            val eligible = store.eligible(owner, nowMs(), 20)
+            if (eligible.isEmpty()) return null
+            for (entry in eligible) {
+                if (entry.nextAttemptAtMs != null && entry.nextAttemptAtMs > nowMs()) {
+                    return entry.nextAttemptAtMs
+                }
+                if (!store.markSending(owner, entry.clientMessageId)) continue
+                var acceptedPersisted = false
+                val outcome = try {
+                    api.send(
+                        chatToken = chatToken,
+                        request = ChatRequest(sessionId, entry.clientMessageId, entry.message, entry.attachments),
+                        onAccepted = { accepted ->
+                            if (accepted.clientMessageId != entry.clientMessageId) {
+                                throw ai.onlo.sdk.protocol.ProtocolViolation("accepted_client_message_id")
+                            }
+                            if (!store.markAccepted(owner, entry.clientMessageId, accepted.messageId, accepted.conversationId)) {
+                                throw ai.onlo.sdk.protocol.ProtocolViolation("duplicate_accepted_event")
+                            }
+                            acceptedPersisted = true
+                            if (accepted.duplicate) onDuplicateAccepted(accepted.conversationId)
+                        },
+                        onEvent = { event -> onEvent(entry, event) },
+                    )
+                } catch (failure: CancellationException) {
+                    throw failure
+                } catch (_: ai.onlo.sdk.protocol.ProtocolViolation) {
+                    if (acceptedPersisted) continue
+                    store.markTerminalFailure(owner, entry.clientMessageId, "protocol_violation")
+                    return null
+                } catch (_: java.io.IOException) {
+                    if (acceptedPersisted) continue
+                    val retryAtMs = retryAt(entry)
+                    store.markRetryableFailure(owner, entry.clientMessageId, "transport_unavailable", retryAtMs)
+                    return retryAtMs
+                } catch (failure: Exception) {
+                    if (acceptedPersisted) continue
+                    throw failure
+                }
                 if (acceptedPersisted) continue
-                store.markTerminalFailure(owner, entry.clientMessageId, "protocol_violation")
-                break
-            } catch (_: java.io.IOException) {
-                if (acceptedPersisted) continue
-                store.markRetryableFailure(owner, entry.clientMessageId, "transport_unavailable", retryAt(entry))
-                break
-            } catch (failure: Exception) {
-                if (acceptedPersisted) continue
-                throw failure
-            }
-            if (acceptedPersisted) continue
-            val accepted = outcome.accepted
-            when {
-                accepted != null -> throw IllegalStateException("accepted_callback_missing")
-                outcome.error?.retryable == true -> { store.markRetryableFailure(owner, entry.clientMessageId, "widget_retryable", retryAt(entry)); break }
-                else -> { store.markTerminalFailure(owner, entry.clientMessageId, "widget_rejected"); break }
+                val accepted = outcome.accepted
+                when {
+                    accepted != null -> throw IllegalStateException("accepted_callback_missing")
+                    outcome.error?.retryable == true -> {
+                        val retryAtMs = retryAt(entry)
+                        store.markRetryableFailure(owner, entry.clientMessageId, "widget_retryable", retryAtMs)
+                        return retryAtMs
+                    }
+                    else -> {
+                        store.markTerminalFailure(owner, entry.clientMessageId, "widget_rejected")
+                        return null
+                    }
+                }
             }
         }
     }

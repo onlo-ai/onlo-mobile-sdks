@@ -1,6 +1,6 @@
 # SDK-team local merchant-backend simulator
 
-This local-only HTTPS service is SDK-team test infrastructure. It has one fixed non-PII local test subject and accepts a local test login code, then creates the short-lived HS256 user JWT that a local Onlo service validates. It is not a merchant integration surface, part of the SDK, the Onlo server, or a production backend.
+This local-only HTTPS service is SDK-team test infrastructure. It has one fixed non-PII local test subject and a configurable synthetic name/email profile. After a local test login, it creates the short-lived HS256 user JWT that a local Onlo service validates. It is not a merchant integration surface, part of the SDK, the Onlo server, or a production backend.
 
 Merchant iOS developers use only the [iOS merchant integration](../ios/README.md): public SDK key, authenticated-backend callback, and host-controlled presentation.
 
@@ -33,7 +33,7 @@ The simulator never logs the login code, merchant session, signing secret, JWT, 
    cp local-env.example .env.local
    ```
 
-   Keep `NODE_ENVIRONMENT=development`, then replace the four placeholder values in `.env.local` with the matching local Onlo values. `ONLO_DEVELOPMENT_ORIGIN` may be your existing HTTP local server origin; `npm start` wraps it in a local HTTPS proxy for the SDK. Do not commit, paste, or share that file.
+   Keep `NODE_ENVIRONMENT=development`, set `MERCHANT_BACKEND_LOGIN_USERNAME` and `MERCHANT_BACKEND_LOGIN_EMAIL` to synthetic profile values, then replace the remaining placeholders with matching local Onlo values. The username maps to the documented JWT `name` claim; the email maps to `email`. `ONLO_DEVELOPMENT_ORIGIN` may be your existing HTTP local server origin; `npm start` wraps it in a local HTTPS proxy for the SDK. Do not commit, paste, or share that file.
 
    Expected result: values remain in the ignored local file; no shell exports are required.
 
@@ -47,8 +47,10 @@ The simulator never logs the login code, merchant session, signing secret, JWT, 
 
    The console prints the ignored safe diagnostics file:
    `.local/merchant-backend.log`. It contains only operation names, route
-   categories, and HTTP/error codes; it never contains request bodies, login
-   input, secrets, JWTs, headers, or customer data.
+   categories, HTTP/error codes, and `durationMs` on completed requests. Proxy
+   HTTP timing measures time to response headers; inspected session-result
+   timing measures the complete response. The log never contains request
+   bodies, login input, secrets, JWTs, headers, or customer data.
 
 3. Open the [installable iOS E2E host](../ios-local-e2e/README.md) and run it. Its Debug build adds the generated certificate to the selected simulator automatically.
 
@@ -60,7 +62,7 @@ The simulator never logs the login code, merchant session, signing secret, JWT, 
 npm test
 ```
 
-Expected result: the isolated signing test validates the fixed HS256 algorithm, audience, opaque synthetic subject, and 180-second lifetime. It does not start a server or read local configuration.
+Expected result: the isolated signing tests validate the fixed HS256 algorithm, audience, opaque synthetic subject, 180-second lifetime, and documented synthetic profile claims. They do not start a server or read local configuration.
 
 ## Troubleshooting
 

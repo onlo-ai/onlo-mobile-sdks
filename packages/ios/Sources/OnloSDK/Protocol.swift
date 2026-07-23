@@ -89,11 +89,36 @@ public struct APIError: Codable, Sendable, Equatable {
     public let code: APIErrorCode
     public let message: String
     public let retry: APIRetry
+    /// Correlation metadata copied from the containing v1 envelope. It is
+    /// intentionally excluded from the nested wire error object.
+    public let requestId: String?
 
-    public init(code: APIErrorCode, message: String, retry: APIRetry) {
+    public init(code: APIErrorCode, message: String, retry: APIRetry, requestId: String? = nil) {
         self.code = code
         self.message = message
         self.retry = retry
+        self.requestId = requestId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case code
+        case message
+        case retry
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        code = try container.decode(APIErrorCode.self, forKey: .code)
+        message = try container.decode(String.self, forKey: .message)
+        retry = try container.decode(APIRetry.self, forKey: .retry)
+        requestId = nil
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(code, forKey: .code)
+        try container.encode(message, forKey: .message)
+        try container.encode(retry, forKey: .retry)
     }
 }
 
@@ -727,6 +752,7 @@ public enum OnloError: Error, Sendable, Equatable {
     case invalidResponse
     case remote(APIError)
     case transport(code: String)
+    case correlatedTransport(code: String, requestId: String)
     case credentialStore(code: String)
 
     /// Safe for structured logs; never contains credentials, JWTs, message text, or URLs.
@@ -743,7 +769,23 @@ public enum OnloError: Error, Sendable, Equatable {
         case .invalidResponse: "invalid_response"
         case .remote(let error): error.code.rawValue
         case .transport(let code): code
+        case .correlatedTransport(let code, _): code
         case .credentialStore(let code): code
+        }
+    }
+
+    /// Server-generated request IDs are opaque and safe to use for correlating
+    /// a client failure with the matching PII-free server trace.
+    public var requestId: String? {
+        if case .remote(let error) = self { return error.requestId }
+        if case .correlatedTransport(_, let requestId) = self { return requestId }
+        return nil
+    }
+
+    public var transportCode: String? {
+        switch self {
+        case .transport(let code), .correlatedTransport(let code, _): code
+        default: nil
         }
     }
 }

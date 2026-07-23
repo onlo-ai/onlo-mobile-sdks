@@ -22,14 +22,27 @@ public protocol OnloChatSSETransport: OnloHTTPTransport {
     func chatEvents(for request: URLRequest) -> AsyncThrowingStream<ChatEvent, Error>
 }
 
+/// Internal success-path correlation for the request ID already returned in
+/// the chat response header. It does not alter the public SSE wire contract.
+protocol OnloChatRequestCorrelating: Sendable {
+    func chatRequestId(for clientMessageId: String) -> String?
+    func clearChatRequestId(for clientMessageId: String)
+}
+
 /// Foreground stream events are opaque refetch hints. They carry no durable
 /// transcript mutation and must be bound by the SDK to current session state.
 public protocol OnloForegroundSSETransport: OnloHTTPTransport {
     func streamEvents(for request: URLRequest) -> AsyncThrowingStream<StreamEvent, Error>
 }
 
-public final class URLSessionOnloTransport: OnloChatSSETransport, OnloForegroundSSETransport, @unchecked Sendable {
+public final class URLSessionOnloTransport: OnloChatSSETransport, OnloForegroundSSETransport, OnloChatRequestCorrelating, @unchecked Sendable {
+    private struct ChatEventEnvelope: Decodable {
+        let type: String
+    }
+
     private let session: URLSession
+    private let chatCorrelationLock = NSLock()
+    private var chatRequestIds: [String: String] = [:]
 
     public init(session: URLSession = .shared) {
         self.session = session
@@ -56,13 +69,21 @@ public final class URLSessionOnloTransport: OnloChatSSETransport, OnloForeground
     }
 
     public func chatEvents(for request: URLRequest) -> AsyncThrowingStream<ChatEvent, Error> {
-        AsyncThrowingStream { continuation in
+        let clientMessageId = request.httpBody
+            .flatMap { try? JSONDecoder().decode(ChatRequest.self, from: $0) }?
+            .clientMessageId
+        return AsyncThrowingStream { continuation in
             let task = Task {
                 var receivedResponse = false
+                var requestId: String?
                 do {
                     let (bytes, response) = try await session.bytes(for: request)
                     guard let response = response as? HTTPURLResponse else { throw OnloError.transport(code: "non_http_response") }
                     receivedResponse = true
+                    requestId = Self.requestId(from: response)
+                    if let requestId, let clientMessageId {
+                        self.storeChatRequestId(requestId, for: clientMessageId)
+                    }
                     guard (200...299).contains(response.statusCode) else {
                         var body = Data()
                         for try await byte in bytes {
@@ -72,7 +93,10 @@ public final class URLSessionOnloTransport: OnloChatSSETransport, OnloForeground
                         // Widget failures intentionally have no v1 envelope.
                         guard let error = try? JSONDecoder().decode(WidgetErrorResponse.self, from: body),
                               !error.error.isEmpty else { throw OnloError.invalidResponse }
-                        throw OnloError.transport(code: "widget_error")
+                        if let requestId {
+                            throw OnloError.correlatedTransport(code: "widget_http_\(response.statusCode)", requestId: requestId)
+                        }
+                        throw OnloError.transport(code: "widget_http_\(response.statusCode)")
                     }
                     var dataLines: [String] = []
                     for try await line in bytes.lines {
@@ -80,7 +104,7 @@ public final class URLSessionOnloTransport: OnloChatSSETransport, OnloForeground
                             if !dataLines.isEmpty {
                                 let payload = dataLines.joined(separator: "\n")
                                 guard let data = payload.data(using: .utf8) else { throw OnloError.invalidResponse }
-                                continuation.yield(try JSONDecoder().decode(ChatEvent.self, from: data))
+                                continuation.yield(try Self.decodeChatEvent(data))
                                 dataLines.removeAll(keepingCapacity: true)
                             }
                         } else if line.hasPrefix("data:") {
@@ -90,27 +114,102 @@ public final class URLSessionOnloTransport: OnloChatSSETransport, OnloForeground
                     if !dataLines.isEmpty {
                         let payload = dataLines.joined(separator: "\n")
                         guard let data = payload.data(using: .utf8) else { throw OnloError.invalidResponse }
-                        continuation.yield(try JSONDecoder().decode(ChatEvent.self, from: data))
+                        continuation.yield(try Self.decodeChatEvent(data))
                     }
                     continuation.finish()
                 } catch is CancellationError {
                     continuation.finish(throwing: OnloError.transport(code: "cancelled"))
                 } catch let error as OnloError {
-                    continuation.finish(throwing: error)
+                    if let requestId, error.requestId == nil {
+                        continuation.finish(throwing: OnloError.correlatedTransport(code: error.safeCode, requestId: requestId))
+                    } else {
+                        continuation.finish(throwing: error)
+                    }
                 } catch {
-                    continuation.finish(throwing: receivedResponse ? OnloError.invalidResponse : OnloError.transport(code: "network_unavailable"))
+                    if let requestId {
+                        continuation.finish(throwing: OnloError.correlatedTransport(
+                            code: receivedResponse ? "invalid_response" : "network_unavailable",
+                            requestId: requestId
+                        ))
+                    } else {
+                        continuation.finish(throwing: receivedResponse ? OnloError.invalidResponse : OnloError.transport(code: "network_unavailable"))
+                    }
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
         }
     }
 
+    /// Shared by the live SSE parser and contract-fixture tests so raw server
+    /// frames are validated without opening a network connection.
+    static func decodeChatEvent(_ data: Data) throws -> ChatEvent {
+        do {
+            let event = try JSONDecoder().decode(ChatEvent.self, from: data)
+            switch event {
+            case let .accepted(clientMessageId, messageId, conversationId, acceptedAt, _, processingStatus):
+                guard UUID(uuidString: clientMessageId) != nil,
+                      !messageId.isEmpty,
+                      !conversationId.isEmpty,
+                      !acceptedAt.isEmpty,
+                      !processingStatus.isEmpty else {
+                    throw OnloError.transport(code: "invalid_accepted_event")
+                }
+            case .text:
+                break
+            case let .done(conversationId, _, _, _, _):
+                guard !conversationId.isEmpty else {
+                    throw OnloError.transport(code: "invalid_done_event")
+                }
+            case let .error(error, _):
+                guard !error.isEmpty else {
+                    throw OnloError.transport(code: "invalid_error_event")
+                }
+            }
+            return event
+        } catch {
+            let envelope = try? JSONDecoder().decode(ChatEventEnvelope.self, from: data)
+            let type = envelope?.type.lowercased()
+            let safeType = type.flatMap {
+                ["accepted", "text", "done", "error"].contains($0) ? $0 : nil
+            }
+            throw OnloError.transport(
+                code: safeType.map { "invalid_\($0)_event" } ?? "invalid_response"
+            )
+        }
+    }
+
+    func chatRequestId(for clientMessageId: String) -> String? {
+        chatCorrelationLock.lock()
+        defer { chatCorrelationLock.unlock() }
+        return chatRequestIds[clientMessageId.lowercased()]
+    }
+
+    func clearChatRequestId(for clientMessageId: String) {
+        chatCorrelationLock.lock()
+        defer { chatCorrelationLock.unlock() }
+        chatRequestIds[clientMessageId.lowercased()] = nil
+    }
+
+    private func storeChatRequestId(_ requestId: String, for clientMessageId: String) {
+        chatCorrelationLock.lock()
+        defer { chatCorrelationLock.unlock() }
+        chatRequestIds[clientMessageId.lowercased()] = requestId
+    }
+
     public func streamEvents(for request: URLRequest) -> AsyncThrowingStream<StreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
+                var requestId: String?
                 do {
                     let (bytes, response) = try await session.bytes(for: request)
-                    guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else { throw OnloError.transport(code: "stream_unavailable") }
+                    guard let http = response as? HTTPURLResponse else { throw OnloError.transport(code: "stream_unavailable") }
+                    requestId = Self.requestId(from: http)
+                    guard (200...299).contains(http.statusCode) else {
+                        if let requestId {
+                            throw OnloError.correlatedTransport(code: "stream_http_\(http.statusCode)", requestId: requestId)
+                        }
+                        throw OnloError.transport(code: "stream_unavailable")
+                    }
                     var lines: [String] = []
                     for try await line in bytes.lines {
                         if line.isEmpty, !lines.isEmpty {
@@ -127,11 +226,27 @@ public final class URLSessionOnloTransport: OnloChatSSETransport, OnloForeground
                     }
                     continuation.finish()
                 } catch is CancellationError { continuation.finish() }
-                catch let error as OnloError { continuation.finish(throwing: error) }
-                catch { continuation.finish(throwing: OnloError.transport(code: "network_unavailable")) }
+                catch let error as OnloError {
+                    if let requestId, error.requestId == nil {
+                        continuation.finish(throwing: OnloError.correlatedTransport(code: error.safeCode, requestId: requestId))
+                    } else {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                catch {
+                    if let requestId {
+                        continuation.finish(throwing: OnloError.correlatedTransport(code: "network_unavailable", requestId: requestId))
+                    } else {
+                        continuation.finish(throwing: OnloError.transport(code: "network_unavailable"))
+                    }
+                }
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    private static func requestId(from response: HTTPURLResponse) -> String? {
+        response.value(forHTTPHeaderField: "X-Onlo-Request-Id")
     }
 }
 
@@ -371,7 +486,12 @@ enum OnloResponseDecoder {
                   failure.minimumProtocolVersion <= OnloProtocol.version else {
                 throw OnloError.incompatibleProtocol
             }
-            throw OnloError.remote(failure.error)
+            throw OnloError.remote(APIError(
+                code: failure.error.code,
+                message: failure.error.message,
+                retry: failure.error.retry,
+                requestId: failure.requestId
+            ))
         }
     }
 
@@ -379,12 +499,29 @@ enum OnloResponseDecoder {
         let decoder = JSONDecoder()
         if (200...299).contains(response.statusCode) {
             do { return try decoder.decode(Result.self, from: response.body) }
-            catch { throw OnloError.invalidResponse }
+            catch {
+                if let requestId = requestId(in: response) {
+                    throw OnloError.correlatedTransport(code: "invalid_response", requestId: requestId)
+                }
+                throw OnloError.invalidResponse
+            }
         }
+        let code: String
         if let error = try? decoder.decode(WidgetErrorResponse.self, from: response.body) {
-            throw OnloError.transport(code: "widget_\(response.statusCode)_\(safeWidgetCode(error.error))")
+            code = "widget_\(response.statusCode)_\(safeWidgetCode(error.error))"
+        } else {
+            code = "widget_http_\(response.statusCode)"
         }
-        throw OnloError.transport(code: "widget_http_\(response.statusCode)")
+        if let requestId = requestId(in: response) {
+            throw OnloError.correlatedTransport(code: code, requestId: requestId)
+        }
+        throw OnloError.transport(code: code)
+    }
+
+    private static func requestId(in response: OnloHTTPResponse) -> String? {
+        response.headers.first {
+            $0.key.caseInsensitiveCompare("x-onlo-request-id") == .orderedSame
+        }?.value
     }
 
     private static func safeWidgetCode(_ value: String) -> String {

@@ -99,15 +99,39 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
         }
     }
 
-    override suspend fun markAccepted(ownerScope: OwnerScope, clientMessageId: String, serverMessageId: String): Unit = update(
-        ownerScope = ownerScope,
-        clientMessageId = clientMessageId,
-        values = ContentValues().apply {
+    override suspend fun markAccepted(ownerScope: OwnerScope, clientMessageId: String, serverMessageId: String, conversationId: String): Boolean = onDatabase {
+        ensureUnblocked(it, ownerScope)
+        it.update(
+            OUTBOX_TABLE,
+            ContentValues().apply {
             put("state", OutboxState.ACCEPTED.name)
             put("server_message_id_ciphertext", payloadCipher.encrypt(serverMessageId))
+            put("server_conversation_id_ciphertext", payloadCipher.encrypt(conversationId))
             putNull("last_error_code")
             putNull("next_attempt_at_ms")
-        },
+            },
+            "owner_scope = ? AND client_message_id = ? AND state = ?",
+            arrayOf(ownerScope.storageKey(), clientMessageId, OutboxState.SENDING.name),
+        ) == 1
+    }
+
+    override suspend fun acceptedAwaitingReconciliation(ownerScope: OwnerScope): List<OutboxEntry> = onDatabase {
+        ensureUnblocked(it, ownerScope)
+        it.query(
+            OUTBOX_TABLE,
+            null,
+            "owner_scope = ? AND state = ?",
+            arrayOf(ownerScope.storageKey(), OutboxState.ACCEPTED.name),
+            null,
+            null,
+            "ordering_key ASC, client_message_id ASC",
+        ).useCursor { cursor -> buildList { while (cursor.moveToNext()) add(cursor.toEntry()) } }
+    }
+
+    override suspend fun markReconciled(ownerScope: OwnerScope, clientMessageId: String): Unit = update(
+        ownerScope,
+        clientMessageId,
+        ContentValues().apply { put("state", OutboxState.RECONCILED.name) },
     )
 
     override suspend fun markRetryableFailure(
@@ -298,6 +322,8 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
         lastErrorCode?.let { put("last_error_code", it) } ?: putNull("last_error_code")
         serverMessageId?.let { put("server_message_id_ciphertext", payloadCipher.encrypt(it)) }
             ?: putNull("server_message_id_ciphertext")
+        serverConversationId?.let { put("server_conversation_id_ciphertext", payloadCipher.encrypt(it)) }
+            ?: putNull("server_conversation_id_ciphertext")
     }
 
     private fun Cursor.toEntry(): OutboxEntry = OutboxEntry(
@@ -315,6 +341,7 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
         nextAttemptAtMs = getNullableLong("next_attempt_at_ms"),
         lastErrorCode = getNullableString("last_error_code"),
         serverMessageId = getNullableString("server_message_id_ciphertext")?.let(payloadCipher::decrypt),
+        serverConversationId = getNullableString("server_conversation_id_ciphertext")?.let(payloadCipher::decrypt),
     )
 
     private fun List<ChatAttachment>.toJson(): String = JSONArray().apply {
@@ -387,6 +414,7 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
                   next_attempt_at_ms INTEGER,
                   last_error_code TEXT,
                   server_message_id_ciphertext TEXT,
+                  server_conversation_id_ciphertext TEXT,
                   PRIMARY KEY(owner_scope, client_message_id)
                 )
                 """.trimIndent(),
@@ -401,13 +429,15 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
         }
 
         override fun onUpgrade(database: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            throw IllegalStateException("unsupported_outbox_migration")
+            if (oldVersion < 2) {
+                database.execSQL("ALTER TABLE $OUTBOX_TABLE ADD COLUMN server_conversation_id_ciphertext TEXT")
+            }
         }
     }
 
     private companion object {
         const val DATABASE_NAME = "onlo-sdk-v1.db"
-        const val DATABASE_VERSION = 1
+        const val DATABASE_VERSION = 2
         const val OUTBOX_TABLE = "outbox"
         const val OWNER_ACCESS_TABLE = "owner_access"
         const val TRANSCRIPT_TABLE = "transcript"

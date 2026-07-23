@@ -58,8 +58,11 @@ public final class OnloMessengerPresenter: NSObject, UIAdaptivePresentationContr
     /// the host-selected controller has been attached. Framework adapters call
     /// this async seam rather than treating a loading screen as success.
     public func present(from host: UIViewController, conversationId: String? = nil) async throws {
-        dismissIfStale()
-        guard host.viewIfLoaded?.window != nil, !host.isBeingDismissed else {
+        clearFinishedPresentation()
+        guard navigationController == nil,
+              host.presentedViewController == nil,
+              host.viewIfLoaded?.window != nil,
+              !host.isBeingDismissed else {
             throw OnloError.invalidState
         }
         let gate = PresentationGate()
@@ -73,7 +76,7 @@ public final class OnloMessengerPresenter: NSObject, UIAdaptivePresentationContr
             guard !gate.invalidated,
                   host.viewIfLoaded?.window != nil,
                   !host.isBeingDismissed else { throw OnloError.invalidState }
-            let config = try? await sdk.currentConfiguration()
+            let resources = await sdk.messengerPresentationResources()
             guard !gate.invalidated,
                   host.viewIfLoaded?.window != nil,
                   !host.isBeingDismissed else { throw OnloError.invalidState }
@@ -82,7 +85,9 @@ public final class OnloMessengerPresenter: NSObject, UIAdaptivePresentationContr
             let controller = OnloMessengerViewController(
                 sdk: sdk,
                 conversationId: target,
-                config: config,
+                config: resources.config,
+                initialHelpTopics: resources.helpTopics,
+                faqContentIsCurrent: resources.faqContentIsCurrent,
                 options: options
             )
             let navigation = UINavigationController(rootViewController: controller)
@@ -114,9 +119,10 @@ public final class OnloMessengerPresenter: NSObject, UIAdaptivePresentationContr
         unregisterInvalidator()
     }
 
-    private func dismissIfStale() {
-        guard let navigationController else { return }
-        navigationController.dismiss(animated: false)
+    private func clearFinishedPresentation() {
+        guard let navigationController,
+              navigationController.presentingViewController == nil,
+              navigationController.viewIfLoaded?.window == nil else { return }
         self.navigationController = nil
         messengerController = nil
         unregisterInvalidator()
@@ -139,7 +145,7 @@ public final class OnloMessengerPresenter: NSObject, UIAdaptivePresentationContr
 
 @MainActor
 private final class OnloMessengerViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate, PHPickerViewControllerDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
-    private enum Surface: Int {
+    private enum Surface {
         case conversations
         case faq
         case helpCenter
@@ -156,9 +162,11 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
     private let sdk: OnloSDK
     private let requestedConversationId: String?
     private let config: MobileConfig?
+    private let faqContentIsCurrent: Bool
     private let options: OnloMessengerOptions
     private var screenState: ScreenState = .loading
     private var selectedConversationId: String?
+    private var lastInbox: [ConversationSummary] = []
     /// Native-memory-only optimistic and streamed rows. They make a durable
     /// send visible immediately, while the authorised transcript remains the
     /// source of truth after acceptance/completion.
@@ -168,9 +176,12 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
     private var helpTask: Task<Void, Never>?
     private var sendTask: Task<Void, Never>?
     private var uploadTask: Task<Void, Never>?
+    private var realtimeTask: Task<Void, Never>?
     private var uploadedAttachments: [OutboxAttachment] = []
     private var activeSurface: Surface = .conversations
-    private var helpTopics: [HelpCenterTopic] = []
+    private var availableSurfaces: [Surface] = []
+    private var helpTopics: [HelpCenterTopic]
+    private var selectedFAQ: MobileConfig.FAQ?
     private var selectedHelpTopicID: String?
     private var selectedHelpArticle: HelpCenterArticle?
     private var helpIsLoading = false
@@ -186,7 +197,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
     private var speaksReplies = false
 
     private let statusLabel = UILabel()
-    private let surfaceControl = UISegmentedControl(items: ["Conversations", "FAQ", "Help Center"])
+    private let surfaceControl = UISegmentedControl(items: nil)
     private let tableView = UITableView(frame: .zero, style: .plain)
     private let composerRow = UIStackView()
     private let composer = UITextField()
@@ -194,18 +205,38 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
     private let attachmentButton = UIButton(type: .system)
     private let microphoneButton = UIButton(type: .system)
     private let speakerButton = UIBarButtonItem()
+    private lazy var closeButton = UIBarButtonItem(
+        barButtonSystemItem: .close,
+        target: self,
+        action: #selector(close)
+    )
+    private lazy var conversationBackButton = UIBarButtonItem(
+        title: "Back",
+        style: .plain,
+        target: self,
+        action: #selector(showInbox)
+    )
 
     private struct PendingOutgoingMessage {
         let text: String
         var clientMessageId: String?
+        var serverMessageId: String?
     }
+
+    private struct RenderedReadPosition: Equatable {
+        let conversationId: String
+        let messageId: String
+    }
+    private var lastReadAcknowledgement: RenderedReadPosition?
 
     private enum VisibleRow {
         case inbox(ConversationSummary)
         case transcript(TranscriptMessage)
         case pendingOutgoing(String)
         case streamedReply(String)
-        case faq(MobileConfig.FAQ)
+        case faqQuestion(MobileConfig.FAQ)
+        case faqAnswer(MobileConfig.FAQ)
+        case faqBack
         case helpTopic(HelpCenterTopic)
         case helpArticle(HelpCenterArticleSummary)
         case helpArticleBody(HelpCenterArticle)
@@ -216,11 +247,15 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
         sdk: OnloSDK,
         conversationId: String?,
         config: MobileConfig?,
+        initialHelpTopics: [HelpCenterTopic],
+        faqContentIsCurrent: Bool,
         options: OnloMessengerOptions
     ) {
         self.sdk = sdk
         self.requestedConversationId = conversationId
         self.config = config
+        self.helpTopics = initialHelpTopics
+        self.faqContentIsCurrent = faqContentIsCurrent
         self.options = options
         super.init(nibName: nil, bundle: nil)
     }
@@ -231,7 +266,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
         super.viewDidLoad()
         title = config?.appearance.botName ?? "Support"
         configureHeader()
-        navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .close, target: self, action: #selector(close))
+        navigationItem.leftBarButtonItem = closeButton
         configureVoiceControls()
 
         statusLabel.numberOfLines = 0
@@ -240,7 +275,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
         statusLabel.adjustsFontForContentSizeCategory = true
         statusLabel.accessibilityTraits = .staticText
 
-        surfaceControl.selectedSegmentIndex = Surface.conversations.rawValue
+        configureAvailableSurfaces()
         surfaceControl.addTarget(self, action: #selector(surfaceChanged), for: .valueChanged)
         surfaceControl.accessibilityLabel = "Support section"
 
@@ -281,11 +316,20 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
         stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
+        let keyboardBottomConstraint = stack.bottomAnchor.constraint(
+            equalTo: view.keyboardLayoutGuide.topAnchor,
+            constant: -10
+        )
+        // UIKit can temporarily report a zero-height presentation container
+        // during keyboard/full-screen transitions. Keep the stable layout
+        // pinned while allowing that transient system state to resolve without
+        // breaking the composer constraints.
+        keyboardBottomConstraint.priority = UILayoutPriority(999)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
             stack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
             stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
-            stack.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -10),
+            keyboardBottomConstraint,
             composer.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
         ])
         applyAppearance()
@@ -297,6 +341,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
         helpTask?.cancel()
         sendTask?.cancel()
         uploadTask?.cancel()
+        realtimeTask?.cancel()
     }
 
     override func viewDidDisappear(_ animated: Bool) {
@@ -318,6 +363,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
         helpTask?.cancel(); helpTask = nil
         sendTask?.cancel(); sendTask = nil
         uploadTask?.cancel(); uploadTask = nil
+        realtimeTask?.cancel(); realtimeTask = nil
         uploadedAttachments.removeAll()
         stopDictation()
         speechSynthesizer.stopSpeaking(at: .immediate)
@@ -325,8 +371,10 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
         pendingOutgoingMessage = nil
         streamedReplyText = ""
         helpTopics.removeAll()
+        selectedFAQ = nil
         selectedHelpTopicID = nil
         selectedHelpArticle = nil
+        lastInbox.removeAll()
         composer.text = nil
         composer.isEnabled = false
         sendButton.isEnabled = false
@@ -335,6 +383,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
     }
 
     func loadInitialContent() {
+        startRealtimeUpdatesIfNeeded()
         loadTask?.cancel()
         screenState = .loading
         render()
@@ -352,6 +401,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
                 } else {
                     let inbox = try await sdk.messengerInbox()
                     guard !Task.isCancelled else { return }
+                    lastInbox = inbox
                     screenState = .inbox(inbox)
                     render()
                 }
@@ -361,6 +411,54 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
             } catch {
                 guard !Task.isCancelled else { return }
                 screenState = .failed
+            }
+            render()
+        }
+    }
+
+    private func startRealtimeUpdatesIfNeeded() {
+        guard realtimeTask == nil else { return }
+        realtimeTask = Task { [weak self] in
+            guard let self else { return }
+            let updates = await sdk.observeMessengerUpdates()
+            for await update in updates {
+                guard !Task.isCancelled else { return }
+                lastInbox = update.conversations
+                if selectedConversationId == update.conversationId,
+                   let transcript = update.transcript {
+                    applyTranscript(transcript, completed: false)
+                    render()
+                    await acknowledgeRendered(transcript)
+                } else if selectedConversationId == nil {
+                    screenState = .inbox(update.conversations)
+                    render()
+                }
+            }
+        }
+    }
+
+    @objc private func showInbox() {
+        loadTask?.cancel()
+        selectedConversationId = nil
+        pendingOutgoingMessage = nil
+        streamedReplyText = ""
+        screenState = lastInbox.isEmpty ? .loading : .inbox(lastInbox)
+        render()
+        loadTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let inbox = try await sdk.messengerInbox()
+                guard !Task.isCancelled, selectedConversationId == nil else { return }
+                lastInbox = inbox
+                screenState = .inbox(inbox)
+            } catch let error as OnloError {
+                guard !Task.isCancelled, selectedConversationId == nil else { return }
+                screenState = error == .requiresNetwork && !lastInbox.isEmpty
+                    ? .inbox(lastInbox)
+                    : (error == .requiresNetwork ? .offline : .failed)
+            } catch {
+                guard !Task.isCancelled, selectedConversationId == nil else { return }
+                screenState = lastInbox.isEmpty ? .failed : .inbox(lastInbox)
             }
             render()
         }
@@ -411,7 +509,11 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
         let optimisticText = message.isEmpty
             ? "\(attachments.count) image\(attachments.count == 1 ? "" : "s")"
             : message
-        pendingOutgoingMessage = PendingOutgoingMessage(text: optimisticText, clientMessageId: nil)
+        pendingOutgoingMessage = PendingOutgoingMessage(
+            text: optimisticText,
+            clientMessageId: nil,
+            serverMessageId: nil
+        )
         streamedReplyText = ""
         render()
         sendTask = Task { [weak self] in
@@ -429,8 +531,9 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
                 for try await event in stream {
                     guard !Task.isCancelled else { return }
                     switch event {
-                    case let .accepted(clientMessageId, _, conversationId, _, _, _):
+                    case let .accepted(clientMessageId, messageId, conversationId, _, _, _):
                         pendingOutgoingMessage?.clientMessageId = clientMessageId
+                        pendingOutgoingMessage?.serverMessageId = messageId
                         selectedConversationId = conversationId
                         screenState = .loading
                         render()
@@ -462,37 +565,32 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
     func textFieldShouldReturn(_ textField: UITextField) -> Bool { send(); return false }
 
     @objc private func surfaceChanged() {
-        guard let surface = Surface(rawValue: surfaceControl.selectedSegmentIndex) else { return }
+        guard availableSurfaces.indices.contains(surfaceControl.selectedSegmentIndex) else { return }
+        let surface = availableSurfaces[surfaceControl.selectedSegmentIndex]
         activeSurface = surface
+        if surface != .faq { selectedFAQ = nil }
         stopDictation()
-        if surface == .helpCenter, helpTopics.isEmpty, !helpIsLoading {
-            loadHelpCenter()
-        }
         render()
     }
 
-    private func loadHelpCenter() {
-        helpTask?.cancel()
-        helpIsLoading = true
-        helpLoadFailed = false
-        selectedHelpTopicID = nil
-        selectedHelpArticle = nil
-        render()
-        helpTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                let topics = try await sdk.messengerHelpCenter()
-                guard !Task.isCancelled else { return }
-                helpTopics = topics
-                helpLoadFailed = false
-            } catch {
-                guard !Task.isCancelled else { return }
-                helpTopics = []
-                helpLoadFailed = true
-            }
-            helpIsLoading = false
-            render()
+    private func configureAvailableSurfaces() {
+        availableSurfaces = [.conversations]
+        if faqContentIsCurrent, !configuredFAQs.isEmpty {
+            availableSurfaces.append(.faq)
         }
+        if !helpTopics.isEmpty { availableSurfaces.append(.helpCenter) }
+        surfaceControl.removeAllSegments()
+        for (index, surface) in availableSurfaces.enumerated() {
+            let title: String
+            switch surface {
+            case .conversations: title = "Chats"
+            case .faq: title = "FAQ"
+            case .helpCenter: title = "Help"
+            }
+            surfaceControl.insertSegment(withTitle: title, at: index, animated: false)
+        }
+        surfaceControl.selectedSegmentIndex = 0
+        surfaceControl.isHidden = availableSurfaces.count == 1
     }
 
     private func loadHelpArticle(_ articleId: String) {
@@ -879,13 +977,18 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
 
     private func render() {
         composerRow.isHidden = activeSurface != .conversations
+        navigationItem.leftBarButtonItems = activeSurface == .conversations && selectedConversationId != nil
+            ? [closeButton, conversationBackButton]
+            : [closeButton]
         navigationItem.rightBarButtonItem = activeSurface == .conversations && voiceIsAvailable
             ? speakerButton
             : nil
         if activeSurface == .faq {
             let faqs = configuredFAQs
-            statusLabel.text = faqs.isEmpty ? "No FAQs are available yet." : ""
-            statusLabel.accessibilityLabel = faqs.isEmpty ? statusLabel.text : "Frequently asked questions"
+            statusLabel.text = selectedFAQ?.question ?? (faqs.isEmpty ? "No FAQs are available yet." : "")
+            statusLabel.accessibilityLabel = selectedFAQ == nil
+                ? (faqs.isEmpty ? statusLabel.text : "Frequently asked questions")
+                : "Frequently asked question"
             tableView.reloadData()
             return
         }
@@ -1086,9 +1189,20 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
             cell.accessoryType = .none
             cell.backgroundColor = activePalette.incoming
             cell.textLabel?.textColor = activePalette.incomingText
-        case let .faq(faq):
-            cell.textLabel?.text = "\(faq.question)\n\n\(faq.answer ?? "")"
-            cell.accessibilityLabel = "\(faq.question). \(faq.answer ?? "")"
+        case let .faqQuestion(faq):
+            cell.textLabel?.text = faq.question
+            cell.accessibilityLabel = faq.question
+            cell.accessoryType = .disclosureIndicator
+            cell.accessoryView = nil
+        case let .faqAnswer(faq):
+            cell.textLabel?.text = faq.answer
+            cell.accessibilityLabel = faq.answer
+            cell.accessoryType = .none
+            cell.accessoryView = nil
+            cell.selectionStyle = .none
+        case .faqBack:
+            cell.textLabel?.text = "‹ All questions"
+            cell.accessibilityLabel = "Back to all questions"
             cell.accessoryType = .none
             cell.accessoryView = nil
         case let .helpTopic(topic):
@@ -1127,6 +1241,12 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
             render()
         case let .helpArticle(article):
             loadHelpArticle(article.id)
+        case let .faqQuestion(faq):
+            selectedFAQ = faq
+            render()
+        case .faqBack:
+            selectedFAQ = nil
+            render()
         case .helpBack:
             if selectedHelpArticle != nil {
                 selectedHelpArticle = nil
@@ -1135,7 +1255,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
             }
             helpLoadFailed = false
             render()
-        case .transcript, .pendingOutgoing, .streamedReply, .faq, .helpArticleBody:
+        case .transcript, .pendingOutgoing, .streamedReply, .faqAnswer, .helpArticleBody:
             break
         }
         tableView.deselectRow(at: indexPath, animated: true)
@@ -1143,7 +1263,10 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
 
     private var visibleRows: [VisibleRow] {
         if activeSurface == .faq {
-            return configuredFAQs.map(VisibleRow.faq)
+            if let selectedFAQ {
+                return [.faqBack, .faqAnswer(selectedFAQ)]
+            }
+            return configuredFAQs.map(VisibleRow.faqQuestion)
         }
         if activeSurface == .helpCenter {
             if let article = selectedHelpArticle {
@@ -1223,12 +1346,7 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
                 render()
                 return
             }
-            screenState = .transcript(transcript)
-            if let clientMessageId = pendingOutgoingMessage?.clientMessageId,
-               transcript.messages.contains(where: { $0.externalId == clientMessageId }) {
-                pendingOutgoingMessage = nil
-            }
-            if completed { streamedReplyText = "" }
+            applyTranscript(transcript, completed: completed)
         } catch {
             // Keep the already-rendered native-memory rows. The durable outbox
             // and authorised transcript reconciliation remain owned by the SDK.
@@ -1239,12 +1357,36 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
         }
     }
 
+    private func applyTranscript(
+        _ transcript: ConversationTranscriptResult,
+        completed: Bool
+    ) {
+        screenState = .transcript(transcript)
+        if let serverMessageId = pendingOutgoingMessage?.serverMessageId,
+           transcript.messages.contains(where: { $0.id == serverMessageId }) {
+            pendingOutgoingMessage = nil
+        }
+        if completed { streamedReplyText = "" }
+    }
+
     private func acknowledgeRendered(_ transcript: ConversationTranscriptResult) async {
         guard let latest = transcript.messages.max(by: { $0.timestamp < $1.timestamp }) else { return }
-        try? await sdk.acknowledgeRenderedConversation(
+        let position = RenderedReadPosition(
             conversationId: transcript.conversation.id,
-            throughMessageId: latest.id
+            messageId: latest.id
         )
+        guard position != lastReadAcknowledgement else { return }
+        lastReadAcknowledgement = position
+        do {
+            try await sdk.acknowledgeRenderedConversation(
+                conversationId: position.conversationId,
+                throughMessageId: position.messageId
+            )
+        } catch {
+            if lastReadAcknowledgement == position {
+                lastReadAcknowledgement = nil
+            }
+        }
     }
 
     private func badgeLabel(_ count: Int) -> UILabel {

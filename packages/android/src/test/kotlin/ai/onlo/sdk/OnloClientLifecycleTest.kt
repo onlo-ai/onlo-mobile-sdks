@@ -372,6 +372,280 @@ class OnloClientLifecycleTest {
     }
 
     @Test
+    fun `retryable chat head schedules one delayed owner wake and then drains FIFO`() = runBlocking {
+        var clock = 1_000L
+        var delayedWakeCalls = 0
+        val delayedWakeStarted = CompletableDeferred<Long>()
+        val releaseWake = CompletableDeferred<Unit>()
+        val transport = RetryableChatTransport()
+        val outbox = SchedulingOutbox()
+        val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
+        val client = OnloClient(
+            configuration = OnloConfiguration("public-sdk-key", "ai.onlo.fixture"),
+            credentialStore = FakeCredentials(),
+            outboxStore = outbox,
+            sessionApi = OnloSessionApi(transport, requests),
+            widgetChatApi = WidgetChatApi(transport, requests),
+            logger = SafeLogger { _: SafeLogEvent -> },
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            nowMs = { clock },
+            retryDelay = { delayMs ->
+                delayedWakeCalls += 1
+                check(delayedWakeStarted.complete(delayMs))
+                releaseWake.await()
+                clock += delayMs
+            },
+        )
+        client.loginUnidentifiedUser()
+        val first = client.sendTextFromNativeUi("first")
+        assertTrue(delayedWakeStarted.await() > 0)
+        val second = client.sendTextFromNativeUi("second")
+
+        assertEquals(listOf(first), outbox.sentIds)
+        releaseWake.complete(Unit)
+        transport.allAccepted.await()
+
+        assertEquals(listOf(first, first, second), outbox.sentIds)
+        assertEquals(1, transport.retryableResponses)
+        assertEquals(1, delayedWakeCalls)
+        assertTrue(outbox.rows.all { it.state == ai.onlo.sdk.storage.OutboxState.ACCEPTED })
+    }
+
+    @Test
+    fun `same owner session refresh replaces delayed wake and resumes FIFO`() = runBlocking {
+        var clock = 1_000L
+        var delayedWakeCalls = 0
+        val firstWakeStarted = CompletableDeferred<Unit>()
+        val firstWakeCancelled = CompletableDeferred<Unit>()
+        val replacementWakeStarted = CompletableDeferred<Unit>()
+        val releaseReplacementWake = CompletableDeferred<Unit>()
+        val transport = RetryableChatTransport()
+        val outbox = SchedulingOutbox()
+        val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
+        val client = OnloClient(
+            configuration = OnloConfiguration("public-sdk-key", "ai.onlo.fixture"),
+            credentialStore = FakeCredentials(),
+            outboxStore = outbox,
+            sessionApi = OnloSessionApi(transport, requests),
+            widgetChatApi = WidgetChatApi(transport, requests),
+            logger = SafeLogger { _: SafeLogEvent -> },
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            nowMs = { clock },
+            retryDelay = { delayMs ->
+                delayedWakeCalls += 1
+                when (delayedWakeCalls) {
+                    1 -> {
+                        firstWakeStarted.complete(Unit)
+                        try {
+                            awaitCancellation()
+                        } finally {
+                            firstWakeCancelled.complete(Unit)
+                        }
+                    }
+                    2 -> {
+                        replacementWakeStarted.complete(Unit)
+                        releaseReplacementWake.await()
+                        clock += delayMs
+                    }
+                    else -> error("duplicate delayed wake")
+                }
+            },
+        )
+        client.loginUnidentifiedUser()
+        val first = client.sendTextFromNativeUi("first")
+        firstWakeStarted.await()
+
+        client.loginUnidentifiedUser()
+        firstWakeCancelled.await()
+        replacementWakeStarted.await()
+        val second = client.sendTextFromNativeUi("second")
+        releaseReplacementWake.complete(Unit)
+        transport.allAccepted.await()
+
+        assertEquals(listOf(first, first, second), outbox.sentIds)
+        assertEquals(2, transport.sessionCalls)
+        assertEquals(2, delayedWakeCalls)
+        assertTrue(outbox.rows.all { it.state == ai.onlo.sdk.storage.OutboxState.ACCEPTED })
+    }
+
+    @Test
+    fun `same owner restoration reconciles accepted row without resending`() = runBlocking {
+        val stored = protectedAnonymous()
+        val owner = OwnerScope.Anonymous(stored.ownerScopeId)
+        val outbox = SchedulingOutbox()
+        val accepted = OutboxEntryFactory.create(owner, "local", "first", emptyList(), 1).copy(
+            state = ai.onlo.sdk.storage.OutboxState.ACCEPTED,
+            serverMessageId = "customer-message",
+            serverConversationId = "conversation",
+        )
+        outbox.rows += accepted
+        val transport = AcceptedRecoveryTransport()
+        val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
+        val client = OnloClient(
+            configuration = OnloConfiguration("public-sdk-key", "ai.onlo.fixture"),
+            credentialStore = FakeCredentials(stored),
+            outboxStore = outbox,
+            sessionApi = OnloSessionApi(transport, requests),
+            widgetChatApi = WidgetChatApi(transport, requests),
+            logger = SafeLogger { _: SafeLogEvent -> },
+            scope = CoroutineScope(Dispatchers.Unconfined),
+        )
+
+        client.loginUnidentifiedUser()
+
+        assertEquals(ai.onlo.sdk.storage.OutboxState.RECONCILED, outbox.rows.single().state)
+        assertEquals(accepted.clientMessageId, outbox.rows.single().clientMessageId)
+        assertEquals(1, transport.transcriptCalls)
+        assertEquals(0, transport.chatCalls)
+    }
+
+    @Test
+    fun `accepted reconciliation retries delayed completion without resending`() = runBlocking {
+        val stored = protectedAnonymous()
+        val owner = OwnerScope.Anonymous(stored.ownerScopeId)
+        val outbox = SchedulingOutbox()
+        outbox.rows += OutboxEntryFactory.create(owner, "local", "first", emptyList(), 1).copy(
+            state = ai.onlo.sdk.storage.OutboxState.ACCEPTED,
+            serverMessageId = "customer-message",
+            serverConversationId = "conversation",
+        )
+        val transport = AcceptedRecoveryTransport(completionVisibleAfterCall = 2)
+        val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
+        val client = OnloClient(
+            configuration = OnloConfiguration("public-sdk-key", "ai.onlo.fixture"),
+            credentialStore = FakeCredentials(stored),
+            outboxStore = outbox,
+            sessionApi = OnloSessionApi(transport, requests),
+            widgetChatApi = WidgetChatApi(transport, requests),
+            logger = SafeLogger { _: SafeLogEvent -> },
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            acceptedReconciliationDelayMs = 0,
+        )
+
+        client.loginUnidentifiedUser()
+        outbox.reconciled.await()
+
+        assertEquals(ai.onlo.sdk.storage.OutboxState.RECONCILED, outbox.rows.single().state)
+        assertEquals(2, transport.transcriptCalls)
+        assertEquals(0, transport.chatCalls)
+    }
+
+    @Test
+    fun `accepted arrival after empty observation keeps existing scheduler ownership`() = runBlocking {
+        val emptyObserved = CompletableDeferred<Unit>()
+        val releaseEmptyCommit = CompletableDeferred<Unit>()
+        var emptyCommitCalls = 0
+        val transport = LiveAcceptanceRecoveryTransport()
+        val outbox = SchedulingOutbox()
+        val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
+        val client = OnloClient(
+            configuration = OnloConfiguration("public-sdk-key", "ai.onlo.fixture"),
+            credentialStore = FakeCredentials(),
+            outboxStore = outbox,
+            sessionApi = OnloSessionApi(transport, requests),
+            widgetChatApi = WidgetChatApi(transport, requests),
+            logger = SafeLogger { _: SafeLogEvent -> },
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            acceptedReconciliationDelayMs = 0,
+            acceptedReconciliationBeforeEmptyCommit = {
+                emptyCommitCalls += 1
+                if (emptyCommitCalls == 1) {
+                    emptyObserved.complete(Unit)
+                    releaseEmptyCommit.await()
+                }
+            },
+        )
+        client.loginUnidentifiedUser()
+        emptyObserved.await()
+
+        val clientMessageId = client.sendTextFromNativeUi("first")
+        transport.accepted.await()
+        val duringRace = client.acceptedReconciliationDebugState()
+        releaseEmptyCommit.complete(Unit)
+        outbox.reconciled.await()
+        val after = client.acceptedReconciliationDebugState()
+
+        assertEquals(clientMessageId, outbox.rows.single().clientMessageId)
+        assertEquals(ai.onlo.sdk.storage.OutboxState.RECONCILED, outbox.rows.single().state)
+        assertEquals(1, duringRace.workGeneration)
+        assertEquals(1, after.workGeneration)
+        assertEquals(1, after.startCount)
+        assertEquals(1, transport.chatCalls)
+        assertEquals(1, transport.transcriptCalls)
+    }
+
+    @Test
+    fun `accepted arrival after stopped state creates exactly one scheduler`() = runBlocking {
+        val transport = LiveAcceptanceRecoveryTransport()
+        val outbox = SchedulingOutbox()
+        val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
+        val client = OnloClient(
+            configuration = OnloConfiguration("public-sdk-key", "ai.onlo.fixture"),
+            credentialStore = FakeCredentials(),
+            outboxStore = outbox,
+            sessionApi = OnloSessionApi(transport, requests),
+            widgetChatApi = WidgetChatApi(transport, requests),
+            logger = SafeLogger { _: SafeLogEvent -> },
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            acceptedReconciliationDelayMs = 0,
+        )
+        client.loginUnidentifiedUser()
+        while (client.acceptedReconciliationDebugState().phase != "STOPPED") {
+            kotlinx.coroutines.yield()
+        }
+        val before = client.acceptedReconciliationDebugState()
+
+        val clientMessageId = client.sendTextFromNativeUi("first")
+        transport.accepted.await()
+        outbox.reconciled.await()
+        val after = client.acceptedReconciliationDebugState()
+
+        assertEquals(clientMessageId, outbox.rows.single().clientMessageId)
+        assertEquals(ai.onlo.sdk.storage.OutboxState.RECONCILED, outbox.rows.single().state)
+        assertEquals(0, before.workGeneration)
+        assertEquals(1, after.workGeneration)
+        assertEquals(2, after.startCount)
+        assertEquals(1, transport.chatCalls)
+        assertEquals(1, transport.transcriptCalls)
+    }
+
+    @Test
+    fun `owner transition cancels the single delayed chat wake`() = runBlocking {
+        val delayedWakeStarted = CompletableDeferred<Unit>()
+        val delayedWakeCancelled = CompletableDeferred<Unit>()
+        val transport = RetryableChatTransport()
+        val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
+        val client = OnloClient(
+            configuration = OnloConfiguration("public-sdk-key", "ai.onlo.fixture"),
+            credentialStore = FakeCredentials(),
+            outboxStore = SchedulingOutbox(),
+            sessionApi = OnloSessionApi(transport, requests),
+            widgetChatApi = WidgetChatApi(transport, requests),
+            logger = SafeLogger { _: SafeLogEvent -> },
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            nowMs = { 1_000L },
+            retryDelay = {
+                delayedWakeStarted.complete(Unit)
+                try {
+                    awaitCancellation()
+                } finally {
+                    delayedWakeCancelled.complete(Unit)
+                }
+            },
+        )
+        client.loginUnidentifiedUser()
+        client.sendTextFromNativeUi("first")
+        delayedWakeStarted.await()
+
+        assertFailsWith<OnloException.InvalidProtocol> {
+            client.loginIdentifiedUser("header.synthetic.signature")
+        }
+
+        delayedWakeCancelled.await()
+        assertEquals(1, transport.streamCalls)
+    }
+
+    @Test
     fun `mismatched pending resume is rejected before transport`() = runBlocking {
         val stored = protectedAnonymous()
         val credentials = FakeCredentials().apply {
@@ -586,12 +860,96 @@ class OnloClientLifecycleTest {
         override suspend fun enqueue(entry: OutboxEntry) { if (entry.ownerScope.storageKey() in blockedKeys) throw OwnerBlockedException() }
         override suspend fun eligible(ownerScope: OwnerScope, nowMs: Long, limit: Int): List<OutboxEntry> = if (ownerScope.storageKey() in blockedKeys) emptyList() else emptyList()
         override suspend fun markSending(ownerScope: OwnerScope, clientMessageId: String) = false
-        override suspend fun markAccepted(ownerScope: OwnerScope, clientMessageId: String, serverMessageId: String) = Unit
+        override suspend fun markAccepted(ownerScope: OwnerScope, clientMessageId: String, serverMessageId: String, conversationId: String) = true
+        override suspend fun acceptedAwaitingReconciliation(ownerScope: OwnerScope): List<OutboxEntry> = emptyList()
+        override suspend fun markReconciled(ownerScope: OwnerScope, clientMessageId: String) = Unit
         override suspend fun markRetryableFailure(ownerScope: OwnerScope, clientMessageId: String, errorCode: String, nextAttemptAtMs: Long) = Unit
         override suspend fun markTerminalFailure(ownerScope: OwnerScope, clientMessageId: String, errorCode: String) = Unit
         override suspend fun recoverInterruptedSends(ownerScope: OwnerScope, nowMs: Long) = Unit
         override suspend fun blockOwner(ownerScope: OwnerScope) { blocked += ownerScope.storageKey(); blockedKeys += ownerScope.storageKey() }
         override suspend fun blockAndPurgeOwner(ownerScope: OwnerScope) { blockedAndPurged += ownerScope.storageKey(); blockedKeys += ownerScope.storageKey() }
+        override suspend fun purgeOwner(ownerScope: OwnerScope) = Unit
+        override suspend fun clearAll() = Unit
+        override suspend fun replaceTranscript(ownerScope: OwnerScope, conversationId: String, payload: String) = Unit
+        override suspend fun transcript(ownerScope: OwnerScope, conversationId: String): String? = null
+    }
+
+    private class SchedulingOutbox : OwnerScopedOutboxStore {
+        val rows = mutableListOf<OutboxEntry>()
+        val sentIds = mutableListOf<String>()
+        val reconciled = CompletableDeferred<String>()
+        override suspend fun enqueue(entry: OutboxEntry) {
+            val orderingKey = (rows.maxOfOrNull(OutboxEntry::orderingKey) ?: 0L) + 1
+            rows += entry.copy(orderingKey = orderingKey)
+        }
+        override suspend fun eligible(ownerScope: OwnerScope, nowMs: Long, limit: Int): List<OutboxEntry> =
+            rows.filter {
+                it.ownerScope == ownerScope &&
+                    it.state in setOf(
+                        ai.onlo.sdk.storage.OutboxState.QUEUED,
+                        ai.onlo.sdk.storage.OutboxState.FAILED_RETRYABLE,
+                    )
+            }.sortedBy(OutboxEntry::orderingKey).take(limit)
+        override suspend fun markSending(ownerScope: OwnerScope, clientMessageId: String): Boolean {
+            val row = rows.singleOrNull {
+                it.ownerScope == ownerScope &&
+                    it.clientMessageId == clientMessageId &&
+                    it.state in setOf(
+                        ai.onlo.sdk.storage.OutboxState.QUEUED,
+                        ai.onlo.sdk.storage.OutboxState.FAILED_RETRYABLE,
+                    )
+            } ?: return false
+            sentIds += clientMessageId
+            rows.replaceAll {
+                if (it === row) it.copy(
+                    state = ai.onlo.sdk.storage.OutboxState.SENDING,
+                    attemptCount = it.attemptCount + 1,
+                    nextAttemptAtMs = null,
+                ) else it
+            }
+            return true
+        }
+        override suspend fun markAccepted(ownerScope: OwnerScope, clientMessageId: String, serverMessageId: String, conversationId: String): Boolean {
+            var changed = false
+            rows.replaceAll {
+                if (it.ownerScope == ownerScope && it.clientMessageId == clientMessageId &&
+                    it.state == ai.onlo.sdk.storage.OutboxState.SENDING
+                ) {
+                    changed = true
+                    it.copy(
+                        state = ai.onlo.sdk.storage.OutboxState.ACCEPTED,
+                        serverMessageId = serverMessageId,
+                        serverConversationId = conversationId,
+                    )
+                } else it
+            }
+            return changed
+        }
+        override suspend fun acceptedAwaitingReconciliation(ownerScope: OwnerScope): List<OutboxEntry> =
+            rows.filter { it.ownerScope == ownerScope && it.state == ai.onlo.sdk.storage.OutboxState.ACCEPTED }
+        override suspend fun markReconciled(ownerScope: OwnerScope, clientMessageId: String) {
+            rows.replaceAll {
+                if (it.ownerScope == ownerScope && it.clientMessageId == clientMessageId) {
+                    it.copy(state = ai.onlo.sdk.storage.OutboxState.RECONCILED)
+                } else it
+            }
+            if (!reconciled.isCompleted) reconciled.complete(clientMessageId)
+        }
+        override suspend fun markRetryableFailure(ownerScope: OwnerScope, clientMessageId: String, errorCode: String, nextAttemptAtMs: Long) {
+            rows.replaceAll {
+                if (it.ownerScope == ownerScope && it.clientMessageId == clientMessageId) {
+                    it.copy(
+                        state = ai.onlo.sdk.storage.OutboxState.FAILED_RETRYABLE,
+                        nextAttemptAtMs = nextAttemptAtMs,
+                        lastErrorCode = errorCode,
+                    )
+                } else it
+            }
+        }
+        override suspend fun markTerminalFailure(ownerScope: OwnerScope, clientMessageId: String, errorCode: String) = Unit
+        override suspend fun recoverInterruptedSends(ownerScope: OwnerScope, nowMs: Long) = Unit
+        override suspend fun blockOwner(ownerScope: OwnerScope) = Unit
+        override suspend fun blockAndPurgeOwner(ownerScope: OwnerScope) = Unit
         override suspend fun purgeOwner(ownerScope: OwnerScope) = Unit
         override suspend fun clearAll() = Unit
         override suspend fun replaceTranscript(ownerScope: OwnerScope, conversationId: String, payload: String) = Unit
@@ -626,6 +984,128 @@ class OnloClientLifecycleTest {
 
         override suspend fun stream(request: OnloHttpRequest, onLine: suspend (String) -> Unit): SseStreamResult {
             streamAuthorizations += checkNotNull(request.headers["Authorization"])
+            return SseStreamResult.Success(200)
+        }
+    }
+
+    private class RetryableChatTransport : OnloTransport, OnloSseTransport {
+        var retryableResponses = 0
+        var streamCalls = 0
+        var sessionCalls = 0
+        val allAccepted = CompletableDeferred<Unit>()
+
+        override suspend fun execute(request: OnloHttpRequest): OnloHttpResponse {
+            if (request.url.encodedPath.contains("/conversations/")) {
+                return OnloHttpResponse(500, emptyMap(), "{}")
+            }
+            sessionCalls += 1
+            val body = request.body?.let { Buffer().also(it::writeTo).readUtf8() }.orEmpty()
+            val operation = org.json.JSONObject(body).getJSONObject("operation")
+            val proposed = operation.getString("proposedCredential")
+            return OnloHttpResponse(
+                200,
+                emptyMap(),
+                """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"synthetic-session-$sessionCalls","chatToken":"synthetic-chat-token-$sessionCalls","installationId":"00000000-0000-0000-0000-000000000001","generation":$sessionCalls,"proposedCredential":"$proposed","identityClass":"anonymous","publicationState":"testing","attestationState":"not_required","configRevision":"fixture","configSchemaVersion":1,"configEtag":"fixture"}}""",
+            )
+        }
+
+        override suspend fun stream(
+            request: OnloHttpRequest,
+            onLine: suspend (String) -> Unit,
+        ): SseStreamResult {
+            streamCalls += 1
+            if (streamCalls == 1) {
+                retryableResponses += 1
+                onLine("""data: {"type":"error","error":"synthetic","retryable":true}""")
+                onLine("")
+                return SseStreamResult.Success(200)
+            }
+            val clientMessageId = org.json.JSONObject(
+                checkNotNull(request.body).let { Buffer().also(it::writeTo).readUtf8() },
+            ).getString("clientMessageId")
+            onLine("""data: {"type":"accepted","clientMessageId":"$clientMessageId","messageId":"server-$streamCalls","conversationId":"conversation","acceptedAt":"2026-01-01T00:00:00Z","duplicate":false,"processingStatus":"accepted"}""")
+            onLine("")
+            if (streamCalls == 3) allAccepted.complete(Unit)
+            return SseStreamResult.Success(200)
+        }
+    }
+
+    private class AcceptedRecoveryTransport(
+        private val completionVisibleAfterCall: Int = 1,
+    ) : OnloTransport, OnloSseTransport {
+        var transcriptCalls = 0
+        var chatCalls = 0
+        val reconciled = CompletableDeferred<Unit>()
+
+        override suspend fun execute(request: OnloHttpRequest): OnloHttpResponse {
+            if (request.url.encodedPath.contains("/conversations/")) {
+                transcriptCalls += 1
+                val assistant = if (transcriptCalls >= completionVisibleAfterCall) {
+                    """,{"id":"assistant-message","externalId":null,"role":"assistant","senderType":"ai","senderName":null,"senderTeam":null,"text":"synthetic","attachments":[],"timestamp":2}"""
+                } else {
+                    ""
+                }
+                if (assistant.isNotEmpty()) reconciled.complete(Unit)
+                return OnloHttpResponse(
+                    200,
+                    emptyMap(),
+                    """{"conversation":{"id":"conversation","sessionId":"synthetic-session","status":"open","isHumanTakeover":false},"messages":[{"id":"customer-message","externalId":null,"role":"user","senderType":"contact","senderName":null,"senderTeam":null,"text":"synthetic","attachments":[],"timestamp":1}$assistant],"sync":{"previousCursor":null,"nextCursor":null,"limit":100}}""",
+                )
+            }
+            val body = request.body?.let { Buffer().also(it::writeTo).readUtf8() }.orEmpty()
+            val proposed = org.json.JSONObject(body).getJSONObject("operation").getString("proposedCredential")
+            return OnloHttpResponse(
+                200,
+                emptyMap(),
+                """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"synthetic-session","chatToken":"synthetic-chat-token","installationId":"00000000-0000-0000-0000-000000000001","generation":2,"proposedCredential":"$proposed","identityClass":"anonymous","publicationState":"testing","attestationState":"not_required","configRevision":"fixture","configSchemaVersion":1,"configEtag":"fixture"}}""",
+            )
+        }
+
+        override suspend fun stream(
+            request: OnloHttpRequest,
+            onLine: suspend (String) -> Unit,
+        ): SseStreamResult {
+            chatCalls += 1
+            return SseStreamResult.Success(200)
+        }
+    }
+
+    private class LiveAcceptanceRecoveryTransport : OnloTransport, OnloSseTransport {
+        var chatCalls = 0
+        var transcriptCalls = 0
+        val reconciled = CompletableDeferred<Unit>()
+        val accepted = CompletableDeferred<Unit>()
+
+        override suspend fun execute(request: OnloHttpRequest): OnloHttpResponse {
+            if (request.url.encodedPath.contains("/conversations/")) {
+                transcriptCalls += 1
+                reconciled.complete(Unit)
+                return OnloHttpResponse(
+                    200,
+                    emptyMap(),
+                    """{"conversation":{"id":"conversation","sessionId":"synthetic-session","status":"open","isHumanTakeover":false},"messages":[{"id":"customer-message","externalId":null,"role":"user","senderType":"contact","senderName":null,"senderTeam":null,"text":"synthetic","attachments":[],"timestamp":1},{"id":"assistant-message","externalId":null,"role":"assistant","senderType":"ai","senderName":null,"senderTeam":null,"text":"synthetic","attachments":[],"timestamp":2}],"sync":{"previousCursor":null,"nextCursor":null,"limit":100}}""",
+                )
+            }
+            val body = request.body?.let { Buffer().also(it::writeTo).readUtf8() }.orEmpty()
+            val proposed = org.json.JSONObject(body).getJSONObject("operation").getString("proposedCredential")
+            return OnloHttpResponse(
+                200,
+                emptyMap(),
+                """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"synthetic-session","chatToken":"synthetic-chat-token","installationId":"00000000-0000-0000-0000-000000000001","generation":1,"proposedCredential":"$proposed","identityClass":"anonymous","publicationState":"testing","attestationState":"not_required","configRevision":"fixture","configSchemaVersion":1,"configEtag":"fixture"}}""",
+            )
+        }
+
+        override suspend fun stream(
+            request: OnloHttpRequest,
+            onLine: suspend (String) -> Unit,
+        ): SseStreamResult {
+            chatCalls += 1
+            val clientMessageId = org.json.JSONObject(
+                checkNotNull(request.body).let { Buffer().also(it::writeTo).readUtf8() },
+            ).getString("clientMessageId")
+            onLine("""data: {"type":"accepted","clientMessageId":"$clientMessageId","messageId":"customer-message","conversationId":"conversation","acceptedAt":"2026-01-01T00:00:00Z","duplicate":false,"processingStatus":"accepted"}""")
+            onLine("")
+            accepted.complete(Unit)
             return SseStreamResult.Success(200)
         }
     }

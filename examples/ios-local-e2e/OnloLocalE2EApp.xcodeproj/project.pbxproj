@@ -120,6 +120,7 @@
 /* Begin PBXShellScriptBuildPhase section */
 		A10000000000000000000014 /* Trust local backend certificate */ = {
 			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
 			files = (
 			);
@@ -171,11 +172,13 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_ENTITLEMENTS = OnloLocalE2EApp/OnloLocalE2EApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Onlo E2E";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Take a photo to attach to a support message.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Use your microphone to dictate a support message.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Convert your spoken support message into text.";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
@@ -194,11 +197,13 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_ENTITLEMENTS = OnloLocalE2EApp/OnloLocalE2EApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Onlo E2E";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Take a photo to attach to a support message.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Use your microphone to dictate a support message.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Convert your spoken support message into text.";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;

@@ -263,9 +263,12 @@ final class OnloSDKTests: XCTestCase {
         ])
         let identifySDK = OnloSDK(credentialStore: identifyCredentials, ownerStore: InMemoryOwnerScopedStore(), transport: identifyTransport, hostAppIdentifier: "com.example.host")
         _ = try await identifySDK.initialize(configuration)
-        await XCTAssertThrowsErrorAsync {
-            try await identifySDK.loginIdentifiedUser(userJwt: "header.payload.signature")
-        }
+        let fallbackState = try await identifySDK.loginIdentifiedUser(
+            userJwt: "header.payload.signature"
+        )
+        XCTAssertEqual(fallbackState, .anonymousReady)
+        let currentState = await identifySDK.currentState()
+        XCTAssertEqual(currentState, .anonymousReady)
         let identifyState = try await identifyCredentials.loadState()
         XCTAssertNil(identifyState.pendingTransition)
         XCTAssertEqual(identifyState.credential?.identityClass, .anonymous)
@@ -374,16 +377,21 @@ final class OnloSDKTests: XCTestCase {
         XCTAssertEqual(eligibleAt, start.addingTimeInterval(1.2))
     }
 
-    func testRestartWithTerminalLogoutPendingDoesNotCreateNetworkTransition() async throws {
+    func testRestartWithLogoutPendingCreatesOneDurableLogoutTransition() async throws {
         let scope = OwnerScope(kind: .identified)
         let credential = StoredSessionCredential(installationId: "installation-1", generation: 1, proposedCredential: "credential-1", identityClass: .identified, ownerScope: scope, logoutPending: true)
         let transport = ScriptedSessionTransport(steps: [])
-        let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(credential), ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host")
+        let credentials = InMemoryCredentialStore(credential)
+        let sdk = OnloSDK(credentialStore: credentials, ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host")
         let configuration = OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!)
         let initializedState = try await sdk.initialize(configuration)
         XCTAssertEqual(initializedState, .logoutPending)
         let requests = await transport.requests()
-        XCTAssertEqual(requests.count, 0)
+        XCTAssertEqual(requests.map(\.url?.path), ["/api/sdk/v1/session"])
+        let protectedState = try await credentials.loadState()
+        guard case .logout? = protectedState.pendingTransition else {
+            return XCTFail("expected pending logout transition")
+        }
     }
 
     func testPendingLogoutBlocksOwnerStoreWhenRecoveryCannotComplete() async throws {
@@ -443,6 +451,58 @@ final class OnloSDKTests: XCTestCase {
     func testChatEventRejectsUnknownAndMalformedPayloads() throws {
         XCTAssertThrowsError(try JSONDecoder().decode(ChatEvent.self, from: Data("{\"type\":\"unknown\"}".utf8)))
         XCTAssertThrowsError(try JSONDecoder().decode(ChatEvent.self, from: Data("{\"type\":\"accepted\"}".utf8)))
+    }
+
+    func testRawChatFramesDecodeExactCanonicalServerContract() throws {
+        let accepted = try URLSessionOnloTransport.decodeChatEvent(Data("""
+        {"type":"accepted","clientMessageId":"00000000-0000-0000-0000-000000000001","messageId":"message-1","conversationId":"conversation-1","acceptedAt":"2026-07-23T10:00:00.000Z","duplicate":false,"processingStatus":"processing"}
+        """.utf8))
+        let text = try URLSessionOnloTransport.decodeChatEvent(
+            Data(#"{"type":"text","content":"synthetic"}"#.utf8)
+        )
+        let done = try URLSessionOnloTransport.decodeChatEvent(Data("""
+        {"type":"done","conversationId":"conversation-1","duplicate":false,"processingStatus":"completed","gated":false}
+        """.utf8))
+
+        XCTAssertEqual(
+            accepted,
+            .accepted(
+                clientMessageId: "00000000-0000-0000-0000-000000000001",
+                messageId: "message-1",
+                conversationId: "conversation-1",
+                acceptedAt: "2026-07-23T10:00:00.000Z",
+                duplicate: false,
+                processingStatus: "processing"
+            )
+        )
+        XCTAssertEqual(text, .text(content: "synthetic"))
+        XCTAssertEqual(
+            done,
+            .done(
+                conversationId: "conversation-1",
+                duplicate: false,
+                processingStatus: "completed",
+                gated: false,
+                reason: nil
+            )
+        )
+    }
+
+    func testMalformedRawChatFrameReportsOnlySafeEventStage() {
+        let malformed = Data(#"{"type":"accepted","clientMessageId":false}"#.utf8)
+
+        XCTAssertThrowsError(try URLSessionOnloTransport.decodeChatEvent(malformed)) { error in
+            XCTAssertEqual(error as? OnloError, .transport(code: "invalid_accepted_event"))
+        }
+
+        let emptyAuthoritativeID = Data("""
+        {"type":"accepted","clientMessageId":"00000000-0000-0000-0000-000000000001","messageId":"","conversationId":"conversation-1","acceptedAt":"2026-07-23T10:00:00.000Z","duplicate":false,"processingStatus":"processing"}
+        """.utf8)
+        XCTAssertThrowsError(
+            try URLSessionOnloTransport.decodeChatEvent(emptyAuthoritativeID)
+        ) { error in
+            XCTAssertEqual(error as? OnloError, .transport(code: "invalid_accepted_event"))
+        }
     }
 
     func testForegroundStreamRejectsUnknownAndMalformedFrames() throws {
@@ -510,9 +570,10 @@ final class OnloSDKTests: XCTestCase {
 
     func testSendMessageUsesDurableDispatcherBeforeOpeningChatRequest() async throws {
         let transport = RecordingAcceptedTransport()
+        let logger = RecordingSDKLogger()
         let credentials = InMemoryCredentialStore()
         let store = InMemoryOwnerScopedStore()
-        let sdk = OnloSDK(credentialStore: credentials, configStore: InMemoryConfigStore(), pushIntentStore: InMemoryPushIntentStore(), ownerStore: store, transport: transport, hostAppIdentifier: "com.example.host", lifecycleBindingEnabled: false)
+        let sdk = OnloSDK(credentialStore: credentials, configStore: InMemoryConfigStore(), pushIntentStore: InMemoryPushIntentStore(), ownerStore: store, transport: transport, logger: logger, hostAppIdentifier: "com.example.host", lifecycleBindingEnabled: false)
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
 
         let stream = try await sdk.sendMessage(message: "synthetic dispatcher message")
@@ -521,16 +582,27 @@ final class OnloSDKTests: XCTestCase {
             return
         }
         var iterator = stream.makeAsyncIterator()
-        _ = try await iterator.next()
+        let acceptedEvent = try await iterator.next()
         let recordedRequest = await transport.chatRequest()
         let request = try XCTUnwrap(recordedRequest)
         let requestBody = try XCTUnwrap(request.httpBody)
         let chat = try JSONDecoder().decode(ChatRequest.self, from: requestBody)
+        if case let .accepted(clientMessageId, _, _, _, _, _) = acceptedEvent {
+            XCTAssertEqual(clientMessageId, chat.clientMessageId.lowercased())
+        } else {
+            XCTFail("expected accepted event")
+        }
         let scope = try await activeOwnerScope(credentials)
         let row = try await firstOutboxEntry(store, for: scope)
         XCTAssertEqual(chat.clientMessageId, row.clientMessageId.uuidString)
         XCTAssertEqual(chat.message, row.message)
         XCTAssertEqual(row.state, .accepted)
+        let logEvents = await logger.events()
+        XCTAssertTrue(logEvents.contains {
+            $0.operation == "chat" &&
+                $0.code == "accepted" &&
+                $0.requestId == "chat-request-1"
+        })
     }
 
     func testRestoredSQLiteRowIsDispatchedWithoutUIObserver() async throws {
@@ -557,6 +629,95 @@ final class OnloSDKTests: XCTestCase {
         XCTAssertEqual(chat.clientMessageId, entry.clientMessageId.uuidString)
         XCTAssertEqual(chat.message, entry.message)
         try await restoredStore.finishLogout(for: scope)
+    }
+
+    func testRestartReconcilesAcceptedRowWithoutResending() async throws {
+        let scope = OwnerScope(kind: .anonymous)
+        let store = InMemoryOwnerScopedStore()
+        try await store.prepare(scope: scope)
+        let accepted = OutboxEntry(
+            ownerScope: scope,
+            conversationId: "conversation-1",
+            message: "synthetic accepted",
+            orderingKey: 1,
+            state: .accepted,
+            serverMessageId: "customer-message"
+        )
+        try await store.enqueue(accepted)
+        let credentials = InMemoryCredentialStore(
+            StoredSessionCredential(
+                installationId: "installation-1",
+                generation: 1,
+                proposedCredential: "credential-1",
+                identityClass: .anonymous,
+                ownerScope: scope
+            )
+        )
+        let transport = AcceptedRestartRecoveryTransport()
+        let restarted = OnloSDK(
+            credentialStore: credentials,
+            ownerStore: store,
+            transport: transport,
+            hostAppIdentifier: "com.example.host"
+        )
+
+        _ = try await restarted.initialize(OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        ))
+
+        let didReconcile = await waitUntil {
+            (try? await store.outboxEntries(for: scope).first?.state) == .reconciled
+        }
+        XCTAssertTrue(didReconcile)
+        let recoveredEntry = try await store.outboxEntries(for: scope).first
+        let recovered = try XCTUnwrap(recoveredEntry)
+        XCTAssertEqual(recovered.clientMessageId, accepted.clientMessageId)
+        XCTAssertEqual(transport.chatEventRequestCount(), 0)
+        XCTAssertEqual(transport.transcriptRequestCount(), 1)
+    }
+
+    func testAcceptedReconciliationRetriesUntilCompletionIsVisible() async throws {
+        let scope = OwnerScope(kind: .anonymous)
+        let store = InMemoryOwnerScopedStore()
+        try await store.prepare(scope: scope)
+        try await store.enqueue(OutboxEntry(
+            ownerScope: scope,
+            conversationId: "conversation-1",
+            message: "synthetic accepted",
+            orderingKey: 1,
+            state: .accepted,
+            serverMessageId: "customer-message"
+        ))
+        let credentials = InMemoryCredentialStore(StoredSessionCredential(
+            installationId: "installation-1",
+            generation: 1,
+            proposedCredential: "credential-1",
+            identityClass: .anonymous,
+            ownerScope: scope
+        ))
+        let transport = AcceptedRestartRecoveryTransport(completionVisibleAfterRequest: 2)
+        let restarted = OnloSDK(
+            credentialStore: credentials,
+            ownerStore: store,
+            transport: transport,
+            hostAppIdentifier: "com.example.host",
+            acceptedReconciliationDelay: { 0 }
+        )
+
+        _ = try await restarted.initialize(OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        ))
+
+        let didReconcile = await waitUntil {
+            (try? await store.outboxEntries(for: scope).first?.state) == .reconciled
+        }
+        XCTAssertTrue(didReconcile)
+        XCTAssertEqual(transport.transcriptRequestCount(), 2)
+        XCTAssertEqual(transport.chatEventRequestCount(), 0)
     }
 
     func testDuplicateAcceptanceReconcilesTranscriptThroughDispatcher() async throws {
@@ -607,6 +768,102 @@ final class OnloSDKTests: XCTestCase {
         let scope = try await activeOwnerScope(credentials)
         let entries = try await store.outboxEntries(for: scope)
         XCTAssertEqual(entries.first?.state, .failedTerminal)
+    }
+
+    func testTerminalChatFailureImmediatelyAdvancesAlreadyQueuedTransportWork() async throws {
+        let controller = TerminalAdvanceController()
+        let transport = TerminalThenAcceptedTransport(controller: controller)
+        let credentials = InMemoryCredentialStore()
+        let store = InMemoryOwnerScopedStore()
+        let sdk = OnloSDK(
+            credentialStore: credentials,
+            ownerStore: store,
+            transport: transport,
+            hostAppIdentifier: "com.example.host",
+            lifecycleBindingEnabled: false
+        )
+        _ = try await sdk.initialize(OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        ))
+
+        let firstStream = try await sdk.sendMessage(message: "synthetic first")
+        await controller.waitForRequests(1)
+        let secondStream = try await sdk.sendMessage(message: "synthetic second")
+        await controller.failFirstWithMismatchedAcknowledgement()
+
+        var firstIterator = firstStream.makeAsyncIterator()
+        await XCTAssertThrowsErrorAsync { _ = try await firstIterator.next() }
+        await controller.waitForRequests(2)
+        var secondIterator = secondStream.makeAsyncIterator()
+        let receivedSecondEvent = try await secondIterator.next()
+        let secondEvent = try XCTUnwrap(receivedSecondEvent)
+
+        guard case .accepted = secondEvent else {
+            return XCTFail("expected the second queued message to advance")
+        }
+        let scope = try await activeOwnerScope(credentials)
+        let entries = try await store.outboxEntries(for: scope)
+        XCTAssertEqual(entries.map(\.state), [.failedTerminal, .accepted])
+    }
+
+    func testQueuedMessageWaitsForPriorTransportTurnToComplete() async throws {
+        let controller = SerializedTurnController()
+        let transport = SerializedTurnTransport(controller: controller)
+        let sdk = OnloSDK(
+            credentialStore: InMemoryCredentialStore(),
+            ownerStore: InMemoryOwnerScopedStore(),
+            transport: transport,
+            hostAppIdentifier: "com.example.host",
+            lifecycleBindingEnabled: false
+        )
+        _ = try await sdk.initialize(OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        ))
+
+        _ = try await sdk.sendMessage(message: "synthetic first")
+        await controller.waitForRequests(1)
+        _ = try await sdk.sendMessage(message: "synthetic second")
+        let requestsBeforeDone = await controller.requestCountValue()
+        XCTAssertEqual(requestsBeforeDone, 1)
+
+        await controller.completeFirstTurn()
+        await controller.waitForRequests(2)
+
+        let requestsAfterDone = await controller.requestCountValue()
+        XCTAssertEqual(requestsAfterDone, 2)
+    }
+
+    func testDoneForDifferentConversationFailsClosedAfterAcceptance() async throws {
+        let credentials = InMemoryCredentialStore()
+        let store = InMemoryOwnerScopedStore()
+        let sdk = OnloSDK(
+            credentialStore: credentials,
+            ownerStore: store,
+            transport: MismatchedDoneTransport(),
+            hostAppIdentifier: "com.example.host",
+            lifecycleBindingEnabled: false
+        )
+        _ = try await sdk.initialize(OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        ))
+
+        let stream = try await sdk.sendMessage(message: "synthetic mismatch")
+        var iterator = stream.makeAsyncIterator()
+        _ = try await iterator.next()
+        await XCTAssertThrowsErrorAsync {
+            _ = try await iterator.next()
+        }
+
+        let scope = try await activeOwnerScope(credentials)
+        let entry = try await firstOutboxEntry(store, for: scope)
+        XCTAssertEqual(entry.state, .accepted)
+        XCTAssertEqual(entry.conversationId, "conversation-1")
     }
 
     func testWidgetErrorDoesNotAutoRetryDurableRow() async throws {
@@ -663,10 +920,36 @@ final class OnloSDKTests: XCTestCase {
         let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), configStore: InMemoryConfigStore(), pushIntentStore: InMemoryPushIntentStore(), ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host", lifecycleBindingEnabled: false)
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
         await controller.waitForSubscriptions(1)
-        await XCTAssertThrowsErrorAsync { try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature") }
+        let identifiedState = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
+        XCTAssertEqual(identifiedState, .anonymousReady)
         await controller.waitForSubscriptions(2)
         let failedIdentifyState = await sdk.currentState()
         XCTAssertEqual(failedIdentifyState, .anonymousReady)
+    }
+
+    func testOrdinaryForegroundStreamCloseReconnectsForSameAuthority() async throws {
+        let controller = ForegroundStreamController()
+        let transport = ClosingForegroundTransport(controller: controller)
+        let sdk = OnloSDK(
+            credentialStore: InMemoryCredentialStore(),
+            configStore: InMemoryConfigStore(),
+            pushIntentStore: InMemoryPushIntentStore(),
+            ownerStore: InMemoryOwnerScopedStore(),
+            transport: transport,
+            hostAppIdentifier: "com.example.host",
+            foregroundReconnectDelay: { _ in 0 },
+            lifecycleBindingEnabled: false
+        )
+        _ = try await sdk.initialize(OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        ))
+
+        await controller.waitForSubscriptions(2)
+
+        let state = await sdk.currentState()
+        XCTAssertEqual(state, .anonymousReady)
     }
 
     func testSameOwnerConfigTokenRefreshReplacesForegroundStream() async throws {
@@ -748,6 +1031,10 @@ final class OnloSDKTests: XCTestCase {
         XCTAssertEqual(initializedState, .anonymousReady)
         let identifiedState = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
         XCTAssertEqual(identifiedState, .identifiedReady)
+        let repeatedIdentifiedState = try await sdk.loginIdentifiedUser(
+            userJwt: "header.payload.signature"
+        )
+        XCTAssertEqual(repeatedIdentifiedState, .identifiedReady)
         let loggedOutState = try await sdk.logout()
         XCTAssertEqual(loggedOutState, .anonymousReady)
 
@@ -850,20 +1137,21 @@ final class OnloSDKTests: XCTestCase {
         try await reconstructedStore.finishLogout(for: scope)
     }
 
-    func testDurableDispatcherKeepsTerminalHeadBlockingLaterRow() async throws {
+    func testDurableDispatcherSkipsTerminalHeadAndDispatchesLaterRow() async throws {
         let now = Date(timeIntervalSince1970: 1_000)
         let (sdk, credentials, store) = try await readyDurableDispatcher(now: { now })
         let scope = try await activeOwnerScope(credentials)
         let terminal = try await store.enqueueAssigningOrder(OutboxEntry(ownerScope: scope, message: "synthetic terminal", orderingKey: 0, state: .failedTerminal))
         let later = try await store.enqueueAssigningOrder(OutboxEntry(ownerScope: scope, message: "synthetic allowed", orderingKey: 0))
 
-        let pendingDispatch = try await sdk.nextDurableTextDispatch()
-        XCTAssertNil(pendingDispatch)
+        let pendingDispatchCandidate = try await sdk.nextDurableTextDispatch()
+        let pendingDispatch = try XCTUnwrap(pendingDispatchCandidate)
+        XCTAssertEqual(pendingDispatch.clientMessageId, later.clientMessageId)
+        XCTAssertEqual(pendingDispatch.state, .sending)
         let entries = try await store.outboxEntries(for: scope)
-        XCTAssertEqual(entries, [
-            terminal,
-            later,
-        ])
+        XCTAssertEqual(entries.first, terminal)
+        XCTAssertEqual(entries.last?.clientMessageId, later.clientMessageId)
+        XCTAssertEqual(entries.last?.state, .sending)
     }
 
     func testDurableDispatcherRejectsAttachmentBearingHeadUntilUploadLifecycleExists() async throws {
@@ -873,9 +1161,14 @@ final class OnloSDKTests: XCTestCase {
         let attachment = OutboxAttachment(attachment: ChatAttachment(id: "attachment-1", url: "https://synthetic.invalid/image.jpg", type: "image/jpeg", name: "image.jpg", size: 1))
         let queued = try await store.enqueueAssigningOrder(OutboxEntry(ownerScope: scope, message: "", attachments: [attachment], orderingKey: 0))
 
-        await XCTAssertThrowsErrorAsync { try await sdk.nextDurableTextDispatch() }
+        let dispatch = try await sdk.nextDurableTextDispatch()
+        XCTAssertNil(dispatch)
         let entries = try await store.outboxEntries(for: scope)
-        XCTAssertEqual(entries, [queued])
+        XCTAssertEqual(entries.count, 1)
+        let failed = try XCTUnwrap(entries.first)
+        XCTAssertEqual(failed.clientMessageId, queued.clientMessageId)
+        XCTAssertEqual(failed.state, .failedTerminal)
+        XCTAssertEqual(failed.lastErrorCode, "media_unavailable")
     }
 
     func testDurableDispatcherRejectsOldOwnerAfterAccountSwitch() async throws {
@@ -1290,7 +1583,7 @@ final class OnloSDKTests: XCTestCase {
         XCTAssertEqual(initialized, .anonymousReady)
         let first = try await sdk.currentConfiguration()
         XCTAssertEqual(first?.schemaVersion, 1)
-        XCTAssertEqual(first?.mediaPolicy.effectiveMaximumImagesPerMessage, 3)
+        XCTAssertEqual(first?.mediaPolicy.effectiveMaximumImagesPerMessage, 5)
         XCTAssertEqual(first?.mediaPolicy.effectiveMaximumImageBytes, 8 * 1024 * 1024)
         try await sdk.refreshConfigurationForForeground()
         let persisted = await configStore.state()
@@ -1318,14 +1611,18 @@ final class OnloSDKTests: XCTestCase {
         XCTAssertEqual(persisted.etag, "W/\"mobile-config-example\"")
     }
 
-    func testMobileConfigRequiresNullableSecurityMinimumSDKVersionKey() throws {
+    func testMobileConfigAllowsMissingNullableSecurityMinimumSDKVersionKey() throws {
         let body = mobileConfigJSON().replacingOccurrences(of: "\"minimumSdkVersion\":null,", with: "")
-        XCTAssertThrowsError(try JSONDecoder().decode(APIEnvelope<MobileConfig>.self, from: Data(body.utf8)))
+        let envelope = try JSONDecoder().decode(APIEnvelope<MobileConfig>.self, from: Data(body.utf8))
+        guard case .success(let response) = envelope else { return XCTFail("expected config") }
+        XCTAssertNil(response.result.securityPolicy.minimumSdkVersion)
     }
 
-    func testMobileConfigRequiresNullableHeaderAvatarDataKey() throws {
+    func testMobileConfigAllowsMissingNullableHeaderAvatarDataKey() throws {
         let body = mobileConfigJSON().replacingOccurrences(of: "\"data\":null", with: "")
-        XCTAssertThrowsError(try JSONDecoder().decode(APIEnvelope<MobileConfig>.self, from: Data(body.utf8)))
+        let envelope = try JSONDecoder().decode(APIEnvelope<MobileConfig>.self, from: Data(body.utf8))
+        guard case .success(let response) = envelope else { return XCTFail("expected config") }
+        XCTAssertNil(response.result.appearance.headerAvatar.data)
     }
 
     func testMobileConfigRejectsMediaPolicyOutsideSDKCeilings() throws {
@@ -1359,6 +1656,43 @@ final class OnloSDKTests: XCTestCase {
         }
         let retained = await store.state()
         XCTAssertEqual(retained.config?.revision, "2026-07-21T10:00:00.000Z")
+    }
+
+    func testCorruptConfigurationCacheResetsAndFetchesFreshProjection() async throws {
+        let store = CorruptOnceConfigStore()
+        let transport = MockTransport(responses: [
+            sessionResponse(
+                identityClass: "anonymous",
+                generation: 1,
+                sessionId: "session-1",
+                credential: "credential-1"
+            ),
+            mobileConfigResponse(),
+        ])
+        let sdk = OnloSDK(
+            credentialStore: InMemoryCredentialStore(),
+            configStore: store,
+            ownerStore: InMemoryOwnerScopedStore(),
+            transport: transport,
+            hostAppIdentifier: "com.example.host"
+        )
+        let configuration = OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        )
+
+        _ = try await sdk.initialize(configuration)
+
+        let recovered = try await sdk.currentConfiguration()
+        XCTAssertEqual(recovered?.revision, "2026-07-21T10:00:00.000Z")
+        let resetCount = await store.emptyResetCount()
+        XCTAssertEqual(resetCount, 1)
+        let requests = await transport.requests()
+        XCTAssertEqual(
+            requests.filter { $0.url?.path == "/api/sdk/v1/config" }.count,
+            1
+        )
     }
 
     func testConfigurationChangedUsesConditionalETagRefresh() async throws {
@@ -1575,6 +1909,43 @@ private actor InMemoryConfigStore: MobileConfigStoring {
     func state() -> ProtectedMobileConfigState { stored }
 }
 
+private actor RecordingSDKLogger: SDKLogging {
+    private var recordedEvents: [SDKLogEvent] = []
+
+    func record(_ event: SDKLogEvent) async {
+        recordedEvents.append(event)
+    }
+
+    func events() -> [SDKLogEvent] { recordedEvents }
+}
+
+private actor CorruptOnceConfigStore: MobileConfigStoring {
+    private var failsNextLoad = true
+    private var stored = ProtectedMobileConfigState(
+        config: nil,
+        etag: nil,
+        retry: nil
+    )
+    private var resetCount = 0
+
+    func loadConfigState() async throws -> ProtectedMobileConfigState {
+        if failsNextLoad {
+            failsNextLoad = false
+            throw OnloError.credentialStore(code: "config_keychain_decode_failed")
+        }
+        return stored
+    }
+
+    func saveConfigState(_ state: ProtectedMobileConfigState) async throws {
+        if state.config == nil, state.etag == nil, state.retry == nil {
+            resetCount += 1
+        }
+        stored = state
+    }
+
+    func emptyResetCount() -> Int { resetCount }
+}
+
 private actor RotatingOutboxKeyStore: OutboxEncryptionKeyStoring {
     private var key = SymmetricKey(size: .bits256)
 
@@ -1635,6 +2006,44 @@ private final class ImmediateAcceptedTransport: OnloChatSSETransport, @unchecked
     func chatEventRequestCount() -> Int { lock.withLock { chatEventRequests } }
 }
 
+private final class AcceptedRestartRecoveryTransport: OnloChatSSETransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var chatRequests = 0
+    private var transcriptRequests = 0
+    private let completionVisibleAfterRequest: Int
+
+    init(completionVisibleAfterRequest: Int = 1) {
+        self.completionVisibleAfterRequest = completionVisibleAfterRequest
+    }
+
+    func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
+        if request.url?.path == "/api/widget/conversations/conversation-1" {
+            let requestNumber = lock.withLock {
+                transcriptRequests += 1
+                return transcriptRequests
+            }
+            let assistant = requestNumber >= completionVisibleAfterRequest
+                ? #",{"id":"assistant-message","externalId":null,"role":"assistant","senderType":"ai","senderName":null,"senderTeam":null,"text":"synthetic","attachments":[],"timestamp":2}"#
+                : ""
+            return OnloHTTPResponse(
+                statusCode: 200,
+                body: Data("""
+                {"conversation":{"id":"conversation-1","sessionId":"session-1","status":"open","isHumanTakeover":false},"messages":[{"id":"customer-message","externalId":null,"role":"user","senderType":"contact","senderName":null,"senderTeam":null,"text":"synthetic","attachments":[],"timestamp":1}\(assistant)],"sync":{"previousCursor":null,"nextCursor":null,"limit":100}}
+                """.utf8)
+            )
+        }
+        return durableSessionResponse(for: request)
+    }
+
+    func chatEvents(for request: URLRequest) -> AsyncThrowingStream<ChatEvent, Error> {
+        lock.withLock { chatRequests += 1 }
+        return AsyncThrowingStream { $0.finish() }
+    }
+
+    func chatEventRequestCount() -> Int { lock.withLock { chatRequests } }
+    func transcriptRequestCount() -> Int { lock.withLock { transcriptRequests } }
+}
+
 private actor ChatRequestRecorder {
     private var request: URLRequest?
     private var waiter: CheckedContinuation<Void, Never>?
@@ -1653,7 +2062,7 @@ private actor ChatRequestRecorder {
     }
 }
 
-private final class RecordingAcceptedTransport: OnloChatSSETransport, @unchecked Sendable {
+private final class RecordingAcceptedTransport: OnloChatSSETransport, OnloChatRequestCorrelating, @unchecked Sendable {
     private let recorder = ChatRequestRecorder()
 
     func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
@@ -1670,7 +2079,7 @@ private final class RecordingAcceptedTransport: OnloChatSSETransport, @unchecked
         }
         return AsyncThrowingStream { continuation in
             Task.detached { await recorder.record(request) }
-            continuation.yield(.accepted(clientMessageId: clientMessageID, messageId: "message-1", conversationId: "conversation-1", acceptedAt: "2026-01-01T00:00:00Z", duplicate: false, processingStatus: "accepted"))
+            continuation.yield(.accepted(clientMessageId: clientMessageID.lowercased(), messageId: "message-1", conversationId: "conversation-1", acceptedAt: "2026-01-01T00:00:00Z", duplicate: false, processingStatus: "accepted"))
             continuation.finish()
         }
     }
@@ -1678,6 +2087,8 @@ private final class RecordingAcceptedTransport: OnloChatSSETransport, @unchecked
     func chatRequest() async -> URLRequest? { await recorder.value() }
     func hasChatRequest() async -> Bool { await recorder.value() != nil }
     func waitForChatRequest() async { await recorder.wait() }
+    func chatRequestId(for clientMessageId: String) -> String? { "chat-request-1" }
+    func clearChatRequestId(for clientMessageId: String) {}
 }
 
 private final class DuplicateAcceptedTransport: OnloChatSSETransport, @unchecked Sendable {
@@ -1735,6 +2146,193 @@ private final class ChatFailureTransport: OnloChatSSETransport, @unchecked Senda
             case .widgetError:
                 continuation.finish(throwing: OnloError.transport(code: "widget_error"))
             }
+        }
+    }
+}
+
+private actor TerminalAdvanceController {
+    private var requestCount = 0
+    private var firstContinuation: AsyncThrowingStream<ChatEvent, Error>.Continuation?
+    private var requestWaiters: [(target: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func attach(
+        continuation: AsyncThrowingStream<ChatEvent, Error>.Continuation,
+        clientMessageID: String
+    ) {
+        requestCount += 1
+        if requestCount == 1 {
+            firstContinuation = continuation
+        } else {
+            continuation.yield(.accepted(
+                clientMessageId: clientMessageID,
+                messageId: "message-2",
+                conversationId: "conversation-1",
+                acceptedAt: "2026-01-01T00:00:00Z",
+                duplicate: false,
+                processingStatus: "accepted"
+            ))
+            continuation.finish()
+        }
+        for waiter in requestWaiters where requestCount >= waiter.target {
+            waiter.continuation.resume()
+        }
+        requestWaiters.removeAll { requestCount >= $0.target }
+    }
+
+    func failFirstWithMismatchedAcknowledgement() {
+        firstContinuation?.yield(.accepted(
+            clientMessageId: "wrong-id",
+            messageId: "message-1",
+            conversationId: "conversation-1",
+            acceptedAt: "2026-01-01T00:00:00Z",
+            duplicate: false,
+            processingStatus: "accepted"
+        ))
+        firstContinuation?.finish()
+        firstContinuation = nil
+    }
+
+    func waitForRequests(_ target: Int) async {
+        guard requestCount < target else { return }
+        await withCheckedContinuation { continuation in
+            requestWaiters.append((target, continuation))
+        }
+    }
+}
+
+private final class TerminalThenAcceptedTransport: OnloChatSSETransport, @unchecked Sendable {
+    private let controller: TerminalAdvanceController
+
+    init(controller: TerminalAdvanceController) {
+        self.controller = controller
+    }
+
+    func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
+        durableSessionResponse(for: request)
+    }
+
+    func chatEvents(for request: URLRequest) -> AsyncThrowingStream<ChatEvent, Error> {
+        let clientMessageID = request.httpBody
+            .flatMap { try? JSONDecoder().decode(ChatRequest.self, from: $0) }?
+            .clientMessageId ?? "invalid"
+        let controller = controller
+        return AsyncThrowingStream { continuation in
+            Task {
+                await controller.attach(
+                    continuation: continuation,
+                    clientMessageID: clientMessageID
+                )
+            }
+        }
+    }
+}
+
+private actor SerializedTurnController {
+    private var requestCount = 0
+    private var firstContinuation: AsyncThrowingStream<ChatEvent, Error>.Continuation?
+    private var requestWaiters: [(target: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func attach(
+        continuation: AsyncThrowingStream<ChatEvent, Error>.Continuation,
+        clientMessageID: String
+    ) {
+        requestCount += 1
+        continuation.yield(.accepted(
+            clientMessageId: clientMessageID,
+            messageId: "message-\(requestCount)",
+            conversationId: "conversation-1",
+            acceptedAt: "2026-01-01T00:00:00Z",
+            duplicate: false,
+            processingStatus: "accepted"
+        ))
+        if requestCount == 1 {
+            firstContinuation = continuation
+        } else {
+            continuation.finish()
+        }
+        for waiter in requestWaiters where requestCount >= waiter.target {
+            waiter.continuation.resume()
+        }
+        requestWaiters.removeAll { requestCount >= $0.target }
+    }
+
+    func completeFirstTurn() {
+        firstContinuation?.yield(.done(
+            conversationId: "conversation-1",
+            duplicate: false,
+            processingStatus: "completed",
+            gated: false,
+            reason: nil
+        ))
+        firstContinuation?.finish()
+        firstContinuation = nil
+    }
+
+    func requestCountValue() -> Int {
+        requestCount
+    }
+
+    func waitForRequests(_ target: Int) async {
+        guard requestCount < target else { return }
+        await withCheckedContinuation { continuation in
+            requestWaiters.append((target, continuation))
+        }
+    }
+}
+
+private final class SerializedTurnTransport: OnloChatSSETransport, @unchecked Sendable {
+    private let controller: SerializedTurnController
+
+    init(controller: SerializedTurnController) {
+        self.controller = controller
+    }
+
+    func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
+        durableSessionResponse(for: request)
+    }
+
+    func chatEvents(for request: URLRequest) -> AsyncThrowingStream<ChatEvent, Error> {
+        let clientMessageID = request.httpBody
+            .flatMap { try? JSONDecoder().decode(ChatRequest.self, from: $0) }?
+            .clientMessageId ?? "invalid"
+        let controller = controller
+        return AsyncThrowingStream { continuation in
+            Task {
+                await controller.attach(
+                    continuation: continuation,
+                    clientMessageID: clientMessageID
+                )
+            }
+        }
+    }
+}
+
+private final class MismatchedDoneTransport: OnloChatSSETransport, @unchecked Sendable {
+    func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
+        durableSessionResponse(for: request)
+    }
+
+    func chatEvents(for request: URLRequest) -> AsyncThrowingStream<ChatEvent, Error> {
+        let clientMessageID = request.httpBody
+            .flatMap { try? JSONDecoder().decode(ChatRequest.self, from: $0) }?
+            .clientMessageId ?? "invalid"
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.accepted(
+                clientMessageId: clientMessageID,
+                messageId: "message-1",
+                conversationId: "conversation-1",
+                acceptedAt: "2026-01-01T00:00:00Z",
+                duplicate: false,
+                processingStatus: "accepted"
+            ))
+            continuation.yield(.done(
+                conversationId: "conversation-2",
+                duplicate: false,
+                processingStatus: "completed",
+                gated: false,
+                reason: nil
+            ))
+            continuation.finish()
         }
     }
 }
@@ -1805,6 +2403,40 @@ private actor ForegroundStreamController {
     func waitForSubscriptions(_ target: Int) async {
         if subscriptions >= target { return }
         await withCheckedContinuation { waiters[target] = $0 }
+    }
+}
+
+private final class ClosingForegroundTransport: OnloForegroundSSETransport, @unchecked Sendable {
+    private let controller: ForegroundStreamController
+    private let lock = NSLock()
+    private var subscriptions = 0
+
+    init(controller: ForegroundStreamController) {
+        self.controller = controller
+    }
+
+    func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
+        foregroundSessionResponse(for: request, token: "synthetic-stream-token")
+    }
+
+    func streamEvents(for request: URLRequest) -> AsyncThrowingStream<StreamEvent, Error> {
+        let subscription = lock.withLock {
+            subscriptions += 1
+            return subscriptions
+        }
+        let controller = controller
+        if subscription == 1 {
+            return AsyncThrowingStream { continuation in
+                Task { await controller.subscribed() }
+                continuation.yield(.ready)
+                continuation.finish()
+            }
+        }
+        return AsyncThrowingStream(unfolding: {
+            await controller.subscribed()
+            try await Task.sleep(nanoseconds: 3_600_000_000_000)
+            return nil
+        })
     }
 }
 

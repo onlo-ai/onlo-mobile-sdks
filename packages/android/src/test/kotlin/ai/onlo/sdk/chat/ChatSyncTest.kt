@@ -178,6 +178,35 @@ class ChatSyncTest {
     }
 
     @Test
+    fun `row enqueued during an active flush is drained next without cancelling the dispatcher`() = runBlocking {
+        val store = MemoryOutbox()
+        val owner = OwnerScope.Anonymous("owner")
+        val transport = FixtureTransport(listOf(accepted(), accepted()))
+        lateinit var outbox: DurableChatOutbox
+        var second: OutboxEntry? = null
+        outbox = DurableChatOutbox(
+            store,
+            WidgetChatApi(transport, requests()),
+            nowMs = { 10 },
+            onEvent = { entry, event ->
+                if (event is ChatEvent.Accepted && second == null) {
+                    second = outbox.enqueue(owner, "conversation", "second")
+                }
+            },
+        )
+        val first = outbox.enqueue(owner, "conversation", "first")
+
+        outbox.flush(owner, "fixture-session", "fixture-bearer")
+
+        assertEquals(
+            listOf(first.clientMessageId, checkNotNull(second).clientMessageId),
+            store.sentIds,
+        )
+        assertTrue(store.rows.all { it.state == OutboxState.ACCEPTED })
+        assertEquals(2, transport.requests.size)
+    }
+
+    @Test
     fun `not yet due retryable head blocks later queued rows`() = runBlocking {
         var clock = 10L
         val store = MemoryOutbox(); val owner = OwnerScope.Anonymous("owner")
@@ -206,12 +235,13 @@ class ChatSyncTest {
         val outbox = DurableChatOutbox(store, WidgetChatApi(transport, requests()), nowMs = { clock })
         val entry = outbox.enqueue(owner, "conversation", "synthetic body")
 
-        outbox.flush(owner, "session", "bearer")
+        val scheduledWake = outbox.flush(owner, "session", "bearer")
         val retryAt = checkNotNull(store.rows.single().nextAttemptAtMs)
+        assertEquals(retryAt, scheduledWake)
         assertTrue(retryAt > clock)
         assertEquals(OutboxState.FAILED_RETRYABLE, store.rows.single().state)
         clock = retryAt
-        outbox.flush(owner, "session", "bearer")
+        assertEquals(null, outbox.flush(owner, "session", "bearer"))
 
         assertEquals(listOf(entry.clientMessageId, entry.clientMessageId), store.sentIds)
         assertEquals(listOf("synthetic body", "synthetic body"), transport.requests.map { requestBody(it).getString("message") })
@@ -431,7 +461,19 @@ class ChatSyncTest {
             rows.replaceAll { if (it === existing) it.copy(state = OutboxState.SENDING, attemptCount = it.attemptCount + 1, nextAttemptAtMs = null) else it }
             return true
         }
-        override suspend fun markAccepted(ownerScope: OwnerScope, clientMessageId: String, serverMessageId: String) { acceptedId = clientMessageId; rows.replaceAll { if (it.clientMessageId == clientMessageId) it.copy(state = OutboxState.ACCEPTED) else it } }
+        override suspend fun markAccepted(ownerScope: OwnerScope, clientMessageId: String, serverMessageId: String, conversationId: String): Boolean {
+            var changed = false
+            acceptedId = clientMessageId
+            rows.replaceAll {
+                if (it.clientMessageId == clientMessageId && it.state == OutboxState.SENDING) {
+                    changed = true
+                    it.copy(state = OutboxState.ACCEPTED, serverMessageId = serverMessageId, serverConversationId = conversationId)
+                } else it
+            }
+            return changed
+        }
+        override suspend fun acceptedAwaitingReconciliation(ownerScope: OwnerScope): List<OutboxEntry> = rows.filter { it.ownerScope == ownerScope && it.state == OutboxState.ACCEPTED }
+        override suspend fun markReconciled(ownerScope: OwnerScope, clientMessageId: String) { rows.replaceAll { if (it.ownerScope == ownerScope && it.clientMessageId == clientMessageId) it.copy(state = OutboxState.RECONCILED) else it } }
         override suspend fun markRetryableFailure(ownerScope: OwnerScope, clientMessageId: String, errorCode: String, nextAttemptAtMs: Long) { rows.replaceAll { if (it.ownerScope == ownerScope && it.clientMessageId == clientMessageId) it.copy(state = OutboxState.FAILED_RETRYABLE, lastErrorCode = errorCode, nextAttemptAtMs = nextAttemptAtMs) else it } }
         override suspend fun markTerminalFailure(ownerScope: OwnerScope, clientMessageId: String, errorCode: String) { rows.replaceAll { if (it.clientMessageId == clientMessageId) it.copy(state = OutboxState.FAILED_TERMINAL) else it } }
         override suspend fun recoverInterruptedSends(ownerScope: OwnerScope, nowMs: Long) = Unit

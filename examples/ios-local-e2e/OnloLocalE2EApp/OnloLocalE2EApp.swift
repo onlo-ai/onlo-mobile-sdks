@@ -87,11 +87,16 @@ private final class LocalE2EModel: ObservableObject {
     }
 
     func login() async {
+        let startedAt = Date()
         status = "Signing in"
         E2ESafeDiagnostics.record(operation: "merchant_login", code: "started")
         do {
             let result = try await backend.login(loginCode: loginCode)
-            E2ESafeDiagnostics.record(operation: "merchant_login", code: "backend_accepted")
+            E2ESafeDiagnostics.record(
+                operation: "merchant_login",
+                code: "backend_accepted",
+                durationMs: elapsedMilliseconds(since: startedAt)
+            )
             loginCode = ""
             isSignedIn = true
             isSupportReady = false
@@ -104,7 +109,11 @@ private final class LocalE2EModel: ObservableObject {
         } catch {
             let code = safeDiagnosticCode(for: error)
             status = "Merchant login failed (\(code))"
-            E2ESafeDiagnostics.record(operation: "merchant_login", code: code)
+            E2ESafeDiagnostics.record(
+                operation: "merchant_login",
+                code: code,
+                durationMs: elapsedMilliseconds(since: startedAt)
+            )
         }
     }
 
@@ -136,7 +145,7 @@ private final class LocalE2EModel: ObservableObject {
             #endif
             E2ESafeDiagnostics.record(operation: "sdk_initialize", code: "complete")
             E2ESafeDiagnostics.record(operation: "sdk_identify", code: "started")
-            _ = try await sdk.identify(userJwt: userJwt)
+            _ = try await sdk.loginIdentifiedUser(userJwt: userJwt)
             E2ESafeDiagnostics.record(operation: "sdk_identify", code: "complete")
             presenter = OnloMessengerPresenter(sdk: sdk)
             isSupportReady = true
@@ -156,11 +165,20 @@ private final class LocalE2EModel: ObservableObject {
             return
         }
         Task {
+            let startedAt = Date()
             do {
                 try await presenter.present(from: host)
-                E2ESafeDiagnostics.record(operation: "present_messenger", code: "presented")
+                E2ESafeDiagnostics.record(
+                    operation: "present_messenger",
+                    code: "presented",
+                    durationMs: elapsedMilliseconds(since: startedAt)
+                )
             } catch {
-                E2ESafeDiagnostics.record(operation: "present_messenger", code: safeDiagnosticCode(for: error))
+                E2ESafeDiagnostics.record(
+                    operation: "present_messenger",
+                    code: safeDiagnosticCode(for: error),
+                    durationMs: elapsedMilliseconds(since: startedAt)
+                )
             }
         }
     }
@@ -187,6 +205,10 @@ private final class LocalE2EModel: ObservableObject {
         if error is URLError { return "merchant_network_unavailable" }
         if error is DecodingError { return "merchant_invalid_response" }
         return "unexpected_error"
+    }
+
+    private func elapsedMilliseconds(since startedAt: Date) -> Int {
+        max(0, Int(Date().timeIntervalSince(startedAt) * 1_000))
     }
 }
 
@@ -253,7 +275,12 @@ private enum LocalMerchantBackendError: Error { case rejected }
 
 private actor LocalE2ESDKLogger: SDKLogging {
     func record(_ event: SDKLogEvent) async {
-        E2ESafeDiagnostics.record(operation: "sdk_\(event.operation)", code: event.code)
+        E2ESafeDiagnostics.record(
+            operation: "sdk_\(event.operation)",
+            code: event.code,
+            requestId: event.requestId,
+            durationMs: event.durationMs
+        )
     }
 }
 
@@ -263,9 +290,16 @@ private actor LocalE2ESDKLogger: SDKLogging {
 private enum E2ESafeDiagnostics {
     private static let logger = Logger(subsystem: "ai.onlo.locale2e", category: "diagnostics")
 
-    static func record(operation: String, code: String) {
-        let line = "\(ISO8601DateFormatter().string(from: Date())) operation=\(operation) code=\(code)\n"
-        logger.info("operation=\(operation, privacy: .public) code=\(code, privacy: .public)")
+    static func record(
+        operation: String,
+        code: String,
+        requestId: String? = nil,
+        durationMs: Int? = nil
+    ) {
+        let requestField = requestId.map { " requestId=\(sanitize($0))" } ?? ""
+        let durationField = durationMs.map { " durationMs=\(max(0, $0))" } ?? ""
+        let line = "\(ISO8601DateFormatter().string(from: Date())) operation=\(sanitize(operation)) code=\(sanitize(code))\(requestField)\(durationField)\n"
+        logger.info("\(line, privacy: .public)")
         guard let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
         let fileURL = directory.appendingPathComponent("onlo-e2e-diagnostics.log")
         guard let data = line.data(using: .utf8) else { return }
@@ -281,6 +315,14 @@ private enum E2ESafeDiagnostics {
         } catch {
             // Diagnostics must never affect customer login or support.
         }
+    }
+
+    private static func sanitize(_ value: String) -> String {
+        String(value.prefix(128).map { character in
+            character.isLetter || character.isNumber || "._:-".contains(character)
+                ? character
+                : "_"
+        })
     }
 }
 

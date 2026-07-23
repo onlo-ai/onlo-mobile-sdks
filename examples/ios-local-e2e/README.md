@@ -46,6 +46,17 @@ names and safe codes. In Xcode, select **Window → Devices and Simulators**,
 select the simulator and `OnloLocalE2EApp`, then download its container. The
 file is at `AppData/Library/Caches/onlo-e2e-diagnostics.log`.
 
+SDK and host-network events also include safe request IDs when available and
+`durationMs`, so the final checklist can record evidence and timing without
+content.
+For a running simulator, resolve the current container with:
+
+```bash
+xcrun simctl get_app_container booted ai.onlo.locale2e data
+```
+
+Then inspect `Library/Caches/onlo-e2e-diagnostics.log` beneath that path. The
+container UUID changes whenever the app is reinstalled, so do not hard-code it.
 The merchant simulator writes its corresponding safe backend/proxy events to
 `examples/merchant-backend/.local/merchant-backend.log`. Neither file contains
 the login code, API key, JWT, signing secret, message content, headers, or raw

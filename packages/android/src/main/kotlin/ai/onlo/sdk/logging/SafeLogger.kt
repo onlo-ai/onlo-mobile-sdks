@@ -9,6 +9,7 @@ internal data class SafeLogEvent(
     val sdkVersion: String,
     val runtimePlatform: String = "android",
     val requestId: String? = null,
+    val detailCode: String? = null,
     val durationMs: Long? = null,
 )
 
@@ -34,6 +35,7 @@ internal class AndroidSafeLogger : SafeLogger {
             add("sdkVersion=${event.sdkVersion.safeLogField()}")
             add("runtime=${event.runtimePlatform.safeLogField()}")
             event.requestId?.let { add("requestId=${it.safeLogField()}") }
+            event.detailCode?.let { add("detailCode=${it.safeLogField()}") }
             event.durationMs?.let { add("durationMs=${it.coerceAtLeast(0)}") }
         }
         val message = fields.joinToString(" ")

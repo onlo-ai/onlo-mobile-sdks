@@ -56,13 +56,13 @@ public struct MobileConfig: Codable, Sendable, Equatable {
     public struct SecurityPolicy: Codable, Sendable, Equatable {
         public let minimumProtocolVersion: Int; public let minimumSdkVersion: String?; public let identityMode: IdentityMode; public let anonymousScope: AnonymousScope; public let nativePlacement: NativePlacement
         private enum CodingKeys: String, CodingKey { case minimumProtocolVersion, minimumSdkVersion, identityMode, anonymousScope, nativePlacement }
-        public init(from decoder: Decoder) throws { let c = try decoder.container(keyedBy: CodingKeys.self); minimumProtocolVersion = try c.decode(Int.self, forKey: .minimumProtocolVersion); minimumSdkVersion = try c.decode(String?.self, forKey: .minimumSdkVersion); identityMode = try c.decode(IdentityMode.self, forKey: .identityMode); anonymousScope = try c.decode(AnonymousScope.self, forKey: .anonymousScope); nativePlacement = try c.decode(NativePlacement.self, forKey: .nativePlacement) }
+        public init(from decoder: Decoder) throws { let c = try decoder.container(keyedBy: CodingKeys.self); minimumProtocolVersion = try c.decode(Int.self, forKey: .minimumProtocolVersion); minimumSdkVersion = try c.decodeIfPresent(String.self, forKey: .minimumSdkVersion); identityMode = try c.decode(IdentityMode.self, forKey: .identityMode); anonymousScope = try c.decode(AnonymousScope.self, forKey: .anonymousScope); nativePlacement = try c.decode(NativePlacement.self, forKey: .nativePlacement) }
     }
     public struct Appearance: Codable, Sendable, Equatable { public let accent: String; public let botName: String; public let botSubtitle: String; public let greeting: String; public let headerAvatar: HeaderAvatar; public let light: ColorTheme; public let dark: DarkColorTheme }
     public struct HeaderAvatar: Codable, Sendable, Equatable {
         public let mode: AvatarMode; public let text: String; public let data: String?
         private enum CodingKeys: String, CodingKey { case mode, text, data }
-        public init(from decoder: Decoder) throws { let c = try decoder.container(keyedBy: CodingKeys.self); mode = try c.decode(AvatarMode.self, forKey: .mode); text = try c.decode(String.self, forKey: .text); data = try c.decode(String?.self, forKey: .data) }
+        public init(from decoder: Decoder) throws { let c = try decoder.container(keyedBy: CodingKeys.self); mode = try c.decode(AvatarMode.self, forKey: .mode); text = try c.decode(String.self, forKey: .text); data = try c.decodeIfPresent(String.self, forKey: .data) }
     }
     public struct ColorTheme: Codable, Sendable, Equatable { public let background: String; public let outgoing: String; public let outgoingText: String; public let incoming: String; public let incomingText: String }
     public struct DarkColorTheme: Codable, Sendable, Equatable { public let enabled: Bool; public let background: String; public let outgoing: String; public let outgoingText: String; public let incoming: String; public let incomingText: String }
