@@ -119,6 +119,7 @@ type MobileConfig = {
     light: ColorTheme; dark: ColorTheme & { enabled: boolean } };
   features: { insertLink: boolean; insertCode: boolean; emoji: boolean; gifs: boolean; voice: boolean; fileUpload: boolean;
     transcriptDownload: boolean; soundNotifications: boolean; showTimestamps: boolean; faqButton: { enabled: boolean; label: string } };
+  mediaPolicy: { enabled: boolean; maximumImagesPerMessage: number; maximumImageBytes: number };
   content: { faqs: Faq[]; tabs: Tabs; search: Search; onboarding: Onboarding; homeSections: HomeSection[] };
   identityMode: 'sdk_interface'; unsupportedWidgetSettings: Array<{ setting: string; reason: string }>;
 };
@@ -131,6 +132,13 @@ type HomeSection = { id: string; type: 'welcome' | 'search' | 'faqs' | 'checklis
 ```
 
 Known nested fields are stable; ignore unknown additive fields. On `config_changed` or foreground/network recovery, fetch conditionally with the last ETag. Use last-known-good config offline. `incompatible_client` means requested schema is invalid/unsupported; `config_unavailable` means keep last-known-good and follow `after_backoff`.
+
+`mediaPolicy.maximumImagesPerMessage` is an integer from `0...3`.
+`mediaPolicy.maximumImageBytes` is an integer from `1...8388608` bytes.
+The client must use `min(server-configured value, SDK safety maximum)`. The
+server independently enforces the effective policy at image intent, completion,
+and chat submission. These fields do not replace server-side AI-credit budgets
+or request rate limits.
 
 ## Chat, transcript, and foreground stream
 
@@ -160,8 +168,8 @@ type ConversationDetail = { conversation: { id: string; sessionId: string; statu
 
 | Flow | Contract |
 | --- | --- |
-| Image intent | `POST /api/sdk/v1/attachments/intent`: `{ conversationId, mimeType: 'image/jpeg'|'image/png'|'image/webp', byteSize, sha256, filename }` → `{ attachmentId, intent, expiresAt, completion: { method: 'POST', endpoint: '/api/sdk/v1/attachments/complete' } }`. Max 8 MiB, intent 5 minutes. |
-| Image completion | Bearer `multipart/form-data`: `intent`, `file` → `{ attachment: { id,url,type,name,size,sha256 }, receipt, receiptExpiresAt, authenticatedDownload }`. Receipt lasts 24 hours. Render only `authenticatedDownload`; include attachment data plus receipt in chat. Max 3 images/message. |
+| Image intent | `POST /api/sdk/v1/attachments/intent`: `{ conversationId, mimeType: 'image/jpeg'|'image/png'|'image/webp', byteSize, sha256, filename }` → `{ attachmentId, intent, expiresAt, completion: { method: 'POST', endpoint: '/api/sdk/v1/attachments/complete' } }`. `byteSize` must not exceed `mediaPolicy.maximumImageBytes` or the 8 MiB SDK ceiling. Intent lasts 5 minutes. |
+| Image completion | Bearer `multipart/form-data`: `intent`, `file` → `{ attachment: { id,url,type,name,size,sha256 }, receipt, receiptExpiresAt, authenticatedDownload }`. Receipt lasts 24 hours. Render only `authenticatedDownload`; include attachment data plus receipt in chat. Chat must not exceed `mediaPolicy.maximumImagesPerMessage` or the 3-image SDK ceiling. |
 | Push register | `POST /api/sdk/v1/push-token`: `{ action:'register', provider:'apns'|'fcm', token, notificationPreference?:'enabled'|'muted', locale?:string }` → `{ state:'active'|'muted', provider, environment:'sandbox'|'production', fingerprint, registeredAt }`. |
 | Push unregister | `{ action:'unregister' }` → `{ state:'inactive' }`. |
 | Push payload | `{ conversationId, messageId, notificationType:'message_available' }`. Re-authorise/refetch transcript before displaying or navigating. |
@@ -171,4 +179,5 @@ type ConversationDetail = { conversation: { id: string; sessionId: string; statu
 - Do not log tokens, JWTs, message text, PII, attachment URLs, or raw push tokens.
 - Session credentials and identity state must be cleared before a different host-app user can use the SDK.
 - Image-only v1: reject PDF, text, GIF, SVG, video, and arbitrary remote URLs.
+- Apply `min(mediaPolicy, SDK safety maximum)` locally; never interpret server values as permission to exceed 3 images or 8 MiB.
 - This contract is server-owned. Any server discrepancy blocks client implementation until corrected here.
