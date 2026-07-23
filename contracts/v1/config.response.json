@@ -44,6 +44,11 @@
       "showTimestamps": true,
       "faqButton": { "enabled": true, "label": "Help" }
     },
+    "mediaPolicy": {
+      "enabled": true,
+      "maximumImagesPerMessage": 5,
+      "maximumImageBytes": 8388608
+    },
     "content": {
       "faqs": [{ "question": "[redacted]", "answer": "[redacted]" }],
       "tabs": { "enabled": true, "tabs": [{ "id": "home", "label": "Home", "icon": "home", "enabled": true }], "defaultTab": "home" },

@@ -6,6 +6,9 @@ final RegExp _compactJwt = RegExp(
 );
 
 abstract final class Onlo {
+  static Future<void> setLogLevel(OnloLogLevel level) =>
+      OnloPlatform.instance.setLogLevel(level);
+
   static Future<void> initialize({required String sdkKey}) {
     _requireNonEmpty(sdkKey, 'sdkKey is required.');
     return OnloPlatform.instance
@@ -94,11 +97,8 @@ abstract final class Onlo {
   static Stream<OnloConnectionState> observeConnectionState() =>
       observeState().map((snapshot) => snapshot.connection).distinct();
 
-  static Stream<int> observeUnreadCount() => observeState()
-      .map((snapshot) => snapshot.unreadCount)
-      .where((count) => count != null)
-      .cast<int>()
-      .distinct();
+  static Stream<int?> observeUnreadCount() =>
+      observeState().map((snapshot) => snapshot.unreadCount).distinct();
 
   static void _requireCompactJwt(String value) {
     _requireNonEmpty(value, 'userJwt is required.');

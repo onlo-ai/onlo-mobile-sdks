@@ -26,7 +26,11 @@ class PushRegistryTest {
         assertEquals(PushRegistrationOutcome.Registered, registry.register(authority, PushProvider.FCM, "fcm-token"))
         assertEquals(1, transport.requests.size)
         assertEquals("/api/sdk/v1/push-token", transport.requests.single().url.encodedPath)
-        assertEquals("{\"action\":\"register\",\"provider\":\"fcm\",\"token\":\"fcm-token\"}", transport.requests.single().bodyText())
+        val body = org.json.JSONObject(transport.requests.single().bodyText())
+        assertEquals(3, body.length())
+        assertEquals("register", body.getString("action"))
+        assertEquals("fcm", body.getString("provider"))
+        assertEquals("fcm-token", body.getString("token"))
         assertEquals("Bearer bearer-a", transport.requests.single().headers["Authorization"])
     }
 
@@ -52,10 +56,10 @@ class PushRegistryTest {
     @Test fun `payload is shape checked then refetched before navigation`() = runBlocking {
         val registry = registry(FixtureTransport(emptyList()))
         val authority = PushAuthority(OwnerScope.Anonymous("a"), "bearer")
-        assertEquals(PushPayloadOutcome.NotOnlo, registry.handlePayload(mapOf("provider" to "other"), authority) { _, _, _ -> true })
-        assertEquals(PushPayloadOutcome.Malformed, registry.handlePayload(mapOf("conversationId" to "c", "messageId" to "m", "notificationType" to "message_available", "extra" to "x"), authority) { _, _, _ -> true })
-        assertEquals(PushPayloadOutcome.NotAuthorised, registry.handlePayload(payload(), authority) { _, _, _ -> false })
-        assertEquals(PushPayloadOutcome.NavigationIntent("c", "m"), registry.handlePayload(payload(), authority) { _, conversation, message -> conversation == "c" && message == "m" })
+        assertEquals(PushPayloadOutcome.NotOnlo, registry.handlePayload(mapOf("provider" to "other"), authority, { _, _, _ -> true }))
+        assertEquals(PushPayloadOutcome.Malformed, registry.handlePayload(mapOf("conversationId" to "c", "messageId" to "m", "notificationType" to "message_available", "extra" to "x"), authority, { _, _, _ -> true }))
+        assertEquals(PushPayloadOutcome.NotAuthorised, registry.handlePayload(payload(), authority, { _, _, _ -> false }))
+        assertEquals(PushPayloadOutcome.NavigationIntent("c", "m"), registry.handlePayload(payload(), authority, { _, conversation, message -> conversation == "c" && message == "m" }))
     }
 
     @Test fun `payload rechecks authority after delayed refetch`() = runBlocking {
@@ -141,7 +145,11 @@ class PushRegistryTest {
     private fun registerResponse() = OnloHttpResponse(200, emptyMap(), successEnvelope("{\"state\":\"active\",\"provider\":\"fcm\",\"environment\":\"production\",\"fingerprint\":\"fixture\",\"registeredAt\":\"2026-01-01T00:00:00Z\"}"))
     private fun unregisterResponse() = OnloHttpResponse(200, emptyMap(), successEnvelope("{\"state\":\"inactive\"}"))
     private fun successEnvelope(result: String) = "{\"requestId\":\"request-1\",\"serverTime\":\"2026-01-01T00:00:00Z\",\"protocolVersion\":1,\"minimumProtocolVersion\":1,\"ok\":true,\"result\":$result}"
-    private fun failureEnvelope(directive: String, retryAfterMs: Long? = null) = "{\"requestId\":\"request-1\",\"serverTime\":\"2026-01-01T00:00:00Z\",\"protocolVersion\":1,\"minimumProtocolVersion\":1,\"ok\":false,\"error\":{\"code\":\"dependency_unavailable\",\"message\":\"fixture\",\"retry\":{\"directive\":\"$directive\"${retryAfterMs?.let { ",\\\"retryAfterMs\\\":$it" }.orEmpty()}}}"
+    private fun failureEnvelope(directive: String, retryAfterMs: Long? = null) = OnloHttpResponse(
+        200,
+        emptyMap(),
+        "{\"requestId\":\"request-1\",\"serverTime\":\"2026-01-01T00:00:00Z\",\"protocolVersion\":1,\"minimumProtocolVersion\":1,\"ok\":false,\"error\":{\"code\":\"dependency_unavailable\",\"message\":\"fixture\",\"retry\":{\"directive\":\"$directive\"${retryAfterMs?.let { ",\"retryAfterMs\":$it" }.orEmpty()}}}}",
+    )
     private class MemoryStore(var value: StoredPushToken? = null) : PushTokenStore { override suspend fun load() = value; override suspend fun save(value: StoredPushToken) { this.value = value }; override suspend fun clear() { value = null } }
     private class FixtureTransport(private val responses: List<OnloHttpResponse>) : OnloTransport {
         val requests = mutableListOf<OnloHttpRequest>(); private var index = 0

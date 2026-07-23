@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public enum SDKState: String, Sendable, Equatable {
     case uninitialized
@@ -11,8 +12,7 @@ public enum SDKState: String, Sendable, Equatable {
     case reauthRequired
 }
 
-/// Token- and content-free native state for framework adapters. `unreadCount`
-/// is withheld while no currently-authorised account owns an inbox.
+/// Token- and content-free native state for framework adapters.
 @_spi(FrameworkBridge)
 public struct SDKFrameworkState: Sendable, Equatable {
     public let state: SDKState
@@ -33,7 +33,16 @@ public enum OnloPresentationIntent: Sendable, Equatable {
 
 public actor OnloSDK {
     static let productionOrigin = URL(string: "https://onlo.ai")!
-    static let implementedCapabilities = ["secure_storage", "persistent_outbox", "foreground_stream", "apns", "identity_jwt", "config_schema_v1"]
+    static let implementedCapabilities = [
+        "secure_storage",
+        "persistent_outbox",
+        "foreground_stream",
+        "apns",
+        "media_picker",
+        "attachment_upload",
+        "identity_jwt",
+        "config_schema_v1",
+    ]
     /// Internal dependency configuration used only by package tests and future
     /// native adapters. It is deliberately not part of the host-app API.
     struct Configuration: Sendable, Equatable {
@@ -90,12 +99,16 @@ public actor OnloSDK {
     private var runtimeSession: RuntimeSession?
     private var stateObservers: [UUID: AsyncStream<SDKState>.Continuation] = [:]
     private var frameworkStateObservers: [UUID: AsyncStream<SDKFrameworkState>.Continuation] = [:]
-    /// Derived only from a response whose conversations all belong to the
-    /// active bearer session. It is never persisted or exposed as content.
-    private var unreadCount: Int?
+    private var unreadCount: Int? {
+        didSet {
+            guard oldValue != unreadCount else { return }
+            publishFrameworkState()
+        }
+    }
     private var state: SDKState = .uninitialized {
         didSet {
             guard oldValue != state else { return }
+            if state != .identifiedReady { unreadCount = nil }
             for observer in stateObservers.values { observer.yield(state) }
             publishFrameworkState()
         }
@@ -112,6 +125,12 @@ public actor OnloSDK {
     private var configAuthority = UUID()
     private var pushRetryTask: Task<Void, Never>?
     private var pushReconciliationInProgress = false
+    private struct PendingAPNsRegistration: Sendable {
+        let token: Data
+        let notificationPreference: PushTokenRequest.NotificationPreference?
+        let locale: String?
+    }
+    private var pendingAPNsRegistration: PendingAPNsRegistration?
     private var lifecycleBinding: OnloNativeLifecycleBinding?
     /// UIKit presenters register a weak-capturing MainActor invalidator. The
     /// core awaits these before progressing a logout/account boundary, so an
@@ -120,7 +139,7 @@ public actor OnloSDK {
 
     /// Creates the native core with SDK-owned storage boundaries. The public API
     /// never accepts a host persistence implementation or plain-text fallback.
-    public init(logger: any SDKLogging = NoopSDKLogger()) {
+    public init(logger: any SDKLogging = OnloConsoleLogger.shared) {
         self.credentialStore = KeychainCredentialStore()
         self.configStore = KeychainMobileConfigStore()
         self.pushIntentStore = KeychainPushIntentStore()
@@ -344,9 +363,6 @@ public actor OnloSDK {
                 try await bootstrapAnonymous(pendingTransition: pending)
             }
         }
-        // Do not expose the anonymous inbox while an identified authority is
-        // being acquired, even if that transition later fails.
-        withholdUnreadCount()
         cancelConfigRetry()
         // No config request authenticated by the prior account may be allowed
         // to complete once an account transition has begun.
@@ -413,6 +429,7 @@ public actor OnloSDK {
         startDurableDispatchIfNeeded()
         startForegroundStreamIfAvailable()
         await reconcilePushAfterSessionSuccess()
+        await registerPendingAPNsAfterIdentify()
         return state
     }
 
@@ -422,6 +439,18 @@ public actor OnloSDK {
     @discardableResult
     public func identify(userJwt: String) async throws -> SDKState {
         try await loginIdentifiedUser(userJwt: userJwt)
+    }
+
+    /// Fetches a short-lived user JWT from the Operator backend and immediately
+    /// exchanges it for an identified Onlo session. The provider executes in
+    /// host-app code; the SDK never receives an Operator signing secret and
+    /// does not persist the returned JWT.
+    @discardableResult
+    public func loginIdentifiedUser(
+        using userJWTProvider: @Sendable () async throws -> String
+    ) async throws -> SDKState {
+        let userJwt = try await userJWTProvider()
+        return try await loginIdentifiedUser(userJwt: userJwt)
     }
 
     /// Revokes/unlinks on the server before destructive local cleanup. If network
@@ -445,7 +474,6 @@ public actor OnloSDK {
 
     /// Token-free lifecycle observation for framework-native EventChannels.
     /// It yields the current value first, then only distinct core transitions.
-    @_spi(FrameworkBridge)
     public func observeState() -> AsyncStream<SDKState> {
         let id = UUID()
         return AsyncStream { continuation in
@@ -459,9 +487,7 @@ public actor OnloSDK {
 
     private func removeStateObserver(_ id: UUID) { stateObservers[id] = nil }
 
-    /// Account-bound, token-free framework observation. The first value is
-    /// immediate; subsequent values are emitted only when state or the safe
-    /// unread total changes.
+    /// Token-free framework observation. The first value is immediate.
     @_spi(FrameworkBridge)
     public func observeFrameworkState() -> AsyncStream<SDKFrameworkState> {
         let id = UUID()
@@ -479,22 +505,6 @@ public actor OnloSDK {
     private func publishFrameworkState() {
         let snapshot = SDKFrameworkState(state: state, unreadCount: unreadCount)
         for observer in frameworkStateObservers.values { observer.yield(snapshot) }
-    }
-
-    /// Do this before any account boundary can make a new owner usable.
-    private func withholdUnreadCount() {
-        guard unreadCount != nil else { return }
-        unreadCount = nil
-        publishFrameworkState()
-    }
-
-    private func publishUnreadCount(_ value: Int, for session: RuntimeSession) {
-        guard value >= 0,
-              runtimeSession?.sessionId == session.sessionId,
-              runtimeSession?.credential.ownerScope == session.credential.ownerScope,
-              unreadCount != value else { return }
-        unreadCount = value
-        publishFrameworkState()
     }
 
     func registerMessengerPresentationInvalidator(_ invalidator: @escaping @MainActor @Sendable () -> Void) -> UUID {
@@ -529,8 +539,18 @@ public actor OnloSDK {
         // an explicit resolution/removal policy, later rows must not overtake it.
         guard let head = all.first(where: { $0.state != .accepted && $0.state != .cancelled }) else { return nil }
         guard entries.contains(where: { $0.clientMessageId == head.clientMessageId }) else { return nil }
-        guard head.attachments.isEmpty else { throw OnloError.invalidState }
         var sending = head
+        if sending.attachments.contains(where: { attachment in
+            guard let expiresAt = attachment.receiptExpiresAt,
+                  let expiry = serverDate(expiresAt) else { return true }
+            return expiry <= now()
+        }) {
+            sending.state = .failedTerminal
+            sending.lastErrorCode = APIErrorCode.mediaUnavailable.rawValue
+            sending.nextAttemptAt = nil
+            try await ownerStore.update(sending)
+            return nil
+        }
         sending.state = .sending
         sending.attemptCount += 1
         sending.nextAttemptAt = nil
@@ -565,6 +585,114 @@ public actor OnloSDK {
         try await configStore.loadConfigState().config
     }
 
+    /// Completes the contract-owned image intent/upload flow and returns only
+    /// the opaque handle that may be committed to the encrypted native outbox.
+    /// Raw image bytes are never persisted by the SDK.
+    func uploadImage(
+        conversationId: String,
+        data: Data,
+        mimeType: ImageMimeType,
+        filename: String
+    ) async throws -> OutboxAttachment {
+        guard !conversationId.isEmpty,
+              !filename.isEmpty,
+              !data.isEmpty else {
+            throw OnloError.invalidConfiguration
+        }
+        guard state == .anonymousReady || state == .identifiedReady,
+              let session = runtimeSession,
+              let requestFactory else {
+            throw state == .offlineReady ? OnloError.requiresNetwork : OnloError.invalidState
+        }
+        let configState = try await configStore.loadConfigState()
+        guard let config = configState.config,
+              config.features.fileUpload,
+              config.mediaPolicy.enabled,
+              config.mediaPolicy.effectiveMaximumImagesPerMessage > 0,
+              data.count <= config.mediaPolicy.effectiveMaximumImageBytes else {
+            throw OnloError.remote(APIError(
+                code: .mediaUnavailable,
+                message: "Image upload is unavailable.",
+                retry: try APIRetry(directive: .never)
+            ))
+        }
+
+        let authority = configAuthority
+        let scope = session.credential.ownerScope
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let intentBody = AttachmentIntentRequest(
+            conversationId: conversationId,
+            mimeType: mimeType,
+            byteSize: data.count,
+            sha256: digest,
+            filename: filename
+        )
+        let intentResponse = try await transport.execute(
+            try requestFactory.attachmentIntent(intentBody, chatToken: session.chatToken)
+        )
+        let intent = try OnloResponseDecoder.envelope(AttachmentIntentResult.self, from: intentResponse).result
+        guard configAuthority == authority,
+              runtimeSession?.sessionId == session.sessionId,
+              runtimeSession?.credential.ownerScope == scope else {
+            throw OnloError.invalidState
+        }
+        guard !intent.attachmentId.isEmpty,
+              !intent.intent.isEmpty,
+              serverDate(intent.expiresAt) != nil,
+              intent.completion.method == "POST",
+              intent.completion.endpoint == "/api/sdk/v1/attachments/complete" else {
+            throw OnloError.invalidResponse
+        }
+
+        let completionResponse = try await transport.execute(
+            try requestFactory.attachmentCompletion(
+                intent: intent.intent,
+                fileData: data,
+                filename: filename,
+                mimeType: mimeType,
+                chatToken: session.chatToken
+            )
+        )
+        let completed = try OnloResponseDecoder.envelope(AttachmentCompleteResult.self, from: completionResponse).result
+        guard configAuthority == authority,
+              runtimeSession?.sessionId == session.sessionId,
+              runtimeSession?.credential.ownerScope == scope else {
+            throw OnloError.invalidState
+        }
+        guard completed.attachment.id == intent.attachmentId,
+              completed.attachment.type == mimeType,
+              completed.attachment.name == filename,
+              completed.attachment.size == data.count,
+              completed.attachment.sha256.lowercased() == digest,
+              !completed.attachment.url.isEmpty,
+              !completed.receipt.isEmpty,
+              serverDate(completed.receiptExpiresAt).map({ $0 > now() }) == true,
+              !completed.authenticatedDownload.isEmpty else {
+            throw OnloError.invalidResponse
+        }
+        return OutboxAttachment(
+            attachment: ChatAttachment(
+                id: completed.attachment.id,
+                url: completed.attachment.url,
+                type: completed.attachment.type.rawValue,
+                name: completed.attachment.name,
+                size: completed.attachment.size,
+                sha256: completed.attachment.sha256,
+                receipt: completed.receipt
+            ),
+            receiptExpiresAt: completed.receiptExpiresAt
+        )
+    }
+
+    private func serverDate(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) { return date }
+        let wholeSeconds = ISO8601DateFormatter()
+        wholeSeconds.formatOptions = [.withInternetDateTime]
+        return wholeSeconds.date(from: value)
+    }
+
     /// Native messenger-only inbox fetch. Conversation metadata is accepted
     /// only when every result belongs to the bearer session captured before
     /// the request. It is not a headless public transcript API.
@@ -577,7 +705,7 @@ public actor OnloSDK {
             }
             let inbox = try await authorisedInbox(for: session)
             await record(operation: "inbox", code: "ok", requestId: nil, startedAt: startedAt)
-            return inbox
+            return inbox.conversations
         } catch let error as OnloError {
             await record(operation: "inbox", code: error.safeCode, requestId: nil, startedAt: startedAt)
             throw error
@@ -587,36 +715,131 @@ public actor OnloSDK {
         }
     }
 
-    /// The conversation list is the sole source of unread totals. This helper
-    /// is shared by the messenger, lifecycle recovery, and stream hints so no
-    /// adapter maintains a parallel inbox or trusts an SSE payload.
-    private func authorisedInbox(for session: RuntimeSession) async throws -> [ConversationSummary] {
+    /// The list remains session-authorised. Customer unread state is exposed
+    /// only for a verified identity; anonymous summaries are scrubbed.
+    private func authorisedInbox(for session: RuntimeSession) async throws -> ConversationListResult {
         guard let requestFactory else { throw OnloError.invalidState }
         let response = try await transport.execute(try requestFactory.conversations(chatToken: session.chatToken, limit: 50))
         let inbox = try OnloResponseDecoder.widget(ConversationListResult.self, from: response)
         var conversationIDs = Set<String>()
         let summariesAreValid = inbox.conversations.allSatisfy { conversation in
-            !conversation.id.isEmpty &&
+                !conversation.id.isEmpty &&
                 !conversation.sessionId.isEmpty &&
                 conversation.unreadCount >= 0 &&
+                conversation.unread == (conversation.unreadCount > 0) &&
                 conversation.messageCount >= 0 &&
                 conversationIDs.insert(conversation.id).inserted
         }
         guard runtimeSession?.sessionId == session.sessionId,
               runtimeSession?.credential.ownerScope == session.credential.ownerScope,
-              summariesAreValid,
-              let total = inbox.conversations.reduce(into: Optional(0), { partial, conversation in
-                  guard let current = partial else { return }
-                  let (sum, overflow) = current.addingReportingOverflow(conversation.unreadCount)
-                  partial = overflow ? nil : sum
-              }) else {
+              inbox.totalUnreadCount >= 0,
+              summariesAreValid else {
             throw OnloError.invalidResponse
         }
-        publishUnreadCount(total, for: session)
-        return inbox.conversations
+        if session.credential.identityClass == .identified {
+            unreadCount = inbox.totalUnreadCount
+            return inbox
+        }
+        unreadCount = nil
+        return ConversationListResult(
+            conversations: inbox.conversations.map {
+                ConversationSummary(
+                    id: $0.id,
+                    sessionId: $0.sessionId,
+                    title: $0.title,
+                    unread: false,
+                    unreadCount: 0,
+                    status: $0.status,
+                    updatedAt: $0.updatedAt,
+                    messageCount: $0.messageCount,
+                    lastMessageRole: $0.lastMessageRole
+                )
+            },
+            totalUnreadCount: 0
+        )
     }
 
-    private func refreshUnreadCount(for session: RuntimeSession) async throws {
+    func messengerHelpCenter() async throws -> [HelpCenterTopic] {
+        guard state == .anonymousReady || state == .identifiedReady,
+              let session = runtimeSession,
+              let requestFactory else {
+            throw state == .offlineReady ? OnloError.requiresNetwork : OnloError.invalidState
+        }
+        let authority = configAuthority
+        let response = try await transport.execute(
+            try requestFactory.helpCenter(chatToken: session.chatToken)
+        )
+        let catalog = try OnloResponseDecoder.widget(HelpCenterCatalog.self, from: response)
+        var topicIDs = Set<String>()
+        var articleIDs = Set<String>()
+        let isValid = catalog.topics.count <= 100 && catalog.topics.allSatisfy { topic in
+            !topic.id.isEmpty &&
+                !topic.name.isEmpty &&
+                topic.count == topic.articles.count &&
+                topicIDs.insert(topic.id).inserted &&
+                topic.articles.allSatisfy { article in
+                    !article.id.isEmpty &&
+                        !article.title.isEmpty &&
+                        articleIDs.insert(article.id).inserted
+                }
+        }
+        guard isValid,
+              configAuthority == authority,
+              runtimeSession?.sessionId == session.sessionId else {
+            throw OnloError.invalidResponse
+        }
+        return catalog.topics
+    }
+
+    func messengerHelpCenterArticle(articleId: String) async throws -> HelpCenterArticle {
+        guard !articleId.isEmpty,
+              state == .anonymousReady || state == .identifiedReady,
+              let session = runtimeSession,
+              let requestFactory else {
+            throw state == .offlineReady ? OnloError.requiresNetwork : OnloError.invalidState
+        }
+        let authority = configAuthority
+        let response = try await transport.execute(
+            try requestFactory.helpCenterArticle(articleId: articleId, chatToken: session.chatToken)
+        )
+        let result = try OnloResponseDecoder.widget(HelpCenterArticleResult.self, from: response)
+        guard result.article.id == articleId,
+              !result.article.title.isEmpty,
+              result.article.body.count <= 1_000_000,
+              configAuthority == authority,
+              runtimeSession?.sessionId == session.sessionId else {
+            throw OnloError.invalidResponse
+        }
+        return result.article
+    }
+
+    /// Called by the native presenter only after it has committed the fetched
+    /// transcript to visible UI. Anonymous sessions intentionally do nothing.
+    func acknowledgeRenderedConversation(
+        conversationId: String,
+        throughMessageId: String
+    ) async throws {
+        guard state == .identifiedReady,
+              let session = runtimeSession,
+              session.credential.identityClass == .identified,
+              let requestFactory else { return }
+        let authority = configAuthority
+        let response = try await transport.execute(
+            try requestFactory.acknowledgeRead(
+                conversationId: conversationId,
+                throughMessageId: throughMessageId,
+                chatToken: session.chatToken
+            )
+        )
+        let result = try OnloResponseDecoder.widget(ConversationReadResult.self, from: response)
+        guard result.conversationId == conversationId,
+              result.readThroughMessageId == throughMessageId,
+              !result.unread,
+              result.unreadCount == 0,
+              configAuthority == authority,
+              runtimeSession?.sessionId == session.sessionId else {
+            throw OnloError.invalidResponse
+        }
         _ = try await authorisedInbox(for: session)
     }
 
@@ -695,9 +918,6 @@ public actor OnloSDK {
         // durable dispatch, stream, and push reconciliation on success.
         guard !recoveredSession else { return }
         try await refreshConfiguration()
-        if let session = runtimeSession {
-            try? await refreshUnreadCount(for: session)
-        }
         startDurableDispatchIfNeeded()
         startForegroundStreamIfAvailable()
         await reconcilePushAfterSessionSuccess()
@@ -727,8 +947,31 @@ public actor OnloSDK {
         attachments: [OutboxAttachment]
     ) async throws -> AsyncThrowingStream<ChatEvent, Error> {
         try requireInitialized()
-        guard !message.isEmpty || !attachments.isEmpty,
-              attachments.count <= OnloProtocol.maximumImagesPerMessage else {
+        guard !message.isEmpty || !attachments.isEmpty else {
+            throw OnloError.invalidConfiguration
+        }
+        if !attachments.isEmpty {
+            let configState = try await configStore.loadConfigState()
+            guard let config = configState.config,
+                  config.features.fileUpload,
+                  config.mediaPolicy.enabled,
+                  attachments.count <= config.mediaPolicy.effectiveMaximumImagesPerMessage,
+                  attachments.allSatisfy({
+                      $0.attachment.size <= config.mediaPolicy.effectiveMaximumImageBytes
+                  }) else {
+                throw OnloError.invalidConfiguration
+            }
+        }
+        guard attachments.count <= OnloProtocol.maximumImagesPerMessage,
+              attachments.allSatisfy({
+                  !$0.attachment.url.isEmpty &&
+                      !$0.attachment.type.isEmpty &&
+                      !$0.attachment.name.isEmpty &&
+                      $0.attachment.size > 0 &&
+                      $0.attachment.size <= OnloProtocol.maximumImageBytes &&
+                      $0.attachment.receipt?.isEmpty == false &&
+                      $0.receiptExpiresAt.flatMap(serverDate).map({ $0 > now() }) == true
+              }) else {
             throw OnloError.invalidConfiguration
         }
         let ownerScope: OwnerScope
@@ -814,27 +1057,47 @@ public actor OnloSDK {
         locale: String? = nil
     ) async throws -> OnloPushRegistrationState {
         try requireInitialized()
-        guard !token.isEmpty, token.count <= 512,
-              state == .anonymousReady || state == .identifiedReady,
-              let session = runtimeSession else {
-            throw state == .offlineReady ? OnloError.requiresNetwork : OnloError.invalidState
-        }
+        guard !token.isEmpty, token.count <= 512 else { throw OnloError.invalidConfiguration }
+        let registration = PendingAPNsRegistration(
+            token: token,
+            notificationPreference: notificationPreference,
+            locale: locale
+        )
+        pendingAPNsRegistration = registration
+        guard state == .identifiedReady,
+              let session = runtimeSession,
+              session.credential.identityClass == .identified else { return .pendingRetry }
+        return try await persistAndReconcileAPNs(registration, session: session)
+    }
+
+    private func persistAndReconcileAPNs(
+        _ registration: PendingAPNsRegistration,
+        session: RuntimeSession
+    ) async throws -> OnloPushRegistrationState {
         let existing = try await pushIntentStore.load()
         // A pending intent belongs to the scope that created it. A newly
         // authenticated account must never overwrite it or inherit its token.
         if let existing, existing.ownerScope != session.credential.ownerScope {
             throw OnloError.invalidState
         }
-        let value = token.map { String(format: "%02x", $0) }.joined()
+        let value = registration.token.map { String(format: "%02x", $0) }.joined()
         let intent = ProtectedPushIntent(
             ownerScope: session.credential.ownerScope,
             action: .register,
             token: value,
-            notificationPreference: notificationPreference,
-            locale: locale
+            notificationPreference: registration.notificationPreference,
+            locale: registration.locale
         )
         try await pushIntentStore.save(intent) // persist before any network work
         return try await reconcilePushIntent(allowTokenRefresh: true)
+    }
+
+    private func registerPendingAPNsAfterIdentify() async {
+        guard let registration = pendingAPNsRegistration,
+              state == .identifiedReady,
+              let session = runtimeSession,
+              session.credential.identityClass == .identified else { return }
+        _ = try? await persistAndReconcileAPNs(registration, session: session)
     }
 
     /// SPI used by framework-native adapters. It intentionally accepts bytes,
@@ -852,8 +1115,9 @@ public actor OnloSDK {
         guard payload.isOnloMessageAvailable,
               !payload.conversationId.isEmpty,
               !payload.messageId.isEmpty else { return .notOnlo }
-        guard state == .anonymousReady || state == .identifiedReady,
+        guard state == .identifiedReady,
               let session = runtimeSession,
+              session.credential.identityClass == .identified,
               let requestFactory else { return .deferred }
         let authority = configAuthority
         let scope = session.credential.ownerScope
@@ -865,11 +1129,8 @@ public actor OnloSDK {
         do {
             let response = try await transport.execute(request)
             let transcript = try OnloResponseDecoder.widget(ConversationTranscriptResult.self, from: response)
-            guard isAuthorisedTranscript(
-                      transcript,
-                      conversationId: payload.conversationId,
-                      session: session
-                  ),
+            guard transcript.conversation.id == payload.conversationId,
+                  !transcript.conversation.sessionId.isEmpty,
                   transcript.messages.contains(where: { $0.id == payload.messageId }) else {
                 return .notOnlo
             }
@@ -1370,11 +1631,10 @@ public actor OnloSDK {
                     guard configAuthority == authority,
                           runtimeSession?.credential.ownerScope == scope else { return }
                 case let .inboxConversation(conversationId), let .inboxMessage(conversationId):
-                    try? await refreshUnreadCount(for: session)
-                    guard configAuthority == authority,
-                          runtimeSession?.sessionId == session.sessionId,
-                          runtimeSession?.credential.ownerScope == scope else { return }
                     try? await reconcileTranscript(conversationId: conversationId, session: session)
+                    guard configAuthority == authority,
+                          runtimeSession?.credential.ownerScope == scope else { return }
+                    _ = try? await authorisedInbox(for: session)
                     guard configAuthority == authority,
                           runtimeSession?.credential.ownerScope == scope else { return }
                 }
@@ -1535,7 +1795,6 @@ public actor OnloSDK {
             scope = previous.ownerScope
         } else {
             // A server-side identity transition cannot expose the old partition locally.
-            withholdUnreadCount()
             cancelActiveSends(for: previous.ownerScope)
             await invalidateMessengerPresentations()
             try await ownerStore.beginLogout(for: previous.ownerScope)
@@ -1594,7 +1853,6 @@ public actor OnloSDK {
               presentedCredential == previous.proposedCredential else {
             throw OnloError.invalidState
         }
-        withholdUnreadCount()
         state = .identifying
         do {
             try await ensurePendingReplayAllowed(pending, userJwtProvided: true)
@@ -1615,6 +1873,7 @@ public actor OnloSDK {
             startDurableDispatchIfNeeded()
             startForegroundStreamIfAvailable()
             await reconcilePushAfterSessionSuccess()
+            await registerPendingAPNsAfterIdentify()
             return state
         } catch {
             try await resolveDefinitiveSessionFailure(error, credential: previous)
@@ -1671,7 +1930,6 @@ public actor OnloSDK {
         }
         // The actor cannot advance into a new account state until every
         // registered native presenter has redacted/dismissed on MainActor.
-        withholdUnreadCount()
         await invalidateMessengerPresentations()
         state = .logoutPending
         cancelConfigRetry()
@@ -1846,9 +2104,6 @@ public actor OnloSDK {
     private func refreshConfigurationAfterSessionSuccess() async {
         guard !suppressAutomaticConfigRefresh else { return }
         try? await refreshConfiguration()
-        if let session = runtimeSession {
-            try? await refreshUnreadCount(for: session)
-        }
     }
 
     private func hasConfigurationRetryAuthority(sessionId: String?, scope: OwnerScope?) -> Bool {

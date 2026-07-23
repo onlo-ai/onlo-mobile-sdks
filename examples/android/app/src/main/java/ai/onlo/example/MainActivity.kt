@@ -15,8 +15,8 @@ import kotlinx.coroutines.launch
 
 /**
  * Local host foundation. It deliberately has no SDK key, JWT, or signing
- * implementation in source. Wire the two provider functions to an
- * authenticated Operator backend only in a private host app configuration.
+ * implementation in source. Wire the identity provider to an authenticated
+ * Operator backend only in a private host app configuration.
  */
 class MainActivity : AppCompatActivity() {
     private lateinit var supportButton: Button
@@ -35,10 +35,9 @@ class MainActivity : AppCompatActivity() {
         })
         supportButton.setOnClickListener { OnloMessenger.present(this, Onlo.instance()) }
 
-        // Replace this synthetic placeholder through private build configuration.
-        // It is intentionally not an app secret and must never be a customer JWT.
-        val publicSdkKey: String? = null
-        if (publicSdkKey == null) return
+        // The public key is supplied by ignored local.properties in this example. It is safe to
+        // embed in an app, but a real value does not belong in this shared repository.
+        val publicSdkKey = BuildConfig.ONLO_SDK_KEY.takeIf(String::isNotBlank) ?: return
         val client = Onlo.initialize(applicationContext, publicSdkKey)
         lifecycleScope.launch {
             client.state.collectLatest { state ->

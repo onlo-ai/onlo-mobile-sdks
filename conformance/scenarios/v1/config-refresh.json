@@ -13,6 +13,7 @@
     "Send X-Onlo-Config-Schema: 1 unless relying on its documented default.",
     "Send If-None-Match with the last ETag and retain the last-known-good config on a 304 response.",
     "Fetch conditionally after config_changed, foreground, or network recovery.",
+    "Apply mediaPolicy limits locally without exceeding the three-image and 8 MiB SDK safety ceilings.",
     "On config_unavailable, retain the last-known-good config and follow after_backoff; incompatible_client is not recoverable by retry."
   ]
 }

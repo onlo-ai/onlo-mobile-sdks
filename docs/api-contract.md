@@ -133,8 +133,13 @@ type HomeSection = { id: string; type: 'welcome' | 'search' | 'faqs' | 'checklis
 
 Known nested fields are stable; ignore unknown additive fields. On `config_changed` or foreground/network recovery, fetch conditionally with the last ETag. Use last-known-good config offline. `incompatible_client` means requested schema is invalid/unsupported; `config_unavailable` means keep last-known-good and follow `after_backoff`.
 
-`mediaPolicy.maximumImagesPerMessage` is an integer from `0...3`.
+`mediaPolicy.maximumImagesPerMessage` is an integer from `0...5`.
 `mediaPolicy.maximumImageBytes` is an integer from `1...8388608` bytes.
+Dashboard File upload is the single configuration source shared by WebChat and
+every Mobile SDK; there is no per-target media-policy fallback.
+Clients may accept a source image up to 25 MiB, but the wire payload must be
+resized without cropping and compressed within `maximumImageBytes`, a
+4096-pixel edge, and 16 megapixels before requesting an upload intent.
 The client must use `min(server-configured value, SDK safety maximum)`. The
 server independently enforces the effective policy at image intent, completion,
 and chat submission. These fields do not replace server-side AI-credit budgets
@@ -148,6 +153,8 @@ or request rate limits.
 | `GET /api/widget/conversations?limit=1..50` | Bearer JSON conversation list. |
 | `GET /api/widget/conversations/:id?before=<opaque>&limit=1..100` | Older transcript page. Use `after` for newer; never both. |
 | `GET /api/widget/stream` | Bearer foreground SSE refetch hints. |
+| `GET /api/widget/articles` | Published Help Center catalog scoped by the bearer Operator and, when present, agent. |
+| `GET /api/widget/articles/:id` | One authorised published Help Center article. |
 
 ```ts
 type ChatRequest = { sessionId: string; clientMessageId: string; message: string;
@@ -160,16 +167,51 @@ type ChatEvent =
 type ConversationDetail = { conversation: { id: string; sessionId: string; status: string; isHumanTakeover: boolean };
   messages: Array<{ id: string; externalId: string | null; role: string; senderType: string | null; senderName: string | null; senderTeam: string | null; text: string; attachments: unknown[]; timestamp: number }>;
   sync: { previousCursor: string | null; nextCursor: string | null; limit: number } };
+type ConversationListResult = {
+  conversations: Array<{ id: string; sessionId: string; title: string; unread: boolean; unreadCount: number;
+    status: string; updatedAt: string; messageCount: number; lastMessageRole: string | null }>;
+  totalUnreadCount: number;
+};
+type ConversationReadResult = {
+  conversationId: string; readThroughMessageId: string; unread: boolean; unreadCount: number;
+};
+type HelpCenterCatalog = {
+  topics: Array<{ id: string; name: string; count: number;
+    articles: Array<{ id: string; title: string; updatedAt: string }> }>;
+};
+type HelpCenterArticleResult = {
+  article: { id: string; title: string; topic: string | null; body: string; sourceType: string;
+    faqQuestion: string | null; updatedAt: string;
+    related: Array<{ id: string; title: string; topic: string | null }> };
+};
 ```
 
 `accepted` is durable-send acknowledgement. Duplicate acceptance requires transcript sync, never a new message ID. Stream events are only `{type:'ready'}`, `{type:'config_changed',revision}`, `{type:'inbox.conversation',conversationId}`, `{type:'inbox.message',conversationId}`; all require refetch. Widget-route failures are `{ error: string }` rather than v1 envelopes.
+
+For identified sessions, `totalUnreadCount` is the application badge and each
+conversation's `unreadCount` is its row badge. After a transcript has been
+successfully fetched and rendered, acknowledge the latest rendered message with
+`PUT /api/widget/conversations/:id/read` and
+`{throughMessageId}`. The response is a plain `ConversationReadResult`, not a v1
+envelope. Refetch the conversation list after acknowledgement and after either
+inbox stream hint. Anonymous sessions do not acknowledge reads or expose
+persistent unread badges. Logout and account switching clear local unread UI
+immediately.
+
+Operator-authored `content.faqs[].answer` values render directly and unchanged
+as FAQ content. Selecting an answered FAQ must not call `POST /api/widget/chat`,
+create a conversation, or invoke the AI pipeline.
+
+Help Center article bodies follow the same direct-render rule. A customer
+enters chat only through an explicit message or contact-support action. Empty
+FAQ answers are not presented as published FAQ content.
 
 ## Images and push
 
 | Flow | Contract |
 | --- | --- |
 | Image intent | `POST /api/sdk/v1/attachments/intent`: `{ conversationId, mimeType: 'image/jpeg'|'image/png'|'image/webp', byteSize, sha256, filename }` → `{ attachmentId, intent, expiresAt, completion: { method: 'POST', endpoint: '/api/sdk/v1/attachments/complete' } }`. `byteSize` must not exceed `mediaPolicy.maximumImageBytes` or the 8 MiB SDK ceiling. Intent lasts 5 minutes. |
-| Image completion | Bearer `multipart/form-data`: `intent`, `file` → `{ attachment: { id,url,type,name,size,sha256 }, receipt, receiptExpiresAt, authenticatedDownload }`. Receipt lasts 24 hours. Render only `authenticatedDownload`; include attachment data plus receipt in chat. Chat must not exceed `mediaPolicy.maximumImagesPerMessage` or the 3-image SDK ceiling. |
+| Image completion | Bearer `multipart/form-data`: `intent`, `file` → `{ attachment: { id,url,type,name,size,sha256 }, receipt, receiptExpiresAt, authenticatedDownload }`. Receipt lasts 24 hours. Render only `authenticatedDownload`; include attachment data plus receipt in chat. Chat must not exceed `mediaPolicy.maximumImagesPerMessage` or the 5-image SDK ceiling. |
 | Push register | `POST /api/sdk/v1/push-token`: `{ action:'register', provider:'apns'|'fcm', token, notificationPreference?:'enabled'|'muted', locale?:string }` → `{ state:'active'|'muted', provider, environment:'sandbox'|'production', fingerprint, registeredAt }`. |
 | Push unregister | `{ action:'unregister' }` → `{ state:'inactive' }`. |
 | Push payload | `{ conversationId, messageId, notificationType:'message_available' }`. Re-authorise/refetch transcript before displaying or navigating. |

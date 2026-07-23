@@ -300,6 +300,11 @@ export interface MobileConfig {
     showTimestamps: boolean;
     faqButton: { enabled: boolean; label: string };
   };
+  mediaPolicy: {
+    enabled: boolean;
+    maximumImagesPerMessage: number;
+    maximumImageBytes: number;
+  };
   content: { faqs: Faq[]; tabs: Tabs; search: Search; onboarding: Onboarding; homeSections: HomeSection[] };
   identityMode: 'sdk_interface';
   unsupportedWidgetSettings: Array<{ setting: string; reason: string }>;
@@ -398,6 +403,50 @@ export interface ConversationSummary {
 
 export interface ConversationListResult {
   conversations: ConversationSummary[];
+  totalUnreadCount: number;
+}
+
+export interface ConversationReadRequest {
+  throughMessageId: string;
+}
+
+export interface ConversationReadResult {
+  conversationId: string;
+  readThroughMessageId: string;
+  unread: boolean;
+  unreadCount: number;
+}
+
+export interface HelpCenterArticleSummary {
+  id: string;
+  title: string;
+  updatedAt: string;
+}
+
+export interface HelpCenterTopic {
+  id: string;
+  name: string;
+  count: number;
+  articles: HelpCenterArticleSummary[];
+}
+
+export interface HelpCenterCatalog {
+  topics: HelpCenterTopic[];
+}
+
+export interface HelpCenterArticle {
+  id: string;
+  title: string;
+  topic: string | null;
+  body: string;
+  sourceType: string;
+  faqQuestion: string | null;
+  updatedAt: string;
+  related: Array<{ id: string; title: string; topic: string | null }>;
+}
+
+export interface HelpCenterArticleResult {
+  article: HelpCenterArticle;
 }
 
 export interface ConversationDetail {
@@ -442,5 +491,6 @@ export type StreamEvent =
   | { type: 'inbox.conversation'; conversationId: string }
   | { type: 'inbox.message'; conversationId: string };
 
-export const MAX_MOBILE_IMAGES_PER_MESSAGE = 3 as const;
+export const MAX_MOBILE_IMAGES_PER_MESSAGE = 5 as const;
 export const MAX_MOBILE_IMAGE_BYTES = 8 * 1024 * 1024;
+export const MAX_MOBILE_SOURCE_IMAGE_BYTES = 25 * 1024 * 1024;

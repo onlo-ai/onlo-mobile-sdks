@@ -26,7 +26,15 @@ Open `OnloLocalE2EApp.xcodeproj`, select an iPhone 17 simulator, and press Run. 
 
    Expected result: the SDK presents its native messenger screen. The app does not render a second chat UI.
 
-5. Tap **Log out**.
+5. With **Voice input** enabled in WebChat Behaviour, tap the microphone and grant the two requested permissions.
+
+   Expected result: speech recognition fills the normal composer. The message still uses the existing text chat pipeline.
+
+6. Tap the speaker in the Support header, then send a message.
+
+   Expected result: the speaker changes to its enabled state and reads the completed AI reply. It does not speak historical or human-agent messages.
+
+7. Tap **Log out**.
 
    Expected result: SDK logout completes before the Login screen returns; another account cannot access the prior account’s SDK state.
 

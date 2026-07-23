@@ -160,10 +160,14 @@ First release:
 present(optional conversationId)
 dismiss()
 openConversation(id)
-observeUnreadCount(callback/stream)
 observeConnectionState(callback/stream)
 observeIdentityState(callback/stream)
 ```
+
+Identified sessions expose the server's customer-facing
+`totalUnreadCount` and per-conversation `unreadCount`. The SDK acknowledges only
+through the latest successfully rendered message, then refetches the list.
+Anonymous sessions expose no persistent unread badge.
 
 - The host owns the entry point: tab, menu row, button, or routing action.
 - Onlo owns the presented messenger screen and its accessibility behavior.

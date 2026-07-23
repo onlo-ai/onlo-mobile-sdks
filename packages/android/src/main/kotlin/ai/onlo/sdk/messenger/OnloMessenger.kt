@@ -1,9 +1,12 @@
 package ai.onlo.sdk.messenger
 
 import ai.onlo.sdk.MessengerInboxResult
+import ai.onlo.sdk.MessengerHelpArticleResult
+import ai.onlo.sdk.MessengerHelpCenterResult
 import ai.onlo.sdk.MessengerPresentationIntent
 import ai.onlo.sdk.MessengerPresentationTarget
 import ai.onlo.sdk.MessengerTranscriptResult
+import ai.onlo.sdk.NativeMessengerEvent
 import ai.onlo.sdk.Onlo
 import ai.onlo.sdk.OnloClient
 import ai.onlo.sdk.OnloPhase
@@ -15,6 +18,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Build
 import android.os.Looper
+import android.text.Html
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -127,15 +131,22 @@ internal class MessengerDialog(
     internal val client: OnloClient,
     private val onClosed: (MessengerDialog) -> Unit,
 ) : Dialog(activity) {
+    private enum class Surface { CONVERSATIONS, FAQ, HELP_CENTER }
+
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var stateJob: Job? = null
     private var activeConversationId: String? = null
     private lateinit var title: TextView
     private lateinit var status: TextView
     private lateinit var body: LinearLayout
+    private lateinit var scroll: ScrollView
     private lateinit var progress: ProgressBar
     private lateinit var composer: EditText
     private lateinit var send: Button
+    private lateinit var composerRow: LinearLayout
+    private var activeSurface = Surface.CONVERSATIONS
+    private val streamedReplies = mutableMapOf<String, TextView>()
+    private var showingEmptyState = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -156,6 +167,9 @@ internal class MessengerDialog(
                     dismiss()
                 }
             }
+        }
+        uiScope.launch {
+            client.messengerEvents.collect(::renderMessengerEvent)
         }
     }
 
@@ -204,6 +218,27 @@ internal class MessengerDialog(
         header.addView(close)
         root.addView(header)
 
+        val surfaces = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(8), dp(8), dp(8), 0)
+        }
+        listOf(
+            "Conversations" to Surface.CONVERSATIONS,
+            "FAQ" to Surface.FAQ,
+            "Help Center" to Surface.HELP_CENTER,
+        ).forEach { (label, surface) ->
+            surfaces.addView(
+                Button(context).apply {
+                    text = label
+                    setAllCaps(false)
+                    contentDescription = "$label section"
+                    setOnClickListener { selectSurface(surface) }
+                },
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+            )
+        }
+        root.addView(surfaces)
+
         status = TextView(context).apply {
             setPadding(dp(16), dp(8), dp(16), dp(8))
             textSize = 14f
@@ -219,7 +254,7 @@ internal class MessengerDialog(
         }
         root.addView(progress, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.CENTER_HORIZONTAL })
 
-        val scroll = ScrollView(context).apply {
+        scroll = ScrollView(context).apply {
             isFillViewport = true
             contentDescription = "Messenger conversation content"
         }
@@ -230,7 +265,7 @@ internal class MessengerDialog(
         scroll.addView(body)
         root.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        val composerRow = LinearLayout(context).apply {
+        composerRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.BOTTOM
             setPadding(dp(12), dp(8), dp(12), dp(12))
@@ -254,13 +289,17 @@ internal class MessengerDialog(
     }
 
     private fun loadInbox() {
+        activeSurface = Surface.CONVERSATIONS
         activeConversationId = null
         title.text = client.mobileConfig?.value?.config?.appearance?.botName ?: "Support"
+        composerRow.visibility = View.VISIBLE
         composer.visibility = View.VISIBLE
         send.visibility = View.VISIBLE
         renderLoading("Loading conversations")
         uiScope.launch {
-            when (val result = client.loadMessengerInbox()) {
+            val result = client.loadMessengerInbox()
+            if (activeSurface != Surface.CONVERSATIONS) return@launch
+            when (result) {
                 is MessengerInboxResult.Ready -> renderInbox(result.conversations)
                 MessengerInboxResult.NoActiveSession -> renderUnavailable("Session changed. Reopen support to continue.")
                 MessengerInboxResult.Unavailable -> renderUnavailable("Offline. Cached conversations will appear when available.")
@@ -269,14 +308,25 @@ internal class MessengerDialog(
     }
 
     private fun loadConversation(conversationId: String) {
+        activeSurface = Surface.CONVERSATIONS
         activeConversationId = conversationId
         title.text = client.mobileConfig?.value?.config?.appearance?.botName ?: "Support"
+        composerRow.visibility = View.VISIBLE
         composer.visibility = View.VISIBLE
         send.visibility = View.VISIBLE
         renderLoading("Loading conversation")
         uiScope.launch {
-            when (val result = client.loadMessengerTranscript(conversationId)) {
-                is MessengerTranscriptResult.Ready -> renderTranscript(result.transcript)
+            val result = client.loadMessengerTranscript(conversationId)
+            if (activeSurface != Surface.CONVERSATIONS) return@launch
+            when (result) {
+                is MessengerTranscriptResult.Ready -> {
+                    renderTranscript(result.transcript)
+                    result.transcript.messages.maxByOrNull { it.timestamp }?.let {
+                        runCatching {
+                            client.acknowledgeRenderedConversation(result.transcript.id, it.id)
+                        }
+                    }
+                }
                 is MessengerTranscriptResult.Stale -> { renderTranscript(result.transcript); showStatus("Offline. Showing saved conversation.") }
                 MessengerTranscriptResult.NoActiveSession -> renderUnavailable("Session changed. Reopen support to continue.")
                 MessengerTranscriptResult.NotAuthorised -> renderUnavailable("This conversation is unavailable.")
@@ -294,8 +344,11 @@ internal class MessengerDialog(
         send.isEnabled = false
         uiScope.launch {
             try {
-                client.sendTextFromNativeUi(message)
-                composer.setText("")
+                client.sendTextFromNativeUi(message) { clientMessageId ->
+                    composer.setText("")
+                    appendMessage(label(message, outgoing = true))
+                    streamedReplies.remove(clientMessageId)
+                }
                 announce("Message queued for delivery.")
             } catch (_: IllegalArgumentException) {
                 announce("Message could not be queued.")
@@ -307,21 +360,205 @@ internal class MessengerDialog(
         }
     }
 
+    private fun selectSurface(surface: Surface) {
+        activeSurface = surface
+        composerRow.visibility = if (surface == Surface.CONVERSATIONS) View.VISIBLE else View.GONE
+        when (surface) {
+            Surface.CONVERSATIONS -> loadInbox()
+            Surface.FAQ -> renderFaqs()
+            Surface.HELP_CENTER -> loadHelpCenter()
+        }
+    }
+
+    private fun renderFaqs() {
+        progress.visibility = View.GONE
+        body.removeAllViews()
+        hideStatus()
+        val config = client.mobileConfig?.value?.config
+        val faqs = if (config?.features?.faqButton?.enabled == true) {
+            config.content.faqs.filter { it.question.isNotBlank() && !it.answer.isNullOrBlank() }
+        } else {
+            emptyList()
+        }
+        if (faqs.isEmpty()) {
+            body.addView(label("No FAQs are available yet."))
+            return
+        }
+        faqs.forEach { faq ->
+            body.addView(
+                label("${faq.question}\n\n${faq.answer.orEmpty()}"),
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = dp(8) },
+            )
+        }
+    }
+
+    private fun loadHelpCenter() {
+        renderLoading("Loading Help Center")
+        uiScope.launch {
+            val result = client.loadMessengerHelpCenter()
+            if (activeSurface != Surface.HELP_CENTER) return@launch
+            when (result) {
+                is MessengerHelpCenterResult.Ready -> renderHelpTopics(result.topics)
+                MessengerHelpCenterResult.NoActiveSession -> renderUnavailable("Session changed. Reopen support to continue.")
+                MessengerHelpCenterResult.Unavailable -> renderUnavailable("Help Center is temporarily unavailable.")
+            }
+        }
+    }
+
+    private fun renderHelpTopics(topics: List<ai.onlo.sdk.chat.HelpCenterTopic>) {
+        progress.visibility = View.GONE
+        body.removeAllViews()
+        hideStatus()
+        if (topics.isEmpty()) {
+            body.addView(label("No Help Center articles are available yet."))
+            return
+        }
+        topics.forEach { topic ->
+            body.addView(
+                Button(context).apply {
+                    text = "${topic.name} (${topic.count})"
+                    setAllCaps(false)
+                    contentDescription = "${topic.name}, ${topic.count} articles"
+                    setOnClickListener { renderHelpArticles(topic, topics) }
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = dp(8) },
+            )
+        }
+    }
+
+    private fun renderHelpArticles(
+        topic: ai.onlo.sdk.chat.HelpCenterTopic,
+        topics: List<ai.onlo.sdk.chat.HelpCenterTopic>,
+    ) {
+        body.removeAllViews()
+        body.addView(backButton("All topics") { renderHelpTopics(topics) })
+        topic.articles.forEach { article ->
+            body.addView(
+                Button(context).apply {
+                    text = article.title
+                    setAllCaps(false)
+                    contentDescription = article.title
+                    setOnClickListener { loadHelpArticle(article.id, topic, topics) }
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply { bottomMargin = dp(8) },
+            )
+        }
+    }
+
+    private fun loadHelpArticle(
+        articleId: String,
+        topic: ai.onlo.sdk.chat.HelpCenterTopic,
+        topics: List<ai.onlo.sdk.chat.HelpCenterTopic>,
+    ) {
+        renderLoading("Loading article")
+        uiScope.launch {
+            val result = client.loadMessengerHelpArticle(articleId)
+            if (activeSurface != Surface.HELP_CENTER) return@launch
+            when (result) {
+                is MessengerHelpArticleResult.Ready -> {
+                    progress.visibility = View.GONE
+                    body.removeAllViews()
+                    hideStatus()
+                    body.addView(backButton(topic.name) { renderHelpArticles(topic, topics) })
+                    body.addView(label(result.article.title))
+                    body.addView(
+                        label(
+                            Html.fromHtml(
+                                result.article.body,
+                                Html.FROM_HTML_MODE_LEGACY,
+                            ).toString(),
+                        ),
+                    )
+                }
+                MessengerHelpArticleResult.NoActiveSession -> renderUnavailable("Session changed. Reopen support to continue.")
+                MessengerHelpArticleResult.NotAuthorised -> renderUnavailable("This article is unavailable.")
+                MessengerHelpArticleResult.Unavailable -> renderUnavailable("Help Center is temporarily unavailable.")
+            }
+        }
+    }
+
+    private fun backButton(text: String, action: () -> Unit): Button = Button(context).apply {
+        this.text = "‹ $text"
+        setAllCaps(false)
+        contentDescription = "Back to $text"
+        setOnClickListener { action() }
+    }
+
+    private fun renderMessengerEvent(event: NativeMessengerEvent) {
+        if (activeSurface != Surface.CONVERSATIONS) return
+        when (event) {
+            is NativeMessengerEvent.Accepted -> {
+                activeConversationId = event.conversationId
+                announce("Message sent.")
+            }
+            is NativeMessengerEvent.Text -> {
+                val reply = streamedReplies.getOrPut(event.clientMessageId) {
+                    label("").also(::appendMessage)
+                }
+                reply.append(event.content)
+                scrollToBottom()
+            }
+            is NativeMessengerEvent.Done -> {
+                streamedReplies.remove(event.clientMessageId)
+                loadConversation(event.conversationId)
+            }
+            is NativeMessengerEvent.Failed -> {
+                streamedReplies.remove(event.clientMessageId)
+                announce(
+                    if (event.retryable) "Message is queued and will retry."
+                    else "Message could not be delivered.",
+                )
+            }
+        }
+    }
+
+    private fun appendMessage(view: TextView) {
+        progress.visibility = View.GONE
+        if (activeConversationId == null || showingEmptyState) {
+            body.removeAllViews()
+            showingEmptyState = false
+        }
+        body.addView(
+            view,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(8) },
+        )
+        scrollToBottom()
+    }
+
+    private fun scrollToBottom() {
+        scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
     private fun renderInbox(conversations: List<ai.onlo.sdk.chat.ConversationSummary>) {
         progress.visibility = View.GONE
         body.removeAllViews()
         if (conversations.isEmpty()) {
+            showingEmptyState = true
             body.addView(label("No conversations yet. Send a message to start one."))
             hideStatus()
             return
         }
+        showingEmptyState = false
         hideStatus()
         conversations.forEach { conversation ->
             val item = Button(context).apply {
-                text = conversation.title.ifBlank { "Support conversation" }
+                val baseTitle = conversation.title.ifBlank { "Support conversation" }
+                text = if (conversation.unreadCount > 0) "$baseTitle  ${conversation.unreadCount}" else baseTitle
                 contentDescription = buildString {
-                    append("Conversation: ").append(conversation.title.ifBlank { "Support conversation" })
-                    if (conversation.unreadCount > 0) append(", ").append(conversation.unreadCount).append(" unread")
+                    append("Conversation: ").append(baseTitle)
+                    if (conversation.unreadCount > 0) append(", ${conversation.unreadCount} unread")
                 }
                 setAllCaps(false)
                 setOnClickListener { loadConversation(conversation.id) }
@@ -332,6 +569,8 @@ internal class MessengerDialog(
 
     private fun renderTranscript(transcript: ai.onlo.sdk.chat.ConversationDetail) {
         progress.visibility = View.GONE
+        streamedReplies.clear()
+        showingEmptyState = false
         body.removeAllViews()
         hideStatus()
         if (transcript.messages.isEmpty()) body.addView(label("No messages yet."))
@@ -343,12 +582,14 @@ internal class MessengerDialog(
     }
 
     private fun renderLoading(label: String) {
+        showingEmptyState = false
         body.removeAllViews()
         progress.visibility = View.VISIBLE
         showStatus(label)
     }
 
     private fun renderUnavailable(message: String) {
+        showingEmptyState = false
         progress.visibility = View.GONE
         body.removeAllViews()
         body.addView(label(message))

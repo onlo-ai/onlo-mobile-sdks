@@ -54,6 +54,11 @@ test('conditional config fixtures preserve the documented cache boundary', async
   assert.equal(request.headers['X-Onlo-Config-Schema'], '1');
   assert.equal(response.ok, true);
   assert.equal(response.result.schemaVersion, 1);
+  assert.deepEqual(response.result.mediaPolicy, {
+    enabled: true,
+    maximumImagesPerMessage: 5,
+    maximumImageBytes: 8 * 1024 * 1024,
+  });
   assert.deepEqual(notModified, {
     status: 304,
     headers: { ETag: 'W/"mobile-config-example"' },
@@ -63,6 +68,8 @@ test('conditional config fixtures preserve the documented cache boundary', async
 });
 
 test('attachment fixture enforces the image-only v1 boundary', async () => {
+  const config = await fixture('config.response.json');
+  const policy = config.result.mediaPolicy;
   const intents = await Promise.all([
     fixture('attachments.intent.request.json'),
     fixture('attachments.intent.png.request.json'),
@@ -72,9 +79,11 @@ test('attachment fixture enforces the image-only v1 boundary', async () => {
   assert.equal(intents[1].byteSize, 1);
   assert.equal(intents[2].byteSize, 8 * 1024 * 1024);
   for (const intent of intents) {
-    assert.ok(intent.byteSize > 0 && intent.byteSize <= 8 * 1024 * 1024);
+    assert.ok(intent.byteSize > 0 && intent.byteSize <= policy.maximumImageBytes);
     assert.match(intent.sha256, /^[a-f0-9]{64}$/);
   }
+  assert.ok(policy.maximumImagesPerMessage >= 0 && policy.maximumImagesPerMessage <= 5);
+  assert.ok(policy.maximumImageBytes >= 1 && policy.maximumImageBytes <= 8 * 1024 * 1024);
 });
 
 test('chat and foreground stream fixtures cover every declared event variant', async () => {
@@ -87,6 +96,20 @@ test('chat and foreground stream fixtures cover every declared event variant', a
     'ready', 'config_changed', 'inbox.conversation', 'inbox.message',
   ]);
   assert.deepEqual(await fixture('widget.error.response.json'), { error: 'synthetic_widget_error' });
+});
+
+test('identified unread fixtures preserve render-before-acknowledgement semantics', async () => {
+  const list = await fixture('conversations.list.response.json');
+  const request = await fixture('conversations.read.request.json');
+  const response = await fixture('conversations.read.response.json');
+  assert.ok(Number.isInteger(list.totalUnreadCount) && list.totalUnreadCount >= 0);
+  for (const conversation of list.conversations) {
+    assert.ok(Number.isInteger(conversation.unreadCount) && conversation.unreadCount >= 0);
+    assert.equal(conversation.unread, conversation.unreadCount > 0);
+  }
+  assert.equal(request.throughMessageId, response.readThroughMessageId);
+  assert.equal(response.unread, false);
+  assert.equal(response.unreadCount, 0);
 });
 
 test('push fixtures cover APNs, FCM, and unregister variants', async () => {

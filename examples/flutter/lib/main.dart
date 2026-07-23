@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:onlo_flutter/onlo_flutter.dart';
 
@@ -10,32 +12,95 @@ class OnloLocalExample extends StatefulWidget {
 }
 
 class _OnloLocalExampleState extends State<OnloLocalExample> {
-  // Supply through private build configuration, never source control.
-  static const String? _publicSdkKey = null;
-  String _status = 'Local mock host: SDK key not configured';
+  static const String _publicSdkKey = String.fromEnvironment('ONLO_SDK_KEY');
+  StreamSubscription<OnloStateSnapshot>? _stateSubscription;
+  OnloSessionState _nativeState = OnloSessionState.uninitialized;
+  bool _hostSignedIn = false;
+  String? _supportError;
 
-  Future<void> _initialize() async {
-    if (_publicSdkKey == null) return;
-    await Onlo.initialize(sdkKey: _publicSdkKey);
-    setState(() => _status = 'Native SDK initialized');
+  @override
+  void initState() {
+    super.initState();
+    _stateSubscription = Onlo.observeState().listen((snapshot) {
+      if (mounted) setState(() => _nativeState = snapshot.session);
+    });
+    if (_publicSdkKey.isNotEmpty) {
+      unawaited(
+        Onlo.initialize(sdkKey: _publicSdkKey).catchError((_) {
+          if (mounted) {
+            setState(
+              () => _supportError = 'Support is temporarily unavailable.',
+            );
+          }
+        }),
+      );
+    }
   }
 
-  Future<void> _identifyAfterHostLogin() async {
+  void _completeHostLogin() {
+    // The host login completes independently; identified support preparation is background work.
+    setState(() => _hostSignedIn = true);
+    unawaited(
+      _identifyForSupport().catchError((_) {
+        if (mounted) {
+          setState(() {
+            _supportError =
+                'Signed in. Support identity will retry when available.';
+          });
+        }
+      }),
+    );
+  }
+
+  Future<void> _identifyForSupport() async {
     final userJwt = await _fetchShortLivedOnloUserJwtFromOperatorBackend();
     await Onlo.loginIdentifiedUser(userJwt: userJwt);
   }
 
   @override
-  Widget build(BuildContext context) => MaterialApp(home: Scaffold(
-    appBar: AppBar(title: const Text('Onlo local example')),
-    body: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-      Text(_status),
-      FilledButton(onPressed: _initialize, child: const Text('Initialize local host')),
-      FilledButton(onPressed: _publicSdkKey == null ? null : _identifyAfterHostLogin, child: const Text('Sign in through host backend')),
-      FilledButton(onPressed: _publicSdkKey == null ? null : () => Onlo.present(), child: const Text('Support')),
-    ])),
-  ));
+  void dispose() {
+    unawaited(_stateSubscription?.cancel());
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final supportReady = {
+      OnloSessionState.anonymousReady,
+      OnloSessionState.identifiedReady,
+    }.contains(_nativeState);
+    final supportPreparing =
+        _publicSdkKey.isNotEmpty && !supportReady && _supportError == null;
+    return MaterialApp(
+      home: Scaffold(
+        appBar: AppBar(title: const Text('Onlo local example')),
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Host account: ${_hostSignedIn ? 'signed in' : 'signed out'}',
+              ),
+              Text('Native state: ${_nativeState.name}'),
+              if (supportPreparing) const CircularProgressIndicator(),
+              if (_supportError case final error?) Text(error),
+              FilledButton(
+                onPressed: _completeHostLogin,
+                child: const Text('Complete host login'),
+              ),
+              FilledButton(
+                onPressed: supportReady ? () => Onlo.present() : null,
+                child: const Text('Support'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 Future<String> _fetchShortLivedOnloUserJwtFromOperatorBackend() async =>
-    throw UnsupportedError('Implement an authenticated Operator-backend call. Never sign or persist a JWT in Dart.');
+    throw UnsupportedError(
+      'Implement an authenticated Operator-backend call. Never sign or persist a JWT in Dart.',
+    );

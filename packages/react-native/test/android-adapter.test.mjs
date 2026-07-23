@@ -20,6 +20,7 @@ const coreInitializerSource = await readFile(
 test('Android adapter delegates every supported operation to the native core', () => {
   assert.match(moduleSource, /OnloReactNativeBridge\.initialize/);
   for (const method of [
+    'setLogLevel',
     'initialize',
     'loginUnidentifiedUser',
     'loginIdentifiedUser',
@@ -33,10 +34,10 @@ test('Android adapter delegates every supported operation to the native core', (
     assert.match(moduleSource, new RegExp(`override fun ${method}\\b`));
   }
   assert.match(moduleSource, /core\.state\.collect/);
-  assert.match(moduleSource, /core\.unreadCount\.collect/);
   assert.match(moduleSource, /emitOnOnloEvent/);
   assert.match(moduleSource, /"connectionChanged"/);
-  assert.match(moduleSource, /"unreadChanged"/);
+  assert.match(moduleSource, /core\.unreadCount\.collect/);
+  assert.match(moduleSource, /"unreadCountChanged"/);
   assert.match(moduleSource, /OnloPhase\.RESTORING -> "uninitialized"/);
   assert.match(moduleSource, /OnloPhase\.OFFLINE_READY -> "offline"/);
   assert.match(moduleSource, /OnloMessenger\.present\(requireCurrentActivity\(\), requireClient\(\)\)/);
@@ -50,7 +51,6 @@ test('Android adapter delegates every supported operation to the native core', (
 
 test('Android adapter contains no parallel storage, transport, or sensitive logging', () => {
   assert.doesNotMatch(moduleSource, /AsyncStorage|SharedPreferences|SQLite|OkHttp|HttpUrl|Log\.|println\(|ConversationDetail|TranscriptMessage|\.message\b/);
-  assert.match(moduleSource, /val safeUnreadCount = unreadCount \?: return@collect/);
   assert.doesNotMatch(manifest, /<uses-permission|<activity|<service|<provider/);
 });
 

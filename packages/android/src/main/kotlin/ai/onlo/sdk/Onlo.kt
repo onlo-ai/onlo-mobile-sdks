@@ -25,6 +25,12 @@ public object Onlo {
     private var client: OnloClient? = null
     private var lifecycleBinding: NativeLifecycleBinding? = null
 
+    /** Controls structured, PII-free diagnostics for this app process. */
+    @JvmStatic
+    public fun setLogLevel(level: OnloLogLevel) {
+        AndroidSafeLogger.setLevel(level)
+    }
+
     /**
      * Validates local configuration and starts protected-session restoration asynchronously. It
      * never presents UI or requests a permission.

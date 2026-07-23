@@ -61,7 +61,11 @@ internal class KeystorePushTokenStore(context: Context) : PushTokenStore {
         if (!temporary.renameTo(file)) { temporary.delete(); throw IllegalStateException("push_replace") }
     }
 
-    override suspend fun clear() = synchronized(lock) { if (file.exists()) file.delete() }
+    override suspend fun clear() {
+        synchronized(lock) {
+            if (file.exists()) file.delete()
+        }
+    }
 
     private fun key(): SecretKey {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

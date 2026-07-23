@@ -8,13 +8,13 @@
 
    Expected result: JDK 17 and Android API 35/build-tools 35.0.0 are installed after explicit licence acceptance.
 
-2. Open `examples/android` in Android Studio, or run `../../packages/android/gradlew -p . :app:assembleDebug` from this directory.
+2. If `local.properties` does not exist, copy `local.properties.example` to `local.properties`; otherwise add the `ONLO_SDK_KEY` line from the example without replacing your existing `sdk.dir`.
 
-   Expected result: the local host compiles against `../../packages/android`; it does not call Onlo because its public key is deliberately `null`.
+   Expected result: the ignored file contains the machine-local Android SDK path and public test integration key, with no signing secret.
 
-3. In a private host build configuration, supply the public Operator SDK key and replace the `publicSdkKey` seam in `MainActivity`.
+3. Open `examples/android` in Android Studio, or run `../../packages/android/gradlew -p . :app:assembleDebug` from this directory.
 
-   Expected result: initialization uses the native Android core and enables Support only in anonymous or identified ready state.
+   Expected result: the local host compiles against `../../packages/android`, initializes in the background, and enables Support only in an anonymous or identified ready state.
 
 4. Implement `OperatorBackend.fetchShortLivedOnloUserJwt()` as an authenticated call to the Operator backend, then call it only after the host app login succeeds.
 

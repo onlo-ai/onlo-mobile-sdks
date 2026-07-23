@@ -44,7 +44,7 @@ class ForegroundStreamTest {
 
     private class FixtureSseTransport(private val lines: List<String>) : OnloSseTransport {
         override suspend fun stream(request: OnloHttpRequest, onLine: suspend (String) -> Unit): SseStreamResult {
-            lines.forEach(onLine)
+            for (line in lines) onLine(line)
             return SseStreamResult.Success(200)
         }
     }

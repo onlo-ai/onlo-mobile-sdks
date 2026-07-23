@@ -13,7 +13,82 @@ final class OnloSDKTests: XCTestCase {
 
     func testPublicConfigurationUsesCanonicalProductionOriginAndImplementedCapabilities() {
         XCTAssertEqual(OnloSDK.productionOrigin.absoluteString, "https://onlo.ai")
-        XCTAssertEqual(OnloSDK.implementedCapabilities, ["secure_storage", "persistent_outbox", "foreground_stream", "apns", "identity_jwt", "config_schema_v1"])
+        XCTAssertEqual(
+            OnloSDK.implementedCapabilities,
+            [
+                "secure_storage",
+                "persistent_outbox",
+                "foreground_stream",
+                "apns",
+                "media_picker",
+                "attachment_upload",
+                "identity_jwt",
+                "config_schema_v1",
+            ]
+        )
+    }
+
+    func testRuntimeLogLevelsFilterAndSanitiseStructuredFields() {
+        let logger = OnloConsoleLogger.shared
+        let event = SDKLogEvent(
+            operation: "session\nsecret",
+            code: "network_unavailable",
+            requestId: "request\ninjected",
+            sdkVersion: "0.1.0",
+            durationMs: -1
+        )
+
+        logger.setLevel(.off)
+        XCTAssertFalse(logger.shouldRecord(event))
+        logger.setLevel(.error)
+        XCTAssertTrue(logger.shouldRecord(event))
+        XCTAssertEqual(
+            logger.formattedMessage(for: event),
+            "operation=session_secret code=network_unavailable sdkVersion=0.1.0 runtime=ios requestId=request_injected durationMs=0"
+        )
+        logger.setLevel(.off)
+    }
+
+    func testImageUploadCompletesIntentBeforeReturningDurableHandle() async throws {
+        let imageData = Data("synthetic-image-bytes".utf8)
+        let transport = AttachmentLifecycleTransport(imageData: imageData)
+        let sdk = OnloSDK(
+            credentialStore: InMemoryCredentialStore(),
+            configStore: InMemoryConfigStore(),
+            pushIntentStore: InMemoryPushIntentStore(),
+            ownerStore: InMemoryOwnerScopedStore(),
+            transport: transport,
+            hostAppIdentifier: "com.example.host"
+        )
+        _ = try await sdk.initialize(
+            OnloSDK.Configuration(
+                sdkKey: "public-key",
+                appIdentifier: "com.example.host",
+                apiBaseURL: URL(string: "https://sdk.example.test")!
+            )
+        )
+
+        let handle = try await sdk.uploadImage(
+            conversationId: "conversation-1",
+            data: imageData,
+            mimeType: .jpeg,
+            filename: "synthetic.jpg"
+        )
+
+        XCTAssertEqual(handle.attachment.id, "attachment-1")
+        XCTAssertEqual(handle.attachment.type, "image/jpeg")
+        XCTAssertEqual(handle.attachment.receipt, "synthetic-receipt")
+        XCTAssertEqual(handle.receiptExpiresAt, "2099-07-24T10:00:00.000Z")
+        _ = try await sdk.sendMessage(message: "", attachments: [handle])
+        let durableEntry = try await sdk.nextDurableTextDispatch()
+        let queued = try XCTUnwrap(durableEntry)
+        XCTAssertEqual(queued.message, "")
+        XCTAssertEqual(queued.attachments, [handle])
+        let paths = await transport.requestPaths()
+        XCTAssertEqual(
+            paths.filter { $0.hasPrefix("/api/sdk/v1/attachments/") },
+            ["/api/sdk/v1/attachments/intent", "/api/sdk/v1/attachments/complete"]
+        )
     }
 
     func testInstallationCredentialMatchesServerContract() {
@@ -64,6 +139,17 @@ final class OnloSDKTests: XCTestCase {
                 userJwt: "header.payload.signature"
             )
         )
+    }
+
+    func testHelpCenterRequestsReuseAuthenticatedWidgetArticleRoutes() throws {
+        let factory = try OnloRequestFactory(baseURL: URL(string: "https://sdk.example.test")!)
+        let catalog = try factory.helpCenter(chatToken: "memory-token")
+        let article = try factory.helpCenterArticle(articleId: "article-1", chatToken: "memory-token")
+
+        XCTAssertEqual(catalog.url?.path, "/api/widget/articles")
+        XCTAssertEqual(article.url?.path, "/api/widget/articles/article-1")
+        XCTAssertEqual(catalog.value(forHTTPHeaderField: "Authorization"), "Bearer memory-token")
+        XCTAssertEqual(article.value(forHTTPHeaderField: "Authorization"), "Bearer memory-token")
     }
 
     func testInternalAdapterFamilyKeepsIOSRuntimePlatform() throws {
@@ -842,6 +928,8 @@ final class OnloSDKTests: XCTestCase {
         let transport = MockTransport(responses: [
             sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-1", credential: "credential-1"),
             mobileConfigResponse(),
+            sessionResponse(identityClass: "identified", generation: 2, sessionId: "session-2", credential: "credential-2"),
+            mobileConfigResponse(),
             pushResponse(),
         ])
         let sdk = OnloSDK(
@@ -853,6 +941,7 @@ final class OnloSDKTests: XCTestCase {
             hostAppIdentifier: "com.example.host"
         )
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
         let state = try await sdk.setAPNsPushToken(Data(repeating: 0xAB, count: 32))
         XCTAssertEqual(state, .registered)
         let storedPushIntent = try await pushStore.load()
@@ -878,10 +967,13 @@ final class OnloSDKTests: XCTestCase {
         let transport = MockTransport(responses: [
             sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "anonymous-session", credential: "credential-1"),
             mobileConfigResponse(),
+            sessionResponse(identityClass: "identified", generation: 2, sessionId: "identified-session", credential: "credential-2"),
+            mobileConfigResponse(),
             OnloHTTPResponse(statusCode: 200, body: Data(transcript.utf8)),
         ])
         let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), configStore: InMemoryConfigStore(), pushIntentStore: InMemoryPushIntentStore(), ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host")
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
         let result = try await sdk.handlePushNotification(PushNotificationPayload(conversationId: "conversation-1", messageId: "message-1", notificationType: .messageAvailable))
         XCTAssertEqual(result, .handled(.messenger(conversationId: "conversation-1")))
     }
@@ -891,12 +983,15 @@ final class OnloSDKTests: XCTestCase {
         let transport = MockTransport(responses: [
             sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-1", credential: "credential-1"),
             mobileConfigResponse(),
+            sessionResponse(identityClass: "identified", generation: 2, sessionId: "session-2", credential: "credential-2"),
+            mobileConfigResponse(),
             pushResponse(),
             pushInactiveResponse(),
             sessionResponse(identityClass: "anonymous", generation: 2, sessionId: "session-2", credential: "credential-2"),
         ])
         let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), configStore: InMemoryConfigStore(), pushIntentStore: pushStore, ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host")
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
         _ = try await sdk.setAPNsPushToken(Data(repeating: 0xAB, count: 32))
         let logoutState = try await sdk.logout()
         XCTAssertEqual(logoutState, .anonymousReady)
@@ -917,7 +1012,8 @@ final class OnloSDKTests: XCTestCase {
         ])
         let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), pushIntentStore: pushStore, ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host")
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
-        await XCTAssertThrowsErrorAsync { _ = try await sdk.setAPNsPushToken(Data(repeating: 0xCD, count: 32)) }
+        let registration = try await sdk.setAPNsPushToken(Data(repeating: 0xCD, count: 32))
+        XCTAssertEqual(registration, .pendingRetry)
         let storedPushIntent = try await pushStore.load()
         let retained = try XCTUnwrap(storedPushIntent)
         XCTAssertEqual(retained.action, .unregister)
@@ -930,11 +1026,13 @@ final class OnloSDKTests: XCTestCase {
         let owners = InMemoryOwnerScopedStore()
         let push = InMemoryPushIntentStore()
         let transport = MockTransport(responses: [
-            sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-1", credential: "credential-1"), mobileConfigResponse(), pushResponse(),
+            sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-1", credential: "credential-1"), mobileConfigResponse(),
+            sessionResponse(identityClass: "identified", generation: 2, sessionId: "session-2", credential: "credential-2"), mobileConfigResponse(), pushResponse(),
             sessionFailure(code: "dependency_unavailable", directive: "after_backoff", retryAfterMs: 120_000)
         ])
         let sdk = OnloSDK(credentialStore: credentials, configStore: InMemoryConfigStore(), pushIntentStore: push, ownerStore: owners, transport: transport, hostAppIdentifier: "com.example.host")
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
         let owner = try await activeOwnerScope(credentials)
         _ = try await sdk.setAPNsPushToken(Data(repeating: 0xAA, count: 32))
         let logoutState = try await sdk.logout()
@@ -975,19 +1073,21 @@ final class OnloSDKTests: XCTestCase {
 
     func testPushTokenRefreshUsesOneResumeThenLeavesRepeatedDirectivePending() async throws {
         let transport = MockTransport(responses: [
-            sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-1", credential: "credential-1"), mobileConfigResponse(), pushResponse(),
+            sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-1", credential: "credential-1"), mobileConfigResponse(),
+            sessionResponse(identityClass: "identified", generation: 2, sessionId: "session-2", credential: "credential-2"), mobileConfigResponse(), pushResponse(),
             sessionFailure(code: "session_expired", directive: "after_token_refresh"),
-            sessionResponse(identityClass: "anonymous", generation: 2, sessionId: "session-2", credential: "credential-2"),
+            sessionResponse(identityClass: "identified", generation: 3, sessionId: "session-3", credential: "credential-3"),
             sessionFailure(code: "session_expired", directive: "after_token_refresh")
         ])
         let push = InMemoryPushIntentStore()
         let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), configStore: InMemoryConfigStore(), pushIntentStore: push, ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host")
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
         _ = try await sdk.setAPNsPushToken(Data(repeating: 0xAB, count: 32))
         let logoutState = try await sdk.logout()
         XCTAssertEqual(logoutState, .logoutPending)
         let paths = await transport.requests().compactMap { $0.url?.path }
-        XCTAssertEqual(paths.filter { $0 == "/api/sdk/v1/session" }.count, 2)
+        XCTAssertEqual(paths.filter { $0 == "/api/sdk/v1/session" }.count, 3)
         XCTAssertEqual(paths.filter { $0 == "/api/sdk/v1/push-token" }.count, 3)
         let storedPushIntent = try await push.load()
         let pending = try XCTUnwrap(storedPushIntent)
@@ -1015,6 +1115,7 @@ final class OnloSDKTests: XCTestCase {
         let transport = DelayedPushPayloadTransport(controller: controller)
         let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), configStore: InMemoryConfigStore(), pushIntentStore: InMemoryPushIntentStore(), ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host")
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
         let task = Task.detached { try await sdk.handlePushNotification(PushNotificationPayload(conversationId: "conversation-old", messageId: "message-old", notificationType: .messageAvailable)) }
         await controller.waitForTranscriptRequest()
         _ = try await sdk.logout()
@@ -1189,6 +1290,8 @@ final class OnloSDKTests: XCTestCase {
         XCTAssertEqual(initialized, .anonymousReady)
         let first = try await sdk.currentConfiguration()
         XCTAssertEqual(first?.schemaVersion, 1)
+        XCTAssertEqual(first?.mediaPolicy.effectiveMaximumImagesPerMessage, 3)
+        XCTAssertEqual(first?.mediaPolicy.effectiveMaximumImageBytes, 8 * 1024 * 1024)
         try await sdk.refreshConfigurationForForeground()
         let persisted = await configStore.state()
         XCTAssertEqual(persisted.etag, "W/\"mobile-config-example\"")
@@ -1223,6 +1326,24 @@ final class OnloSDKTests: XCTestCase {
     func testMobileConfigRequiresNullableHeaderAvatarDataKey() throws {
         let body = mobileConfigJSON().replacingOccurrences(of: "\"data\":null", with: "")
         XCTAssertThrowsError(try JSONDecoder().decode(APIEnvelope<MobileConfig>.self, from: Data(body.utf8)))
+    }
+
+    func testMobileConfigRejectsMediaPolicyOutsideSDKCeilings() throws {
+        let tooMany = mobileConfigJSON().replacingOccurrences(
+            of: "\"maximumImagesPerMessage\":5",
+            with: "\"maximumImagesPerMessage\":6"
+        )
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(APIEnvelope<MobileConfig>.self, from: Data(tooMany.utf8))
+        )
+
+        let tooLarge = mobileConfigJSON().replacingOccurrences(
+            of: "\"maximumImageBytes\":8388608",
+            with: "\"maximumImageBytes\":8388609"
+        )
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(APIEnvelope<MobileConfig>.self, from: Data(tooLarge.utf8))
+        )
     }
 
     func testOfflineConfigurationRefreshRetainsLastKnownGood() async throws {
@@ -1390,7 +1511,7 @@ final class OnloSDKTests: XCTestCase {
     }
 
     private func mobileConfigJSON() -> String { """
-    {"requestId":"config-1","serverTime":"2026-07-21T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"schemaVersion":1,"revision":"2026-07-21T10:00:00.000Z","compatibility":{"requestedSchemaVersion":1,"appliedSchemaVersion":1,"capabilities":["config_schema_v1"],"unsupportedSettings":[]},"securityPolicy":{"minimumProtocolVersion":1,"minimumSdkVersion":null,"identityMode":"sdk_interface","anonymousScope":"installation_generation","nativePlacement":"host_app"},"appearance":{"accent":"#6750A4","botName":"Onlo","botSubtitle":"Help","greeting":"Hi","headerAvatar":{"mode":"initials","text":"OA","data":null},"light":{"background":"#fff","outgoing":"#111","outgoingText":"#fff","incoming":"#eee","incomingText":"#000"},"dark":{"enabled":true,"background":"#000","outgoing":"#111","outgoingText":"#fff","incoming":"#222","incomingText":"#eee"}},"features":{"insertLink":false,"insertCode":false,"emoji":true,"gifs":false,"voice":false,"fileUpload":true,"transcriptDownload":false,"soundNotifications":true,"showTimestamps":true,"faqButton":{"enabled":true,"label":"Help"}},"content":{"faqs":[],"tabs":{"enabled":true,"tabs":[],"defaultTab":"home"},"search":{"enabled":true,"placeholder":"Search","showSearchInHome":true},"onboarding":{"enabled":false,"title":"Welcome","showProgress":false,"items":[]},"homeSections":[]},"identityMode":"sdk_interface","unsupportedWidgetSettings":[]}}
+    {"requestId":"config-1","serverTime":"2026-07-21T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"schemaVersion":1,"revision":"2026-07-21T10:00:00.000Z","compatibility":{"requestedSchemaVersion":1,"appliedSchemaVersion":1,"capabilities":["config_schema_v1"],"unsupportedSettings":[]},"securityPolicy":{"minimumProtocolVersion":1,"minimumSdkVersion":null,"identityMode":"sdk_interface","anonymousScope":"installation_generation","nativePlacement":"host_app"},"appearance":{"accent":"#6750A4","botName":"Onlo","botSubtitle":"Help","greeting":"Hi","headerAvatar":{"mode":"initials","text":"OA","data":null},"light":{"background":"#fff","outgoing":"#111","outgoingText":"#fff","incoming":"#eee","incomingText":"#000"},"dark":{"enabled":true,"background":"#000","outgoing":"#111","outgoingText":"#fff","incoming":"#222","incomingText":"#eee"}},"features":{"insertLink":false,"insertCode":false,"emoji":true,"gifs":false,"voice":false,"fileUpload":true,"transcriptDownload":false,"soundNotifications":true,"showTimestamps":true,"faqButton":{"enabled":true,"label":"Help"}},"mediaPolicy":{"enabled":true,"maximumImagesPerMessage":5,"maximumImageBytes":8388608},"content":{"faqs":[],"tabs":{"enabled":true,"tabs":[],"defaultTab":"home"},"search":{"enabled":true,"placeholder":"Search","showSearchInHome":true},"onboarding":{"enabled":false,"title":"Welcome","showProgress":false,"items":[]},"homeSections":[]},"identityMode":"sdk_interface","unsupportedWidgetSettings":[]}}
     """ }
 }
 
@@ -1820,7 +1941,18 @@ private final class DelayedPushPayloadTransport: OnloHTTPTransport, @unchecked S
             return OnloHTTPResponse(statusCode: 200, body: Data(json.utf8))
         }
         if request.url?.path == "/api/sdk/v1/config" { return delayedMobileConfigResponse() }
-        return durableSessionResponse(for: request)
+        let response = durableSessionResponse(for: request)
+        guard let body = request.httpBody,
+              let session = try? JSONDecoder().decode(SessionRequest.self, from: body) else {
+            return response
+        }
+        guard case .identify = session.operation else { return response }
+        let identified = String(data: response.body, encoding: .utf8)?
+            .replacingOccurrences(
+                of: #""identityClass":"anonymous""#,
+                with: #""identityClass":"identified""#
+            ) ?? ""
+        return OnloHTTPResponse(statusCode: response.statusCode, headers: response.headers, body: Data(identified.utf8))
     }
 }
 
@@ -1905,6 +2037,63 @@ private final class ControlledChatTransport: OnloChatSSETransport, @unchecked Se
     }
 }
 
+private actor AttachmentLifecycleTransport: OnloHTTPTransport {
+    private let imageData: Data
+    private let digest: String
+    private var paths: [String] = []
+
+    init(imageData: Data) {
+        self.imageData = imageData
+        self.digest = SHA256.hash(data: imageData).map { String(format: "%02x", $0) }.joined()
+    }
+
+    func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
+        let path = request.url?.path ?? ""
+        paths.append(path)
+        switch path {
+        case "/api/sdk/v1/session":
+            return sessionResponseMatchingRequest(delayedSessionResponse(generation: 1), request: request)
+        case "/api/sdk/v1/config":
+            let disabled = String(decoding: delayedMobileConfigResponse().body, as: UTF8.self)
+            let enabled = disabled
+                .replacingOccurrences(of: #""fileUpload":false"#, with: #""fileUpload":true"#)
+                .replacingOccurrences(
+                    of: #""mediaPolicy":{"enabled":false,"maximumImagesPerMessage":0,"maximumImageBytes":1}"#,
+                    with: #""mediaPolicy":{"enabled":true,"maximumImagesPerMessage":5,"maximumImageBytes":8388608}"#
+                )
+            return OnloHTTPResponse(statusCode: 200, headers: ["ETag": "etag"], body: Data(enabled.utf8))
+        case "/api/widget/conversations":
+            return emptyInboxResponse()
+        case "/api/sdk/v1/attachments/intent":
+            let body = try XCTUnwrap(request.httpBody)
+            let decoded = try JSONDecoder().decode(AttachmentIntentRequest.self, from: body)
+            guard decoded.conversationId == "conversation-1",
+                  decoded.byteSize == imageData.count,
+                  decoded.sha256 == digest,
+                  decoded.filename == "synthetic.jpg" else {
+                throw OnloError.invalidConfiguration
+            }
+            let json = """
+            {"requestId":"attachment-intent","serverTime":"2026-07-23T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"attachmentId":"attachment-1","intent":"synthetic-intent","expiresAt":"2099-07-23T10:05:00.000Z","completion":{"method":"POST","endpoint":"/api/sdk/v1/attachments/complete"}}}
+            """
+            return OnloHTTPResponse(statusCode: 200, body: Data(json.utf8))
+        case "/api/sdk/v1/attachments/complete":
+            guard request.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("multipart/form-data; boundary=") == true,
+                  request.httpBody?.range(of: imageData) != nil else {
+                throw OnloError.invalidConfiguration
+            }
+            let json = """
+            {"requestId":"attachment-complete","serverTime":"2026-07-23T10:00:01.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"attachment":{"id":"attachment-1","url":"opaque-upload-reference","type":"image/jpeg","name":"synthetic.jpg","size":\(imageData.count),"sha256":"\(digest)"},"receipt":"synthetic-receipt","receiptExpiresAt":"2099-07-24T10:00:00.000Z","authenticatedDownload":"opaque-authenticated-download"}}
+            """
+            return OnloHTTPResponse(statusCode: 200, body: Data(json.utf8))
+        default:
+            throw OnloError.transport(code: "unexpected_request")
+        }
+    }
+
+    func requestPaths() -> [String] { paths }
+}
+
 private actor MockTransport: OnloHTTPTransport {
     private var responses: [OnloHTTPResponse]
     private var capturedRequests: [URLRequest] = []
@@ -1972,7 +2161,7 @@ private func delayedSessionResponse(generation: Int) -> OnloHTTPResponse {
 
 private func delayedMobileConfigResponse() -> OnloHTTPResponse {
     let json = """
-    {"requestId":"config","serverTime":"2026-07-21T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"schemaVersion":1,"revision":"r","compatibility":{"requestedSchemaVersion":1,"appliedSchemaVersion":1,"capabilities":["config_schema_v1"],"unsupportedSettings":[]},"securityPolicy":{"minimumProtocolVersion":1,"minimumSdkVersion":null,"identityMode":"sdk_interface","anonymousScope":"installation_generation","nativePlacement":"host_app"},"appearance":{"accent":"#000","botName":"B","botSubtitle":"S","greeting":"G","headerAvatar":{"mode":"initials","text":"O","data":null},"light":{"background":"#0","outgoing":"#1","outgoingText":"#2","incoming":"#3","incomingText":"#4"},"dark":{"enabled":false,"background":"#0","outgoing":"#1","outgoingText":"#2","incoming":"#3","incomingText":"#4"}},"features":{"insertLink":false,"insertCode":false,"emoji":false,"gifs":false,"voice":false,"fileUpload":false,"transcriptDownload":false,"soundNotifications":false,"showTimestamps":false,"faqButton":{"enabled":false,"label":""}},"content":{"faqs":[],"tabs":{"enabled":false,"tabs":[],"defaultTab":""},"search":{"enabled":false,"placeholder":"","showSearchInHome":false},"onboarding":{"enabled":false,"title":"","showProgress":false,"items":[]},"homeSections":[]},"identityMode":"sdk_interface","unsupportedWidgetSettings":[]}}
+    {"requestId":"config","serverTime":"2026-07-21T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"schemaVersion":1,"revision":"r","compatibility":{"requestedSchemaVersion":1,"appliedSchemaVersion":1,"capabilities":["config_schema_v1"],"unsupportedSettings":[]},"securityPolicy":{"minimumProtocolVersion":1,"minimumSdkVersion":null,"identityMode":"sdk_interface","anonymousScope":"installation_generation","nativePlacement":"host_app"},"appearance":{"accent":"#000","botName":"B","botSubtitle":"S","greeting":"G","headerAvatar":{"mode":"initials","text":"O","data":null},"light":{"background":"#0","outgoing":"#1","outgoingText":"#2","incoming":"#3","incomingText":"#4"},"dark":{"enabled":false,"background":"#0","outgoing":"#1","outgoingText":"#2","incoming":"#3","incomingText":"#4"}},"features":{"insertLink":false,"insertCode":false,"emoji":false,"gifs":false,"voice":false,"fileUpload":false,"transcriptDownload":false,"soundNotifications":false,"showTimestamps":false,"faqButton":{"enabled":false,"label":""}},"mediaPolicy":{"enabled":false,"maximumImagesPerMessage":0,"maximumImageBytes":1},"content":{"faqs":[],"tabs":{"enabled":false,"tabs":[],"defaultTab":""},"search":{"enabled":false,"placeholder":"","showSearchInHome":false},"onboarding":{"enabled":false,"title":"","showProgress":false,"items":[]},"homeSections":[]},"identityMode":"sdk_interface","unsupportedWidgetSettings":[]}}
     """
     return OnloHTTPResponse(statusCode: 200, headers: ["ETag": "etag"], body: Data(json.utf8))
 }

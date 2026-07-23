@@ -50,6 +50,7 @@ export type OnloSessionState =
 export type OnloIdentityState = 'unknown' | 'anonymous' | 'identified';
 
 export type OnloConnectionState = 'uninitialized' | 'ready' | 'offline' | 'unavailable';
+export type OnloLogLevel = 'off' | 'error' | 'info' | 'verbose';
 
 export type KnownOnloErrorCode =
   | 'invalid_request'
@@ -102,14 +103,14 @@ export type OnloEvent =
   | { type: 'stateChanged'; state: OnloSessionState }
   | { type: 'identityChanged'; identity: OnloIdentityState }
   | { type: 'connectionChanged'; connection: OnloConnectionState }
-  | { type: 'unreadChanged'; unreadCount: number }
+  | { type: 'unreadCountChanged'; unreadCount: number | null }
   | { type: 'error'; error: OnloError };
 
 export type OnloEventListener = (event: OnloEvent) => void;
 export type OnloStateListener = (state: OnloSessionState) => void;
 export type OnloIdentityStateListener = (state: OnloIdentityState) => void;
 export type OnloConnectionStateListener = (state: OnloConnectionState) => void;
-export type OnloUnreadCountListener = (unreadCount: number) => void;
+export type OnloUnreadCountListener = (unreadCount: number | null) => void;
 
 export interface OnloSubscription {
   remove(): void;
@@ -234,8 +235,12 @@ function parseEvent(payload: NativeOnloEvent): OnloEvent | undefined {
   if (event.type === 'connectionChanged' && isConnectionState(event.connection)) {
     return { type: 'connectionChanged', connection: event.connection };
   }
-  if (event.type === 'unreadChanged' && typeof event.unreadCount === 'number' && Number.isInteger(event.unreadCount) && event.unreadCount >= 0) {
-    return { type: 'unreadChanged', unreadCount: event.unreadCount };
+  if (event.type === 'unreadCountChanged'
+    && (event.unreadCount === null
+      || (typeof event.unreadCount === 'number'
+        && Number.isInteger(event.unreadCount)
+        && event.unreadCount >= 0))) {
+    return { type: 'unreadCountChanged', unreadCount: event.unreadCount as number | null };
   }
   if (event.type === 'error') return { type: 'error', error: parseNativeError(event.error) };
   return undefined;
@@ -293,6 +298,13 @@ function subscribe(listener: OnloEventListener): OnloSubscription {
 }
 
 export const Onlo = {
+  setLogLevel(level: OnloLogLevel): Promise<void> {
+    if (level !== 'off' && level !== 'error' && level !== 'info' && level !== 'verbose') {
+      return Promise.reject(bridgeError('invalid_argument', 'setLogLevel requires off, error, info, or verbose.'));
+    }
+    return callNative((native) => native.setLogLevel(level));
+  },
+
   initialize(options: InitializeOptions): Promise<void> {
     try {
       validateInitializeOptions(options);
@@ -387,7 +399,7 @@ export const Onlo = {
   observeUnreadCount(listener: OnloUnreadCountListener): OnloSubscription {
     requireListener(listener, 'observeUnreadCount');
     return subscribe((event) => {
-      if (event.type === 'unreadChanged') listener(event.unreadCount);
+      if (event.type === 'unreadCountChanged') listener(event.unreadCount);
     });
   },
 } as const;

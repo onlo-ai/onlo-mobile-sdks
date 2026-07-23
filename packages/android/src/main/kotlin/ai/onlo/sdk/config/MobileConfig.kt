@@ -17,6 +17,7 @@ public data class MobileConfig(
     val securityPolicy: SecurityPolicy,
     val appearance: Appearance,
     val features: Features,
+    val mediaPolicy: MediaPolicy,
     val content: Content,
     val identityMode: String,
     val unsupportedWidgetSettings: List<UnsupportedWidgetSetting>,
@@ -31,6 +32,10 @@ public data class MobileConfig(
     /** This maps the contract's flat `ColorTheme & { enabled }` shape exactly. */
     public data class DarkColorTheme(val enabled: Boolean, val background: String, val outgoing: String, val outgoingText: String, val incoming: String, val incomingText: String)
     public data class Features(val insertLink: Boolean, val insertCode: Boolean, val emoji: Boolean, val gifs: Boolean, val voice: Boolean, val fileUpload: Boolean, val transcriptDownload: Boolean, val soundNotifications: Boolean, val showTimestamps: Boolean, val faqButton: FaqButton)
+    public data class MediaPolicy(val enabled: Boolean, val maximumImagesPerMessage: Int, val maximumImageBytes: Int) {
+        public val effectiveMaximumImagesPerMessage: Int get() = maximumImagesPerMessage.coerceAtMost(5)
+        public val effectiveMaximumImageBytes: Int get() = maximumImageBytes.coerceAtMost(8_388_608)
+    }
     public data class FaqButton(val enabled: Boolean, val label: String)
     public data class Content(val faqs: List<Faq>, val tabs: Tabs, val search: Search, val onboarding: Onboarding, val homeSections: List<HomeSection>)
     public data class Faq(val question: String, val answer: String?)
@@ -56,6 +61,7 @@ internal object MobileConfigCodec {
             securityPolicy = decodeSecurity(value.requiredObject("securityPolicy")),
             appearance = decodeAppearance(value.requiredObject("appearance")),
             features = decodeFeatures(value.requiredObject("features")),
+            mediaPolicy = decodeMediaPolicy(value.requiredObject("mediaPolicy")),
             content = decodeContent(value.requiredObject("content")),
             identityMode = value.requiredString("identityMode"),
             unsupportedWidgetSettings = array(value, "unsupportedWidgetSettings").map { item ->
@@ -86,6 +92,13 @@ internal object MobileConfigCodec {
     private fun decodeFeatures(v: JSONObject): MobileConfig.Features {
         val faq = v.requiredObject("faqButton")
         return MobileConfig.Features(v.requiredBoolean("insertLink"), v.requiredBoolean("insertCode"), v.requiredBoolean("emoji"), v.requiredBoolean("gifs"), v.requiredBoolean("voice"), v.requiredBoolean("fileUpload"), v.requiredBoolean("transcriptDownload"), v.requiredBoolean("soundNotifications"), v.requiredBoolean("showTimestamps"), MobileConfig.FaqButton(faq.requiredBoolean("enabled"), faq.requiredString("label")))
+    }
+    private fun decodeMediaPolicy(v: JSONObject): MobileConfig.MediaPolicy {
+        val maximumImagesPerMessage = v.requiredInt("maximumImagesPerMessage")
+        val maximumImageBytes = v.requiredInt("maximumImageBytes")
+        requireProtocol(maximumImagesPerMessage in 0..5, "config_media_maximum_images")
+        requireProtocol(maximumImageBytes in 1..8_388_608, "config_media_maximum_bytes")
+        return MobileConfig.MediaPolicy(v.requiredBoolean("enabled"), maximumImagesPerMessage, maximumImageBytes)
     }
     private fun decodeContent(v: JSONObject) = MobileConfig.Content(
         array(v, "faqs").map { MobileConfig.Faq(it.requiredString("question"), optionalString(it, "answer")) },

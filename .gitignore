@@ -76,12 +76,14 @@ Pods/
 captures/
 out/
 local.properties
+onlo.local.json
 *.iml
 
 # Flutter / Dart
 .dart_tool/
 .packages
 .pub/
+.flutter-plugins-dependencies
 /packages/flutter/pubspec.lock
 ephemeral/
 

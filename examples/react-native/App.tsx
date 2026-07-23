@@ -1,30 +1,48 @@
-import React, {useState} from 'react';
-import {Button, SafeAreaView, Text, View} from 'react-native';
+import React, {useEffect, useState} from 'react';
+import {ActivityIndicator, Button, SafeAreaView, Text, View} from 'react-native';
 import {Onlo, type OnloSessionState} from '@onlo/react-native';
+import {onloConfig} from './onlo.config';
 
-// Local host foundation: load a public SDK key from private build configuration.
-// Never put an Operator signing secret or a user JWT in this bundle.
-const publicSdkKey: string | undefined = undefined;
+const readyStates: ReadonlySet<OnloSessionState> =
+  new Set(['anonymousReady', 'identifiedReady']);
 
 export default function App(): React.JSX.Element {
   const [state, setState] = useState<OnloSessionState>('uninitialized');
+  const [hostSignedIn, setHostSignedIn] = useState(false);
+  const [supportError, setSupportError] = useState<string>();
 
-  const initialize = async () => {
-    if (!publicSdkKey) return;
-    await Onlo.initialize({sdkKey: publicSdkKey});
-    Onlo.observeState(setState);
+  useEffect(() => {
+    const subscription = Onlo.observeState(setState);
+    if (onloConfig.sdkKey) {
+      void Onlo.initialize({sdkKey: onloConfig.sdkKey})
+        .catch(() => setSupportError('Support is temporarily unavailable.'));
+    }
+    return () => subscription.remove();
+  }, []);
+
+  const completeHostLogin = () => {
+    // The host login succeeds independently. Preparing identified support continues in background.
+    setHostSignedIn(true);
+    void identifyForSupport().catch(() => {
+      setSupportError('Signed in. Support identity will retry when available.');
+    });
   };
 
-  const identifyAfterHostLogin = async () => {
+  const identifyForSupport = async () => {
     const userJwt = await fetchShortLivedOnloUserJwtFromOperatorBackend();
     await Onlo.loginIdentifiedUser({userJwt});
   };
 
+  const supportReady = readyStates.has(state);
+  const supportPreparing = Boolean(onloConfig.sdkKey) && !supportReady && !supportError;
+
   return <SafeAreaView><View style={{padding: 24, gap: 12}}>
+    <Text>Host account: {hostSignedIn ? 'signed in' : 'signed out'}</Text>
     <Text>Native state: {state}</Text>
-    <Button title="Initialize local host" onPress={initialize} />
-    <Button title="Sign in through host backend" onPress={identifyAfterHostLogin} disabled={!publicSdkKey} />
-    <Button title="Support" onPress={() => Onlo.present()} disabled={!publicSdkKey} />
+    {supportPreparing ? <ActivityIndicator accessibilityLabel="Preparing support" /> : null}
+    {supportError ? <Text>{supportError}</Text> : null}
+    <Button title="Complete host login" onPress={completeHostLogin} />
+    <Button title="Support" onPress={() => Onlo.present()} disabled={!supportReady} />
   </View></SafeAreaView>;
 }
 

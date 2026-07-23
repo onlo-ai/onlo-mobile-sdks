@@ -17,7 +17,7 @@ test('iOS adapter delegates the public RN surface to one native OnloSDK core', (
   assert.match(module, /RCT_EXPORT_MODULE\(OnloSDK\)/);
   assert.match(module, /#import <OnloSDKSpec\/OnloSDKSpec\.h>/);
   assert.match(module, /NativeOnloSDKSpecJSI/);
-  for (const method of ['initialize', 'loginUnidentifiedUser', 'loginIdentifiedUser', 'logout', 'present', 'dismiss', 'openConversation', 'setPushToken', 'handlePushNotification']) {
+  for (const method of ['setLogLevel', 'initialize', 'loginUnidentifiedUser', 'loginIdentifiedUser', 'logout', 'present', 'dismiss', 'openConversation', 'setPushToken', 'handlePushNotification']) {
     assert.match(module, new RegExp(`RCT_REMAP_METHOD\\(${method}`));
   }
 });
@@ -33,10 +33,10 @@ test('iOS adapter is a local autolinked pod with no parallel persistence, networ
   assert.doesNotMatch(module, /UserDefaults|AsyncStorage|URLSession|SQLite|NSLog|printf|console/);
   assert.match(swift, /observeFrameworkState\(\)/);
   assert.match(swift, /"type": "connectionChanged"/);
-  assert.match(swift, /"type": "unreadChanged"/);
+  assert.match(swift, /"type": "unreadCountChanged"/);
+  assert.match(swift, /snapshot\.unreadCount/);
   assert.match(swift, /case \.uninitialized: return "uninitialized"/);
   assert.match(swift, /case \.anonymousReady, \.identifiedReady, \.identifying: return "ready"/);
-  assert.match(swift, /guard lastUnreadCount != unreadCount else \{ return \}/);
 });
 
 test('push navigation is authorised in the core before a host-selected presentation', () => {

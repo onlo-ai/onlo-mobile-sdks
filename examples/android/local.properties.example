@@ -1,0 +1,4 @@
+# Copy this file to local.properties. That file is ignored by Git.
+# sdk.dir is machine-local; ONLO_SDK_KEY is public app configuration, not a signing secret.
+sdk.dir=/absolute/path/to/Android/sdk
+ONLO_SDK_KEY=replace-with-public-mobile-sdk-key

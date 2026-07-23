@@ -12,8 +12,12 @@
 
    Expected result: Android and iOS use their fixed-family native bridge source and checked-in native core. Both host-native builds remain separate verification gates; neither link is a published artifact.
 
-3. Inject the public SDK key through private build configuration and implement `fetchShortLivedOnloUserJwtFromOperatorBackend` after the host's own authenticated login.
+3. Put a synthetic/test public SDK key in `onlo.config.ts`, or generate the equivalent file from the host’s normal build configuration.
 
-   Expected result: JavaScript passes the short-lived proof directly to the native core and never signs or persists it.
+   Expected result: initialization runs in the background and the Support button remains disabled only while native authority is restoring.
 
-`Onlo.present()` is called only from the host Support button. The SDK production origin is `https://onlo.ai`; staging/review origin is release-configured only.
+4. Implement `fetchShortLivedOnloUserJwtFromOperatorBackend` after the host's own authenticated login.
+
+   Expected result: host login is not blocked by Onlo; JavaScript passes the short-lived proof directly to native code and never signs or persists it.
+
+`Onlo.present()` is called only from the host Support button. The SDK production origin is `https://onlo.ai`; staging/review origin is release-configured only. Do not put an identity signing secret or user JWT in `onlo.config.ts` or an app `.env`.

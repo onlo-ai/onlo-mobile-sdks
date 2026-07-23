@@ -1,0 +1,17 @@
+{
+  "protocolVersion": 1,
+  "scenario": "customer-unread",
+  "fixtures": [
+    "contracts/v1/conversations.list.response.json",
+    "contracts/v1/conversations.detail.response.json",
+    "contracts/v1/conversations.read.request.json",
+    "contracts/v1/conversations.read.response.json",
+    "contracts/v1/stream.events.json"
+  ],
+  "assertions": [
+    "Expose total and per-conversation unread counts only for an identified session.",
+    "Acknowledge only the latest message that the native messenger successfully rendered.",
+    "Refetch the conversation list after inbox hints and successful read acknowledgement.",
+    "Clear unread UI immediately at logout or account switch."
+  ]
+}

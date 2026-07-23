@@ -47,11 +47,12 @@ export interface NativeOnloEvent {
   state?: string;
   identity?: string;
   connection?: string;
-  unreadCount?: number;
+  unreadCount?: number | null;
   error?: NativeError;
 }
 
 export interface Spec extends TurboModule {
+  setLogLevel(level: string): Promise<void>;
   initialize(options: NativeInitializeOptions): Promise<void>;
   loginUnidentifiedUser(): Promise<void>;
   loginIdentifiedUser(options: NativeLoginIdentifiedUserOptions): Promise<void>;

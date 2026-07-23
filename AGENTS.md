@@ -17,7 +17,7 @@ Workspace overview: [README.md](README.md). Product/integration details: [docs/]
 - SDK key = public Operator integration key; it is not customer identity or a signing secret.
 - Operator backend mints short-lived JWT; SDK calls `loginIdentifiedUser({ userJwt })`. No mobile OTP or second login.
 - iOS/Android own session, outbox, storage, lifecycle, push, permissions, UI. React Native/Flutter are thin bridges.
-- One stable `clientMessageId` survives every retry. Image-only v1: JPEG/PNG/WebP, 8 MiB each, max 3/message.
+- One stable `clientMessageId` survives every retry. Image-only v1: select up to 25 MiB, normalize to JPEG/PNG/WebP at no more than 8 MiB each, max 5/message.
 - The moved React Native code is a prototype, not publishable. Refer [delivery plan](docs/delivery-plan.md).
 
 ## Engineering rules

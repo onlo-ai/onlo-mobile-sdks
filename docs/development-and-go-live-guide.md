@@ -198,17 +198,91 @@ The local merchant-backend simulator is **SDK-team-only** integration infrastruc
 
    Expected result: logs contain only safe code, request ID, SDK/runtime version, and duration; no end-customer content or credentials remains.
 
-## Production go-live checklist
+## Go-live checklists
 
-- [ ] The Onlo server owner has approved the production origin and set the public mobile release state.
-- [ ] The exact configuration, retry, JWT, and capability contracts are versioned and covered by redacted fixtures.
-- [ ] iOS and Android native cores have completed protected-storage, outbox, config, push, UI, lifecycle, and account-boundary device/conformance evidence.
-- [ ] React Native and Flutter native bindings have completed host-native compile and device evidence and hold no sensitive state in JavaScript or Dart.
-- [ ] The attachment `conversationId` contract gap is reconciled and attachment implementation has its own fixture/conformance/device evidence.
-- [ ] Operator backend signing stays server-only and has been security reviewed.
-- [ ] Real-device staging evidence shows no User A data can appear for User B after logout or account switch.
-- [ ] Package names are confirmed (`@onlo/react-native` and `onlo_flutter`); publishing remains disabled until explicit approval.
-- [ ] A designated approver has explicitly authorized publication, deployment, release creation, and any GitHub changes.
+Server behavior is verified once against the canonical v1 contract. Each SDK
+must then prove that its own client implementation uses that shared behavior
+correctly; it does not need a separate server implementation.
+
+### Shared server checklist
+
+| Server capability | Status | Evidence boundary |
+| --- | --- | --- |
+| Mobile target resolves to the correct Operator | ✅ Verified | Local iOS E2E logs and resulting conversation |
+| Identified JWT is verified and resolves `sub` to the correct Contact | ✅ Verified | Synthetic identified iOS session |
+| Conversation history is authorized by the resolved Contact | ✅ Verified | Identified history retrieval |
+| Customer messages reach the mobile conversation and replies return to the same conversation | ✅ Verified | Local end-to-end chat |
+| Mobile conversations appear as the separate `mobile` inbox channel | ✅ Verified | Local inbox and database journey |
+| Session and conversation responses follow the canonical v1 envelope | ✅ Verified | Successful local E2E exchange |
+| Dashboard appearance and shared behavior project into config with revision, ETag, and refetch hint | ✅ Server verified | Projection, conditional-fetch, and `config_changed` contract tests |
+| Identified read acknowledgement and cross-device unread convergence | ✅ Server verified | Contact-scoped unread calculation, monotonic acknowledgement, and refetch contract tests |
+| Identified push registration and authorized notification routing | ✅ Server verified | Credential isolation, payload authorization, routing, and provider-classifier tests; physical delivery remains a client/environment gate |
+| Production release state, target keys, and credential configuration | ⏳ Pending production setup | Environment-specific, not SDK-specific |
+
+The verified rows apply to iOS, Android, React Native, and Flutter clients that
+conform to the same contract. They do not prove that each client has implemented
+or called the contract correctly.
+
+### Per-client integration checklist
+
+Complete this checklist independently for iOS, Android, React Native, and
+Flutter.
+
+#### Setup and identity
+
+- [ ] Initialize the SDK once during host-app startup.
+- [ ] Supply the correct production origin, SDK key, and exact bundle/application
+      identifier through release configuration.
+- [ ] After merchant authentication, obtain a fresh server-signed Mobile SDK JWT
+      and call the platform's identified-login API.
+- [ ] Keep signing secrets in the merchant backend; never embed them in the app.
+- [ ] Await SDK logout when the merchant user signs out.
+- [ ] Test account switching with two synthetic users and confirm no history
+      crosses the Contact boundary.
+
+#### Client behavior
+
+- [ ] Render and refresh dashboard-driven light/dark appearance and shared
+      behavior configuration.
+- [ ] Send, receive, stream, and persist conversation messages.
+- [ ] Mark conversations read and converge unread counts across two devices.
+- [ ] Test image attachment from every platform-supported source.
+- [ ] Test airplane-mode queue, reconnect, replay, and duplicate suppression.
+- [ ] Test FAQ and voice permissions, capture, playback, and interruption where
+      enabled by server configuration.
+
+#### Push and device evidence
+
+- [ ] Register the platform device token after notification permission is
+      granted for an identified session.
+- [ ] Receive an agent-reply notification while the app is backgrounded on a
+      physical device.
+- [ ] Open the authorized conversation when the notification is tapped.
+- [ ] Confirm logout and account switching remove or rotate push registration.
+- [ ] Test the minimum supported OS and a current OS on physical devices.
+
+#### Release quality
+
+- [ ] Privacy disclosures match the data the merchant app actually sends,
+      including optional profile fields, attachments, voice, and push identifiers.
+- [ ] Required platform permission descriptions are present and accurate.
+- [ ] Release logging is `off` and never emits credentials, content, or raw PII.
+- [ ] Time to first customer-visible response token is measured on a
+      production-like network.
+- [ ] Binary-size increase and dependency/build warnings are accepted.
+- [ ] Android consumer R8/ProGuard rules and a minified release build are
+      verified for Android-based clients.
+- [ ] Publishing or release creation has explicit user approval.
+
+### Current iOS client evidence
+
+| iOS client capability | Status | Evidence boundary |
+| --- | --- | --- |
+| Package integration and local E2E host build | ✅ Verified | iOS simulator build |
+| Identified login, history, send, and receive | ✅ Verified | Local server and synthetic simulator account |
+| FAQ and voice integration | 🟡 Build verified | Manual permissions and interaction pending |
+| Physical-device lifecycle, attachments, offline replay, and push | ⏳ Pending | Client/device responsibility |
+| Production key, bundle ID, release build, and App Store configuration | ⏳ Pending | Production client responsibility |
 
 ## Safe rollback and support posture
 

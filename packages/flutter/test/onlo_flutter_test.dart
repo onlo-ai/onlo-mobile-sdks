@@ -17,6 +17,7 @@ void main() {
     final fake = _FakeOnloPlatform();
     OnloPlatform.instance = fake;
 
+    await Onlo.setLogLevel(OnloLogLevel.verbose);
     await Onlo.initialize(sdkKey: 'onlo_flutter_sk_public_example');
     await Onlo.loginUnidentifiedUser();
     await Onlo.loginIdentifiedUser(userJwt: 'header.payload.signature');
@@ -43,6 +44,7 @@ void main() {
     expect(
       fake.calls,
       [
+        'setLogLevel',
         'initialize',
         'loginUnidentifiedUser',
         'loginIdentifiedUser',
@@ -88,7 +90,7 @@ void main() {
     );
   });
 
-  test('exposes typed distinct identity, connection, and unread streams',
+  test('exposes typed distinct identity connection and unread streams',
       () async {
     final fake = _FakeOnloPlatform();
     OnloPlatform.instance = fake;
@@ -103,7 +105,7 @@ void main() {
     );
     await expectLater(
       Onlo.observeUnreadCount(),
-      emitsInOrder([0, emitsDone]),
+      emitsInOrder([null, emitsDone]),
     );
   });
 
@@ -182,6 +184,10 @@ final class _FakeOnloPlatform extends OnloPlatform {
   Future<void> dismiss() async => calls.add('dismiss');
 
   @override
+  Future<void> setLogLevel(OnloLogLevel level) async =>
+      calls.add('setLogLevel');
+
+  @override
   Future<void> initialize(OnloInitializeOptions options) async =>
       calls.add('initialize');
 
@@ -206,7 +212,7 @@ final class _FakeOnloPlatform extends OnloPlatform {
           session: OnloSessionState.anonymousReady,
           identity: OnloIdentityState.anonymous,
           connection: OnloConnectionState.ready,
-          unreadCount: 0,
+          unreadCount: null,
         ),
       );
 

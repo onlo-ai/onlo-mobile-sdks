@@ -16,6 +16,7 @@ abstract class OnloPlatform extends PlatformInterface {
     _instance = instance;
   }
 
+  Future<void> setLogLevel(OnloLogLevel level);
   Future<void> initialize(OnloInitializeOptions options);
   Future<void> loginUnidentifiedUser();
   Future<void> loginIdentifiedUser(OnloIdentifiedLoginOptions options);

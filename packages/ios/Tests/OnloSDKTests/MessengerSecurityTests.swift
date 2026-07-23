@@ -45,7 +45,7 @@ final class MessengerSecurityTests: XCTestCase {
         XCTAssertEqual(persistedTranscript?.conversation.id, "conversation-history")
     }
 
-    func testAuthorisedHistoricalPushPersistsAndReturnsRoute() async throws {
+    func testAnonymousHistoricalPushIsDeferredAndNeverPersistsTranscript() async throws {
         let store = InMemoryOwnerScopedStore()
         let credentialStore = InMemoryCredentialStore()
         let sdk = OnloSDK(
@@ -65,11 +65,11 @@ final class MessengerSecurityTests: XCTestCase {
             messageId: "message-history",
             notificationType: .messageAvailable
         ))
-        XCTAssertEqual(result, .handled(.messenger(conversationId: "conversation-history")))
+        XCTAssertEqual(result, .deferred)
         let protectedState = try await credentialStore.loadState()
         let scope = try XCTUnwrap(protectedState.credential?.ownerScope)
         let persistedTranscript = try await store.transcript(conversationId: "conversation-history", for: scope)
-        XCTAssertEqual(persistedTranscript?.conversation.id, "conversation-history")
+        XCTAssertNil(persistedTranscript)
     }
 
     func testOfflineComposerDurablyQueuesTextForRestoredOwner() async throws {
@@ -127,7 +127,31 @@ final class MessengerSecurityTests: XCTestCase {
         await sdk.unregisterMessengerPresentationInvalidator(registration)
     }
 
-    func testFrameworkUnreadObservationUsesOnlyAuthorisedConversationTotals() async throws {
+    func testAPNsTokenReceivedAnonymouslyRegistersAfterIdentify() async throws {
+        let transport = IdentityBoundaryTransport()
+        let sdk = OnloSDK(
+            credentialStore: InMemoryCredentialStore(),
+            pushIntentStore: InMemoryPushIntentStore(),
+            ownerStore: InMemoryOwnerScopedStore(),
+            transport: transport,
+            hostAppIdentifier: "com.example.host"
+        )
+        _ = try await sdk.initialize(OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        ))
+        let queued = try await sdk.setAPNsPushToken(Data(repeating: 0xAB, count: 32))
+        XCTAssertEqual(queued, .pendingRetry)
+        let anonymousPushRequests = await transport.pushRequestCount()
+        XCTAssertEqual(anonymousPushRequests, 0)
+
+        _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
+        let identifiedPushRequests = await transport.pushRequestCount()
+        XCTAssertEqual(identifiedPushRequests, 1)
+    }
+
+    func testUnreadIsHiddenForAnonymousAndPublishedFromIdentifiedTotal() async throws {
         let sdk = OnloSDK(
             credentialStore: InMemoryCredentialStore(),
             ownerStore: InMemoryOwnerScopedStore(),
@@ -145,22 +169,53 @@ final class MessengerSecurityTests: XCTestCase {
         let firstSnapshot = await iterator.next()
         let snapshot = try XCTUnwrap(firstSnapshot)
         XCTAssertEqual(snapshot.state, .anonymousReady)
-        XCTAssertEqual(snapshot.unreadCount, 3)
 
-        // A repeat list fetch has the same total and must not manufacture a
-        // separate framework state. The total itself contains no content.
         let inbox = try await sdk.messengerInbox()
-        XCTAssertEqual(inbox.map(\.unreadCount).reduce(0, +), 3)
+        XCTAssertEqual(inbox.count, 2)
+        XCTAssertEqual(inbox.map(\.unreadCount), [0, 0])
+        XCTAssertNil(snapshot.unreadCount)
 
         _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
-        let boundarySnapshot = await iterator.next()
-        let boundary = try XCTUnwrap(boundarySnapshot)
-        XCTAssertNil(boundary.unreadCount)
+        _ = try await sdk.messengerInbox()
+        let identifiedStates = await sdk.observeFrameworkState()
+        var identifiedIterator = identifiedStates.makeAsyncIterator()
+        let identifiedSnapshot = await identifiedIterator.next()
+        XCTAssertEqual(identifiedSnapshot?.state, .identifiedReady)
+        XCTAssertEqual(identifiedSnapshot?.unreadCount, 3)
+    }
+
+    func testTranscriptFetchDoesNotAcknowledgeUntilPresenterReportsRenderedMessage() async throws {
+        let transport = ReadAcknowledgementTransport()
+        let sdk = OnloSDK(
+            credentialStore: InMemoryCredentialStore(),
+            ownerStore: InMemoryOwnerScopedStore(),
+            transport: transport,
+            hostAppIdentifier: "com.example.host"
+        )
+        _ = try await sdk.initialize(OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        ))
+        _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
+
+        _ = try await sdk.messengerTranscript(conversationId: "conversation-1")
+        let readsBeforeRender = await transport.readRequestCount()
+        XCTAssertEqual(readsBeforeRender, 0)
+
+        try await sdk.acknowledgeRenderedConversation(
+            conversationId: "conversation-1",
+            throughMessageId: "message-1"
+        )
+        let readsAfterRender = await transport.readRequestCount()
+        let readBody = await transport.lastReadBody()
+        XCTAssertEqual(readsAfterRender, 1)
+        XCTAssertEqual(readBody, #"{"throughMessageId":"message-1"}"#)
     }
 
     func testNormalOwnerFreshBearerIntentUsesOneResumeThenOnePush() async throws {
-        let owner = OwnerScope(kind: .anonymous)
-        let credentials = InMemoryCredentialStore(StoredSessionCredential(installationId: "installation-1", generation: 1, proposedCredential: "credential-1", identityClass: .anonymous, ownerScope: owner))
+        let owner = OwnerScope(kind: .identified)
+        let credentials = InMemoryCredentialStore(StoredSessionCredential(installationId: "installation-1", generation: 1, proposedCredential: "credential-1", identityClass: .identified, ownerScope: owner))
         let push = InMemoryPushIntentStore()
         let transport = FreshBearerPushTransport()
         try await push.save(ProtectedPushIntent(ownerScope: owner, action: .register, token: String(repeating: "a", count: 64), requiresFreshBearer: true))
@@ -188,6 +243,7 @@ private final class InvalidationProbe {
 
 private actor IdentityBoundaryTransport: OnloHTTPTransport {
     private var sessionCount = 0
+    private var pushCount = 0
 
     func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
         switch request.url?.path {
@@ -199,10 +255,17 @@ private actor IdentityBoundaryTransport: OnloHTTPTransport {
             return messengerSessionResponse(request, json: """
             {"requestId":"synthetic","serverTime":"2026-07-21T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"\(session)","chatToken":"opaque-test-token","installationId":"installation-1","generation":\(sessionCount),"proposedCredential":"\(credential)","identityClass":"\(identity)","publicationState":"testing","attestationState":"not_required","configRevision":"revision-1","configSchemaVersion":1,"configEtag":"etag-1"}}
             """)
+        case "/api/sdk/v1/push-token":
+            pushCount += 1
+            return OnloHTTPResponse(statusCode: 200, body: Data("""
+            {"requestId":"synthetic","serverTime":"2026-07-21T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"state":"active","provider":"apns","environment":"sandbox","fingerprint":"redacted","registeredAt":"2026-07-21T10:00:00.000Z"}}
+            """.utf8))
         default:
             return OnloHTTPResponse(statusCode: 503, body: Data("{}".utf8))
         }
     }
+
+    func pushRequestCount() -> Int { pushCount }
 }
 
 private actor UnreadObservationTransport: OnloHTTPTransport {
@@ -223,7 +286,7 @@ private actor UnreadObservationTransport: OnloHTTPTransport {
             {"conversations":[
               {"id":"conversation-1","sessionId":"\(session)","title":"synthetic","unread":true,"unreadCount":2,"status":"open","updatedAt":"2026-07-21T10:00:00.000Z","messageCount":1,"lastMessageRole":"assistant"},
               {"id":"conversation-2","sessionId":"\(session)","title":"synthetic","unread":true,"unreadCount":1,"status":"open","updatedAt":"2026-07-21T10:00:00.000Z","messageCount":1,"lastMessageRole":"assistant"}
-            ]}
+            ],"totalUnreadCount":3}
             """.utf8))
         default:
             return OnloHTTPResponse(statusCode: 503, body: Data("{}".utf8))
@@ -241,7 +304,7 @@ private actor FreshBearerPushTransport: OnloHTTPTransport {
         if path == "/api/sdk/v1/session" {
             sessionCount += 1
             return messengerSessionResponse(request, json: """
-            {"requestId":"synthetic","serverTime":"2026-07-21T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"session-\(sessionCount)","chatToken":"opaque-test-token","installationId":"installation-1","generation":\(sessionCount),"proposedCredential":"credential-\(sessionCount)","identityClass":"anonymous","publicationState":"testing","attestationState":"not_required","configRevision":"revision-1","configSchemaVersion":1,"configEtag":"etag-1"}}
+            {"requestId":"synthetic","serverTime":"2026-07-21T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"session-\(sessionCount)","chatToken":"opaque-test-token","installationId":"installation-1","generation":\(sessionCount),"proposedCredential":"credential-\(sessionCount)","identityClass":"identified","publicationState":"testing","attestationState":"not_required","configRevision":"revision-1","configSchemaVersion":1,"configEtag":"etag-1"}}
             """)
         }
         if path == "/api/sdk/v1/push-token" {
@@ -255,6 +318,40 @@ private actor FreshBearerPushTransport: OnloHTTPTransport {
     func paths() -> [String] { recordedPaths }
 }
 
+private actor ReadAcknowledgementTransport: OnloHTTPTransport {
+    private var sessionCount = 0
+    private var readBodies: [String] = []
+
+    func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
+        switch (request.httpMethod, request.url?.path) {
+        case ("POST", "/api/sdk/v1/session"):
+            sessionCount += 1
+            let identified = sessionCount > 1
+            return messengerSessionResponse(request, json: """
+            {"requestId":"synthetic","serverTime":"2026-07-21T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"session-\(sessionCount)","chatToken":"opaque-test-token","installationId":"installation-1","generation":\(sessionCount),"proposedCredential":"credential-\(sessionCount)","identityClass":"\(identified ? "identified" : "anonymous")","publicationState":"testing","attestationState":"not_required","configRevision":"revision-1","configSchemaVersion":1,"configEtag":"etag-1"}}
+            """)
+        case ("GET", "/api/widget/conversations/conversation-1"):
+            return OnloHTTPResponse(statusCode: 200, body: Data("""
+            {"conversation":{"id":"conversation-1","sessionId":"historical-session","status":"open","isHumanTakeover":false},"messages":[{"id":"message-1","externalId":null,"role":"assistant","senderType":null,"senderName":null,"senderTeam":null,"text":"synthetic","attachments":[],"timestamp":1}],"sync":{"previousCursor":null,"nextCursor":null,"limit":100}}
+            """.utf8))
+        case ("PUT", "/api/widget/conversations/conversation-1/read"):
+            readBodies.append(String(data: request.httpBody ?? Data(), encoding: .utf8) ?? "")
+            return OnloHTTPResponse(statusCode: 200, body: Data("""
+            {"conversationId":"conversation-1","readThroughMessageId":"message-1","unread":false,"unreadCount":0}
+            """.utf8))
+        case ("GET", "/api/widget/conversations"):
+            return OnloHTTPResponse(statusCode: 200, body: Data("""
+            {"conversations":[],"totalUnreadCount":0}
+            """.utf8))
+        default:
+            return OnloHTTPResponse(statusCode: 503, body: Data("{}".utf8))
+        }
+    }
+
+    func readRequestCount() -> Int { readBodies.count }
+    func lastReadBody() -> String? { readBodies.last }
+}
+
 private actor HistoricalConversationTransport: OnloHTTPTransport {
     func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
         switch request.url?.path {
@@ -264,7 +361,7 @@ private actor HistoricalConversationTransport: OnloHTTPTransport {
             """)
         case "/api/widget/conversations":
             return OnloHTTPResponse(statusCode: 200, body: Data("""
-            {"conversations":[{"id":"conversation-history","sessionId":"session-history","title":"synthetic","unread":true,"unreadCount":1,"status":"open","updatedAt":"2026-07-21T10:00:00.000Z","messageCount":1,"lastMessageRole":"assistant"}]}
+            {"conversations":[{"id":"conversation-history","sessionId":"session-history","title":"synthetic","unread":true,"unreadCount":1,"status":"open","updatedAt":"2026-07-21T10:00:00.000Z","messageCount":1,"lastMessageRole":"assistant"}],"totalUnreadCount":1}
             """.utf8))
         case "/api/widget/conversations/conversation-history":
             return OnloHTTPResponse(statusCode: 200, body: Data("""

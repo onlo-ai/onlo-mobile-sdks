@@ -84,7 +84,9 @@ internal class PushRegistry(
         when (value.retryDirective) {
             RetryDirective.AFTER_TOKEN_REFRESH -> value.retryAttempt <= 1
             RetryDirective.AFTER_BACKOFF -> (value.retryEligibleAtMs ?: Long.MAX_VALUE) <= nowMs()
-            null -> value.transportPending && (value.retryEligibleAtMs ?: Long.MAX_VALUE) <= nowMs()
+            // A freshly persisted unlink intent has no bearer after process restoration and may
+            // resume immediately. Transport-ambiguous attempts still honour their local backoff.
+            null -> !value.transportPending || (value.retryEligibleAtMs ?: Long.MAX_VALUE) <= nowMs()
             else -> false
         }
     }
@@ -138,14 +140,21 @@ internal class PushRegistry(
             // A stale caller may never unregister a token under a different owner.
             return@withLock PushRegistrationOutcome.NoActiveSession
         }
-        store.save(existing.copy(pendingUnregister = true))
+        val retiring = existing.copy(pendingUnregister = true)
+        store.save(retiring)
         return@withLock try {
             when (val result = api.unregister(authority.chatToken)) {
                 is ApiSuccess -> { store.clear(); PushRegistrationOutcome.Unregistered }
                 is ApiFailure -> persistServerFailure(existing.ownerScopeId, existing.token, true, result.error.retry.directive, result.error.retry.retryAfterMs)
             }
         } catch (_: IOException) {
-            store.save(existing.copy(transportPending = true, retryEligibleAtMs = nowMs() + localBackoffMs(existing.retryAttempt + 1), retryAttempt = existing.retryAttempt + 1))
+            store.save(
+                retiring.copy(
+                    transportPending = true,
+                    retryEligibleAtMs = nowMs() + localBackoffMs(retiring.retryAttempt + 1),
+                    retryAttempt = retiring.retryAttempt + 1,
+                ),
+            )
             PushRegistrationOutcome.QueuedForReconciliation
         } catch (_: ProtocolViolation) {
             PushRegistrationOutcome.InvalidResponse

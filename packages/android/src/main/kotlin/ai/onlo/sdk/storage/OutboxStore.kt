@@ -1,6 +1,7 @@
 package ai.onlo.sdk.storage
 
 import ai.onlo.sdk.protocol.ChatAttachment
+import ai.onlo.sdk.protocol.MAX_MOBILE_IMAGES_PER_MESSAGE
 import java.util.UUID
 
 /** A partition key is never derived from unsigned profile data. */
@@ -47,7 +48,7 @@ internal data class OutboxEntry(
         require(runCatching { UUID.fromString(clientMessageId) }.isSuccess) { "client_message_id" }
         require(localConversationId.isNotBlank()) { "local_conversation_id" }
         require(attemptCount >= 0) { "attempt_count" }
-        require(attachments.size <= 3) { "attachment_count" }
+        require(attachments.size <= MAX_MOBILE_IMAGES_PER_MESSAGE) { "attachment_count" }
     }
 }
 

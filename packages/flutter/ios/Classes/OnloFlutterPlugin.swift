@@ -13,7 +13,8 @@ public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHand
     private var eventSink: FlutterEventSink?
     private var stateTask: Task<Void, Never>?
     private var lastEmittedState: SDKState?
-    private var lastEmittedUnreadCount: Int?
+    private var lastUnreadCount: Int?
+    private var hasEmittedUnreadCount = false
 
     deinit { stateTask?.cancel() }
 
@@ -28,6 +29,20 @@ public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHand
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
+        case "setLogLevel":
+            guard let raw = call.arguments as? String else {
+                result(failure("invalid_argument")); return
+            }
+            let level: OnloLogLevel
+            switch raw {
+            case "off": level = .off
+            case "error": level = .error
+            case "info": level = .info
+            case "verbose": level = .verbose
+            default: result(failure("invalid_argument")); return
+            }
+            OnloConsoleLogger.shared.setLevel(level)
+            result(nil)
         case "initialize":
             guard let sdkKey = arguments(call)["sdkKey"] as? String, !sdkKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 result(failure("invalid_argument")); return
@@ -76,7 +91,7 @@ public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHand
         // A new Dart subscription must receive the current safe snapshot even
         // when it is unchanged from a previous subscription.
         lastEmittedState = nil
-        lastEmittedUnreadCount = nil
+        hasEmittedUnreadCount = false
         stateTask = Task { [weak self] in
             guard let self else { return }
             let states = await self.sdk.observeFrameworkState()
@@ -134,7 +149,6 @@ public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHand
         }
         operation(result) {
             _ = try await self.sdk.setAPNsPushToken(tokenData, notificationPreference: preference, locale: locale)
-            self.emit(await self.sdk.currentState())
         }
     }
 
@@ -183,15 +197,18 @@ public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHand
     }
 
     private func emit(_ snapshot: SDKFrameworkState) {
-        guard lastEmittedState != snapshot.state || lastEmittedUnreadCount != snapshot.unreadCount else { return }
+        guard lastEmittedState != snapshot.state ||
+                !hasEmittedUnreadCount ||
+                lastUnreadCount != snapshot.unreadCount else { return }
         lastEmittedState = snapshot.state
-        lastEmittedUnreadCount = snapshot.unreadCount
-        var event: [String: Any] = [
+        lastUnreadCount = snapshot.unreadCount
+        hasEmittedUnreadCount = true
+        let event: [String: Any] = [
             "session": snapshot.state.rawValue,
             "identity": identity(for: snapshot.state),
             "connection": connection(for: snapshot.state),
+            "unreadCount": snapshot.unreadCount.map { $0 as Any } ?? NSNull(),
         ]
-        if let unreadCount = snapshot.unreadCount { event["unreadCount"] = unreadCount }
         eventSink?(event)
     }
 

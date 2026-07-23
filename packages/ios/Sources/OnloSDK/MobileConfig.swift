@@ -10,6 +10,7 @@ public struct MobileConfig: Codable, Sendable, Equatable {
     public let securityPolicy: SecurityPolicy
     public let appearance: Appearance
     public let features: Features
+    public let mediaPolicy: MediaPolicy
     public let content: Content
     public let identityMode: IdentityMode
     public let unsupportedWidgetSettings: [UnsupportedWidgetSetting]
@@ -38,15 +39,16 @@ public struct MobileConfig: Codable, Sendable, Equatable {
             securityPolicy: c.decode(SecurityPolicy.self, forKey: .securityPolicy),
             appearance: c.decode(Appearance.self, forKey: .appearance),
             features: c.decode(Features.self, forKey: .features),
+            mediaPolicy: c.decode(MediaPolicy.self, forKey: .mediaPolicy),
             content: c.decode(Content.self, forKey: .content),
             identityMode: c.decode(IdentityMode.self, forKey: .identityMode),
             unsupportedWidgetSettings: c.decode([UnsupportedWidgetSetting].self, forKey: .unsupportedWidgetSettings)
         )
     }
 
-    private init(schemaVersion: Int, revision: String, compatibility: Compatibility, securityPolicy: SecurityPolicy, appearance: Appearance, features: Features, content: Content, identityMode: IdentityMode, unsupportedWidgetSettings: [UnsupportedWidgetSetting]) {
+    private init(schemaVersion: Int, revision: String, compatibility: Compatibility, securityPolicy: SecurityPolicy, appearance: Appearance, features: Features, mediaPolicy: MediaPolicy, content: Content, identityMode: IdentityMode, unsupportedWidgetSettings: [UnsupportedWidgetSetting]) {
         self.schemaVersion = schemaVersion; self.revision = revision; self.compatibility = compatibility; self.securityPolicy = securityPolicy
-        self.appearance = appearance; self.features = features; self.content = content; self.identityMode = identityMode; self.unsupportedWidgetSettings = unsupportedWidgetSettings
+        self.appearance = appearance; self.features = features; self.mediaPolicy = mediaPolicy; self.content = content; self.identityMode = identityMode; self.unsupportedWidgetSettings = unsupportedWidgetSettings
     }
 
     public struct Compatibility: Codable, Sendable, Equatable { public let requestedSchemaVersion: Int; public let appliedSchemaVersion: Int; public let capabilities: [MobileCapability]; public let unsupportedSettings: [UnsupportedSetting] }
@@ -65,6 +67,34 @@ public struct MobileConfig: Codable, Sendable, Equatable {
     public struct ColorTheme: Codable, Sendable, Equatable { public let background: String; public let outgoing: String; public let outgoingText: String; public let incoming: String; public let incomingText: String }
     public struct DarkColorTheme: Codable, Sendable, Equatable { public let enabled: Bool; public let background: String; public let outgoing: String; public let outgoingText: String; public let incoming: String; public let incomingText: String }
     public struct Features: Codable, Sendable, Equatable { public let insertLink: Bool; public let insertCode: Bool; public let emoji: Bool; public let gifs: Bool; public let voice: Bool; public let fileUpload: Bool; public let transcriptDownload: Bool; public let soundNotifications: Bool; public let showTimestamps: Bool; public let faqButton: FAQButton }
+    public struct MediaPolicy: Codable, Sendable, Equatable {
+        public let enabled: Bool
+        public let maximumImagesPerMessage: Int
+        public let maximumImageBytes: Int
+
+        private enum CodingKeys: String, CodingKey {
+            case enabled, maximumImagesPerMessage, maximumImageBytes
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = try c.decode(Bool.self, forKey: .enabled)
+            maximumImagesPerMessage = try c.decode(Int.self, forKey: .maximumImagesPerMessage)
+            maximumImageBytes = try c.decode(Int.self, forKey: .maximumImageBytes)
+            guard (0...OnloProtocol.maximumImagesPerMessage).contains(maximumImagesPerMessage),
+                  (1...OnloProtocol.maximumImageBytes).contains(maximumImageBytes) else {
+                throw OnloError.invalidResponse
+            }
+        }
+
+        public var effectiveMaximumImagesPerMessage: Int {
+            min(maximumImagesPerMessage, OnloProtocol.maximumImagesPerMessage)
+        }
+
+        public var effectiveMaximumImageBytes: Int {
+            min(maximumImageBytes, OnloProtocol.maximumImageBytes)
+        }
+    }
     public struct FAQButton: Codable, Sendable, Equatable { public let enabled: Bool; public let label: String }
     public struct Content: Codable, Sendable, Equatable { public let faqs: [FAQ]; public let tabs: Tabs; public let search: Search; public let onboarding: Onboarding; public let homeSections: [HomeSection] }
     public struct FAQ: Codable, Sendable, Equatable { public let question: String; public let answer: String? }

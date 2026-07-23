@@ -18,6 +18,7 @@ function createNativeModule() {
   const listeners = new Set();
   return {
     calls,
+    setLogLevel: async (level) => calls.push(['setLogLevel', level]),
     initialize: async (options) => calls.push(['initialize', options]),
     loginUnidentifiedUser: async () => calls.push(['loginUnidentifiedUser']),
     loginIdentifiedUser: async (options) => calls.push(['loginIdentifiedUser', options]),
@@ -42,6 +43,7 @@ test('validates initialization and forwards valid calls directly to native', asy
   const native = createNativeModule();
   const { Onlo } = loadFacade(native);
 
+  await Onlo.setLogLevel('verbose');
   await assert.rejects(Onlo.initialize({ sdkKey: ' ' }), { code: 'invalid_argument' });
   await Onlo.initialize({ sdkKey: 'onlo_rn_sk_example' });
   await Onlo.loginUnidentifiedUser();
@@ -65,6 +67,7 @@ test('validates initialization and forwards valid calls directly to native', asy
   assert.equal(pushResult, 'handled');
 
   assert.deepEqual(native.calls, [
+    ['setLogLevel', 'verbose'],
     ['initialize', { sdkKey: 'onlo_rn_sk_example' }],
     ['loginUnidentifiedUser'],
     ['loginIdentifiedUser', { userJwt: 'header.payload.signature' }],
@@ -91,6 +94,14 @@ test('rejects non-compact JWTs without calling native', async () => {
   const { Onlo } = loadFacade(native);
 
   await assert.rejects(Onlo.loginIdentifiedUser({ userJwt: 'not-a-jwt' }), { code: 'invalid_argument' });
+  assert.deepEqual(native.calls, []);
+});
+
+test('rejects unsupported log levels before calling native', async () => {
+  const native = createNativeModule();
+  const { Onlo } = loadFacade(native);
+
+  await assert.rejects(Onlo.setLogLevel('trace'), { code: 'invalid_argument' });
   assert.deepEqual(native.calls, []);
 });
 
@@ -125,41 +136,50 @@ test('forwards only valid native events and removes subscriptions', () => {
   native.emit({ type: 'stateChanged', state: 'identifiedReady' });
   native.emit({ type: 'identityChanged', identity: 'identified' });
   native.emit({ type: 'connectionChanged', connection: 'ready' });
-  native.emit({ type: 'unreadChanged', unreadCount: 2 });
+  native.emit({ type: 'unreadCountChanged', unreadCount: 2 });
   native.emit({ type: 'stateChanged', state: 'unknown' });
   subscription.remove();
-  native.emit({ type: 'unreadChanged', unreadCount: 3 });
+  native.emit({ type: 'connectionChanged', connection: 'offline' });
 
   assert.deepEqual(events, [
     { type: 'stateChanged', state: 'identifiedReady' },
     { type: 'identityChanged', identity: 'identified' },
     { type: 'connectionChanged', connection: 'ready' },
-    { type: 'unreadChanged', unreadCount: 2 },
+    { type: 'unreadCountChanged', unreadCount: 2 },
   ]);
 });
 
-test('provides focused state and unread observations without retaining state in JS', () => {
+test('observes validated unread totals and anonymous badge clearing', () => {
+  const native = createNativeModule();
+  const { Onlo } = loadFacade(native);
+  const values = [];
+  const subscription = Onlo.observeUnreadCount((value) => values.push(value));
+
+  native.emit({ type: 'unreadCountChanged', unreadCount: 3 });
+  native.emit({ type: 'unreadCountChanged', unreadCount: -1 });
+  native.emit({ type: 'unreadCountChanged', unreadCount: null });
+  subscription.remove();
+
+  assert.deepEqual(values, [3, null]);
+});
+
+test('provides focused identity and connection observations without retaining state in JS', () => {
   const native = createNativeModule();
   const { Onlo } = loadFacade(native);
   const identity = [];
   const connection = [];
-  const unread = [];
 
   const identitySubscription = Onlo.observeIdentityState((value) => identity.push(value));
   const connectionSubscription = Onlo.observeConnectionState((value) => connection.push(value));
-  const unreadSubscription = Onlo.observeUnreadCount((value) => unread.push(value));
 
   native.emit({ type: 'identityChanged', identity: 'anonymous' });
   native.emit({ type: 'connectionChanged', connection: 'offline' });
-  native.emit({ type: 'unreadChanged', unreadCount: 4 });
 
   assert.deepEqual(identity, ['anonymous']);
   assert.deepEqual(connection, ['offline']);
-  assert.deepEqual(unread, [4]);
 
   identitySubscription.remove();
   connectionSubscription.remove();
-  unreadSubscription.remove();
 });
 
 test('rejects an invalid native push handling result', async () => {

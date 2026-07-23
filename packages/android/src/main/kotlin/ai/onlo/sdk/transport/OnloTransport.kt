@@ -8,6 +8,7 @@ import ai.onlo.sdk.protocol.ChatRequest
 import ai.onlo.sdk.protocol.ConversationPageQuery
 import ai.onlo.sdk.protocol.ProtocolJsonCodec
 import ai.onlo.sdk.protocol.ProtocolViolation
+import ai.onlo.sdk.protocol.PROTOCOL_VERSION
 import ai.onlo.sdk.protocol.PushTokenRequest
 import ai.onlo.sdk.protocol.SessionRequest
 import ai.onlo.sdk.protocol.SessionResult
@@ -158,6 +159,17 @@ internal class ProtocolRequestFactory(
         return bearerGet(url, chatToken)
     }
 
+    fun helpCenter(chatToken: String): OnloHttpRequest =
+        bearerGet(endpoint("api/widget/articles"), chatToken)
+
+    fun helpCenterArticle(chatToken: String, articleId: String): OnloHttpRequest {
+        require(articleId.isNotBlank()) { "article_id" }
+        return bearerGet(
+            endpoint("api/widget/articles").newBuilder().addPathSegment(articleId).build(),
+            chatToken,
+        )
+    }
+
     fun transcript(
         chatToken: String,
         conversationId: String,
@@ -176,6 +188,31 @@ internal class ProtocolRequestFactory(
             }
             .build()
         return bearerGet(url, chatToken)
+    }
+
+    fun acknowledgeRead(
+        chatToken: String,
+        conversationId: String,
+        throughMessageId: String,
+    ): OnloHttpRequest {
+        require(conversationId.isNotBlank()) { "conversation_id" }
+        require(throughMessageId.isNotBlank()) { "message_id" }
+        val url = endpoint("api/widget/conversations").newBuilder()
+            .addPathSegment(conversationId)
+            .addPathSegment("read")
+            .build()
+        return OnloHttpRequest(
+            method = "PUT",
+            url = url,
+            headers = mapOf(
+                "Authorization" to "Bearer $chatToken",
+                "Accept" to "application/json",
+            ),
+            body = org.json.JSONObject()
+                .put("throughMessageId", throughMessageId)
+                .toString()
+                .toRequestBody(JSON_MEDIA_TYPE),
+        )
     }
 
     fun stream(chatToken: String): OnloHttpRequest = OnloHttpRequest(

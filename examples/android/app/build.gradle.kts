@@ -1,7 +1,17 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     kotlin("android")
 }
+
+val localProperties = Properties().apply {
+    val source = rootProject.file("local.properties")
+    if (source.isFile) source.inputStream().use(::load)
+}
+val onloSdkKey = localProperties.getProperty("ONLO_SDK_KEY", "")
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
 
 android {
     namespace = "ai.onlo.example"
@@ -13,8 +23,10 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.0.0-local"
+        buildConfigField("String", "ONLO_SDK_KEY", "\"$onloSdkKey\"")
     }
 
+    buildFeatures { buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

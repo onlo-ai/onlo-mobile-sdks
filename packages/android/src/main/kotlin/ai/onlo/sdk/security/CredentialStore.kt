@@ -323,7 +323,7 @@ internal class KeystoreCredentialStore(context: Context) : CredentialStore {
         val installationId = value.getString("installationId")
         val transitionId = value.getString("transitionId")
         val proposedCredential = value.getString("proposedCredential")
-        val retryDirective = value.optString("retryDirective", null)?.let { wire ->
+        val retryDirective = if (!value.has("retryDirective") || value.isNull("retryDirective")) null else value.getString("retryDirective").let { wire ->
             RetryDirective.entries.firstOrNull { it.wireValue == wire }
                 ?: throw IllegalArgumentException("pending_retry_directive")
         }

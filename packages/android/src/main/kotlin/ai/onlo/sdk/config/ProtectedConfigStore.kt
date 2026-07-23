@@ -43,5 +43,10 @@ internal class KeystoreConfigStore(context: Context) : ProtectedConfigStore {
         if (!temporary.renameTo(file)) { temporary.delete(); throw IllegalStateException("config_replace") }
     }
 
-    override suspend fun clear() = synchronized(lock) { file.delete(); File(checkNotNull(file.parentFile), "${file.name}.tmp").delete() }
+    override suspend fun clear() {
+        synchronized(lock) {
+            file.delete()
+            File(checkNotNull(file.parentFile), "${file.name}.tmp").delete()
+        }
+    }
 }

@@ -239,6 +239,20 @@ public struct OnloRequestFactory: Sendable {
         return try authorizedRequest(path: "/api/widget/conversations", method: "GET", chatToken: chatToken, query: query)
     }
 
+    public func helpCenter(chatToken: String) throws -> URLRequest {
+        try authorizedRequest(path: "/api/widget/articles", method: "GET", chatToken: chatToken)
+    }
+
+    public func helpCenterArticle(articleId: String, chatToken: String) throws -> URLRequest {
+        guard !articleId.isEmpty else { throw OnloError.invalidConfiguration }
+        let encodedArticleID = articleId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? articleId
+        return try authorizedRequest(
+            path: "/api/widget/articles/\(encodedArticleID)",
+            method: "GET",
+            chatToken: chatToken
+        )
+    }
+
     public func transcript(conversationId: String, query: ConversationPageQuery, chatToken: String) throws -> URLRequest {
         guard !conversationId.isEmpty else { throw OnloError.invalidConfiguration }
         let items: [URLQueryItem]
@@ -257,6 +271,23 @@ public struct OnloRequestFactory: Sendable {
             method: "GET",
             chatToken: chatToken,
             query: items
+        )
+    }
+
+    public func acknowledgeRead(
+        conversationId: String,
+        throughMessageId: String,
+        chatToken: String
+    ) throws -> URLRequest {
+        guard !conversationId.isEmpty, !throughMessageId.isEmpty else {
+            throw OnloError.invalidConfiguration
+        }
+        let encodedConversationID = conversationId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? conversationId
+        return try jsonRequest(
+            path: "/api/widget/conversations/\(encodedConversationID)/read",
+            method: "PUT",
+            body: ConversationReadRequest(throughMessageId: throughMessageId),
+            bearerToken: chatToken
         )
     }
 

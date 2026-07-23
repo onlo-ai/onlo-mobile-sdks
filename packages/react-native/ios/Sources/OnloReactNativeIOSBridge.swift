@@ -22,6 +22,7 @@ public final class OnloReactNativeIOSBridge: NSObject {
     private var lastIdentity: String?
     private var lastConnection: String?
     private var lastUnreadCount: Int?
+    private var hasEmittedUnreadCount = false
 
     public init(eventSink: @escaping (NSDictionary) -> Void) {
         self.eventSink = eventSink
@@ -29,6 +30,19 @@ public final class OnloReactNativeIOSBridge: NSObject {
     }
 
     deinit { stateTask?.cancel() }
+
+    public func setLogLevel(_ level: String, completion: @escaping Completion) {
+        let value: OnloLogLevel
+        switch level {
+        case "off": value = .off
+        case "error": value = .error
+        case "info": value = .info
+        case "verbose": value = .verbose
+        default: completion(failure("invalid_argument")); return
+        }
+        OnloConsoleLogger.shared.setLevel(value)
+        completion(nil)
+    }
 
     public func initialize(withSDKKey sdkKey: String, completion: @escaping Completion) {
         guard isNonBlank(sdkKey), initializedSDKKey == nil || initializedSDKKey == sdkKey else {
@@ -138,13 +152,14 @@ public final class OnloReactNativeIOSBridge: NSObject {
             lastConnection = connection
             eventSink(["type": "connectionChanged", "connection": connection])
         }
-        guard let unreadCount = snapshot.unreadCount else {
-            lastUnreadCount = nil
-            return
+        if !hasEmittedUnreadCount || lastUnreadCount != snapshot.unreadCount {
+            hasEmittedUnreadCount = true
+            lastUnreadCount = snapshot.unreadCount
+            eventSink([
+                "type": "unreadCountChanged",
+                "unreadCount": snapshot.unreadCount.map { $0 as Any } ?? NSNull()
+            ])
         }
-        guard lastUnreadCount != unreadCount else { return }
-        lastUnreadCount = unreadCount
-        eventSink(["type": "unreadChanged", "unreadCount": unreadCount])
     }
 
     private func operation(_ completion: @escaping Completion, _ body: @escaping @MainActor () async throws -> Void) {

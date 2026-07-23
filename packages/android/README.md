@@ -10,7 +10,7 @@ Kotlin native-core foundation for the Onlo mobile v1 contract. It owns protected
 | `loginUnidentifiedUser()` | Restores or bootstraps anonymous continuity; it refuses to replace an identified account. |
 | `loginIdentifiedUser(userJwt)` | Checks only compact JWT shape, then exchanges the proof without persisting or verifying it locally. |
 | `logout()` | Blocks the old partition before revocation; returns a typed pending result when a retry is needed. |
-| `state` / `presentationIntent` | `StateFlow` values for Compose and View adapters. `present()` only emits an intent; it installs no overlay. |
+| `state` / `unreadCount` / `presentationIntent` | Native `StateFlow` values. `unreadCount` is the exact identified-user aggregate and becomes `null` for anonymous/logout/account switch. `present()` only emits an intent; it installs no overlay. |
 | `OnloMessenger.present(activity)` | Presents the SDK-owned Android Views messenger from a host-controlled entry point. It never adds an overlay, manifest component, or permission prompt. |
 | `OnloMessenger.openConversation(activity, id)` | Re-authorises and refreshes the requested conversation before presenting it; an unauthorised target is not shown. |
 
@@ -29,6 +29,121 @@ Kotlin native-core foundation for the Onlo mobile v1 contract. It owns protected
 ## Origin configuration
 
 The public initializer is fixed to `https://onlo.ai`. Staging/review builds use an internal release-configured HTTPS origin seam; hosts cannot select an arbitrary endpoint and the SDK never guesses a staging hostname. No local-development origin is part of the public initializer contract.
+
+## Advanced configuration
+
+### Environment keys
+
+Configure public keys in the merchant app module:
+
+```kotlin
+// app/build.gradle.kts
+android {
+    buildFeatures {
+        buildConfig = true
+    }
+
+    buildTypes {
+        debug {
+            buildConfigField(
+                "String",
+                "ONLO_SDK_KEY",
+                "\"<STAGING_PUBLIC_MOBILE_SDK_KEY>\"",
+            )
+        }
+        release {
+            buildConfigField(
+                "String",
+                "ONLO_SDK_KEY",
+                "\"<PRODUCTION_PUBLIC_MOBILE_SDK_KEY>\"",
+            )
+        }
+    }
+}
+```
+
+Initialize from `Application`:
+
+```kotlin
+class MerchantApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        Onlo.initialize(this, BuildConfig.ONLO_SDK_KEY)
+    }
+}
+```
+
+The key selects the Operator integration, not the service hostname. Production
+is fixed to `https://onlo.ai`; staging origins are part of release
+configuration. Never put a signing secret, user JWT, or customer attributes in
+`BuildConfig`.
+
+### Safe diagnostics
+
+```kotlin
+Onlo.setLogLevel(
+    if (BuildConfig.DEBUG) OnloLogLevel.VERBOSE else OnloLogLevel.ERROR,
+)
+```
+
+| Level | Output |
+| --- | --- |
+| `OFF` | No SDK diagnostics; the default |
+| `ERROR` | Safe failures requiring retry, recovery, or host action |
+| `INFO` | Errors plus request/lifecycle completion summaries |
+| `VERBOSE` | Info plus additional native timing milestones |
+
+Output is restricted to safe code, request ID, SDK/runtime version, and
+duration. Every level excludes keys, identity data, JWTs, customer fields,
+message text, push tokens, and attachment URLs. The level can change before or
+after initialization.
+
+### Custom customer attributes
+
+The merchant backend includes bounded `customAttributes` in the same
+short-lived signed JWT as the opaque customer `sub`. Android passes that JWT
+directly:
+
+```kotlin
+val userJwt = merchantBackend.fetchOnloUserJwt()
+Onlo.instance().loginIdentifiedUser(userJwt)
+```
+
+The app must not construct, decode, edit, sign, persist, or log the JWT.
+
+### Open a known conversation
+
+```kotlin
+when (OnloMessenger.openConversation(activity, conversationId, Onlo.instance())) {
+    OpenConversationOutcome.Opened -> Unit
+    OpenConversationOutcome.NotAuthorised -> showUnavailable()
+    OpenConversationOutcome.NoActiveSession,
+    OpenConversationOutcome.Unavailable -> showRetry()
+}
+```
+
+The native core re-authorises and refreshes the conversation before the
+messenger is presented.
+
+### Unread badge and FCM
+
+```kotlin
+lifecycleScope.launch {
+    Onlo.instance().unreadCount.collect { count ->
+        // null means anonymous/logout/account switch.
+        updateSupportBadge(count ?: 0)
+    }
+}
+
+// Pass the token whenever FCM supplies it. Anonymous sessions queue it only
+// in native memory; the SDK registers/re-registers after identified login.
+Onlo.instance().registerPushToken(PushProvider.FCM, fcmToken)
+```
+
+The native messenger shows each conversation's server-provided row count,
+acknowledges only after a fresh transcript is rendered, and refetches the
+aggregate. Anonymous sessions neither register Onlo push nor expose persistent
+unread state.
 
 ## Local checks
 

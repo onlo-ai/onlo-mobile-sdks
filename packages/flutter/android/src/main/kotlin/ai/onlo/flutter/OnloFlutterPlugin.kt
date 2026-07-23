@@ -5,8 +5,10 @@ import ai.onlo.sdk.OnloClient
 import ai.onlo.sdk.OnloException
 import ai.onlo.sdk.OnloFlutterBridge
 import ai.onlo.sdk.OnloIdentityState
+import ai.onlo.sdk.OnloLogLevel
 import ai.onlo.sdk.OnloPhase
 import ai.onlo.sdk.OnloState
+import ai.onlo.sdk.Onlo
 import ai.onlo.sdk.OpenConversationOutcome
 import ai.onlo.sdk.messenger.OnloMessenger
 import ai.onlo.sdk.protocol.NotificationPreference
@@ -84,6 +86,17 @@ public class OnloFlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
+            "setLogLevel" -> {
+                val level = when (call.arguments as? String) {
+                    "off" -> OnloLogLevel.OFF
+                    "error" -> OnloLogLevel.ERROR
+                    "info" -> OnloLogLevel.INFO
+                    "verbose" -> OnloLogLevel.VERBOSE
+                    else -> return result.safeError("invalid_argument")
+                }
+                Onlo.setLogLevel(level)
+                result.success(null)
+            }
             "initialize" -> initialize(call, result)
             "loginUnidentifiedUser" -> operation(result) { requireClient().loginUnidentifiedUser() }
             "loginIdentifiedUser" -> {
@@ -115,7 +128,6 @@ public class OnloFlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
         eventSink = events
         client?.let(::collectState)
         latestState?.let(::emitState)
-        latestState?.let { state -> latestUnreadCount?.let { unread -> emitState(state, unread) } }
     }
 
     override fun onCancel(arguments: Any?) { eventSink = null }
@@ -222,25 +234,20 @@ public class OnloFlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
             }
         }
         unreadCollector = scope.launch {
-            // Native StateFlow only produces a new value for a changed safe integer total.
-            core.unreadCount.collect { unreadCount ->
-                if (unreadCount == null) {
-                    latestUnreadCount = null
-                    return@collect
-                }
-                latestUnreadCount = unreadCount
-                latestState?.let { emitState(it, unreadCount) }
+            core.unreadCount.collect { count ->
+                latestUnreadCount = count
+                latestState?.let(::emitState)
             }
         }
     }
 
-    private fun emitState(state: OnloState, unreadCount: Int? = null) {
+    private fun emitState(state: OnloState) {
         val sink = eventSink ?: return
-        sink.success(buildMap<String, Any> {
+        sink.success(buildMap<String, Any?> {
             put("session", state.phase.wireValue())
             put("identity", state.identity.wireValue())
             put("connection", state.phase.connectionValue())
-            unreadCount?.let { put("unreadCount", it) }
+            put("unreadCount", latestUnreadCount)
         })
     }
 

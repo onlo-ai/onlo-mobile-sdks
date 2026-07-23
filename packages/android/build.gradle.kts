@@ -1,6 +1,6 @@
 plugins {
-    id("com.android.library") version "8.6.1"
-    kotlin("android") version "2.0.21"
+    id("com.android.library")
+    kotlin("android")
 }
 
 android {
@@ -34,4 +34,6 @@ dependencies {
 
     testImplementation(kotlin("test"))
     testImplementation("junit:junit:4.13.2")
+    // Android's framework JSONObject methods are stubs in local JVM tests.
+    testImplementation("org.json:json:20240303")
 }

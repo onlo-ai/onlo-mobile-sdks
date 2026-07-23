@@ -4,8 +4,10 @@ import ai.onlo.sdk.LogoutOutcome
 import ai.onlo.sdk.OnloClient
 import ai.onlo.sdk.OnloException
 import ai.onlo.sdk.OnloIdentityState
+import ai.onlo.sdk.OnloLogLevel
 import ai.onlo.sdk.OnloPhase
 import ai.onlo.sdk.OnloReactNativeBridge
+import ai.onlo.sdk.Onlo
 import ai.onlo.sdk.OpenConversationOutcome
 import ai.onlo.sdk.protocol.NotificationPreference
 import ai.onlo.sdk.protocol.PushProvider
@@ -47,6 +49,19 @@ public class OnloSDKModule(
     private var emittedConnection: String? = null
 
     override fun getName(): String = NAME
+
+    @ReactMethod
+    override fun setLogLevel(level: String, promise: Promise) {
+        val parsed = when (level) {
+            "off" -> OnloLogLevel.OFF
+            "error" -> OnloLogLevel.ERROR
+            "info" -> OnloLogLevel.INFO
+            "verbose" -> OnloLogLevel.VERBOSE
+            else -> return promise.rejectSafe("invalid_argument")
+        }
+        Onlo.setLogLevel(parsed)
+        promise.resolve(null)
+    }
 
     @ReactMethod
     override fun initialize(options: ReadableMap, promise: Promise) {
@@ -238,12 +253,10 @@ public class OnloSDKModule(
             }
         }
         unreadCollector = moduleScope.launch {
-            // A total exists only after an authorised list refetch. StateFlow suppresses equals.
-            core.unreadCount.collect { unreadCount ->
-                val safeUnreadCount = unreadCount ?: return@collect
+            core.unreadCount.collect { count ->
                 emitOnOnloEvent(Arguments.createMap().apply {
-                    putString("type", "unreadChanged")
-                    putInt("unreadCount", safeUnreadCount)
+                    putString("type", "unreadCountChanged")
+                    if (count == null) putNull("unreadCount") else putInt("unreadCount", count)
                 })
             }
         }

@@ -3,8 +3,11 @@ import Foundation
 /// The version accepted by the mobile SDK server contract.
 public enum OnloProtocol {
     public static let version = 1
-    public static let maximumImagesPerMessage = 3
+    public static let maximumImagesPerMessage = 5
+    public static let maximumSourceImageBytes = 25 * 1024 * 1024
     public static let maximumImageBytes = 8 * 1024 * 1024
+    public static let maximumImageDimension = 4_096
+    public static let maximumImagePixels = 16_000_000
 }
 
 public enum RuntimePlatform: String, Codable, Sendable {
@@ -481,6 +484,60 @@ public struct ConversationSummary: Codable, Sendable, Equatable {
 
 public struct ConversationListResult: Codable, Sendable, Equatable {
     public let conversations: [ConversationSummary]
+    public let totalUnreadCount: Int
+}
+
+public struct ConversationReadRequest: Codable, Sendable, Equatable {
+    public let throughMessageId: String
+
+    public init(throughMessageId: String) {
+        self.throughMessageId = throughMessageId
+    }
+}
+
+public struct ConversationReadResult: Codable, Sendable, Equatable {
+    public let conversationId: String
+    public let readThroughMessageId: String
+    public let unread: Bool
+    public let unreadCount: Int
+}
+
+public struct HelpCenterCatalog: Codable, Sendable, Equatable {
+    public let topics: [HelpCenterTopic]
+}
+
+public struct HelpCenterTopic: Codable, Sendable, Equatable {
+    public let id: String
+    public let name: String
+    public let count: Int
+    public let articles: [HelpCenterArticleSummary]
+}
+
+public struct HelpCenterArticleSummary: Codable, Sendable, Equatable {
+    public let id: String
+    public let title: String
+    public let updatedAt: String
+}
+
+public struct HelpCenterArticleResult: Codable, Sendable, Equatable {
+    public let article: HelpCenterArticle
+}
+
+public struct HelpCenterArticle: Codable, Sendable, Equatable {
+    public let id: String
+    public let title: String
+    public let topic: String?
+    public let body: String
+    public let sourceType: String
+    public let faqQuestion: String?
+    public let updatedAt: String
+    public let related: [HelpCenterRelatedArticle]
+}
+
+public struct HelpCenterRelatedArticle: Codable, Sendable, Equatable {
+    public let id: String
+    public let title: String
+    public let topic: String?
 }
 
 public struct ConversationDetail: Codable, Sendable, Equatable {

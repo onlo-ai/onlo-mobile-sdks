@@ -7,6 +7,7 @@ import ai.onlo.sdk.config.ProtectedConfigStore
 import ai.onlo.sdk.config.StoredMobileConfig
 import ai.onlo.sdk.transport.OnloConfigApi
 import ai.onlo.sdk.protocol.IdentityClass
+import ai.onlo.sdk.protocol.PushProvider
 import ai.onlo.sdk.protocol.RetryDirective
 import ai.onlo.sdk.protocol.SessionResult
 import ai.onlo.sdk.security.CredentialLoad
@@ -26,7 +27,9 @@ import ai.onlo.sdk.transport.OnloSseTransport
 import ai.onlo.sdk.transport.ProtocolRequestFactory
 import ai.onlo.sdk.transport.SseStreamResult
 import ai.onlo.sdk.chat.ForegroundStream
+import ai.onlo.sdk.chat.WidgetChatApi
 import ai.onlo.sdk.push.PushRegistry
+import ai.onlo.sdk.push.PushRegistrationOutcome
 import ai.onlo.sdk.push.PushTokenStore
 import ai.onlo.sdk.push.StoredPushToken
 import ai.onlo.sdk.push.KeystorePushTokenStore
@@ -127,6 +130,7 @@ class OnloClientLifecycleTest {
         assertEquals(listOf("identified:owner-a"), outbox.blocked)
         assertEquals(true, credentials.session?.logoutPending)
         assertFailsWith<OnloException.LogoutInProgress> { client.loginUnidentifiedUser() }
+        Unit
     }
 
     @Test
@@ -459,7 +463,7 @@ class OnloClientLifecycleTest {
         val credentials = FakeCredentials().apply { state = ProtectedSessionState(old, ai.onlo.sdk.security.PendingSessionTransition.Logout(old.installationId, "old-logout", old.generation, old.credential, "unused")) }
         val transport = PushRecoveryTransport(unlinkSucceeds = true)
         val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
-        val tokenStore = MemoryPushStore(StoredPushToken(old.ownerScope().storageKey(), "fcm", registered = true, pendingUnregister = true))
+        val tokenStore = MemoryPushStore(StoredPushToken(OwnerScope.Anonymous(old.ownerScopeId).storageKey(), "fcm", registered = true, pendingUnregister = true))
         val client = OnloClient(OnloConfiguration("public-sdk-key", "ai.onlo.fixture"), credentials, FakeOutbox(), OnloSessionApi(transport, requests), SafeLogger { _: SafeLogEvent -> }, CoroutineScope(Dispatchers.Unconfined), pushRegistry = PushRegistry(tokenStore, OnloPushApi(transport, requests)))
         client.startRestoration()
         assertEquals(listOf("resume", "unregister", "logout"), transport.order)
@@ -474,7 +478,7 @@ class OnloClientLifecycleTest {
         val credentials = FakeCredentials().apply { state = ProtectedSessionState(old, ai.onlo.sdk.security.PendingSessionTransition.Logout(old.installationId, "old-logout", old.generation, old.credential, "unused")) }
         val transport = PushRecoveryTransport(unlinkSucceeds = false)
         val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
-        val tokenStore = MemoryPushStore(StoredPushToken(old.ownerScope().storageKey(), "fcm", registered = true, pendingUnregister = true))
+        val tokenStore = MemoryPushStore(StoredPushToken(OwnerScope.Anonymous(old.ownerScopeId).storageKey(), "fcm", registered = true, pendingUnregister = true))
         val client = OnloClient(OnloConfiguration("public-sdk-key", "ai.onlo.fixture"), credentials, FakeOutbox(), OnloSessionApi(transport, requests), SafeLogger { _: SafeLogEvent -> }, CoroutineScope(Dispatchers.Unconfined), pushRegistry = PushRegistry(tokenStore, OnloPushApi(transport, requests)))
         client.startRestoration()
         assertEquals(listOf("resume", "unregister"), transport.order)
@@ -483,23 +487,22 @@ class OnloClientLifecycleTest {
     }
 
     @Test
-    fun `foreground retries pending logout only after local backoff with retained owner bearer`() = runBlocking {
-        var now = 0L
-        val transport = RetryPushTransport()
+    fun `anonymous session queues token locally without a server push association`() = runBlocking {
+        val transport = IdentityPushTransport()
         val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
         val credentials = FakeCredentials()
-        val store = MemoryPushStore()
-        val client = OnloClient(OnloConfiguration("public-sdk-key", "ai.onlo.fixture"), credentials, FakeOutbox(), OnloSessionApi(transport, requests), SafeLogger { _: SafeLogEvent -> }, CoroutineScope(Dispatchers.Unconfined), pushRegistry = PushRegistry(store, OnloPushApi(transport, requests), { now }))
+        val store = MemoryPushStore(null)
+        val client = OnloClient(OnloConfiguration("public-sdk-key", "ai.onlo.fixture"), credentials, FakeOutbox(), OnloSessionApi(transport, requests), SafeLogger { _: SafeLogEvent -> }, CoroutineScope(Dispatchers.Unconfined), pushRegistry = PushRegistry(store, OnloPushApi(transport, requests)))
         client.loginUnidentifiedUser()
-        store.value = StoredPushToken(checkNotNull(credentials.session).ownerScope().storageKey(), "fcm", true, false)
-        assertEquals(LogoutOutcome.Pending("push_unlink_pending"), client.logout())
-        assertEquals(listOf("unregister"), transport.order)
-        client.onAppForeground()
-        assertEquals(listOf("unregister"), transport.order)
-        now = 1_000L
-        client.onAppForeground()
-        assertEquals(listOf("unregister", "unregister", "logout"), transport.order)
-        assertEquals("Bearer initial-bearer", transport.unlinkAuthorizations.last())
+        assertEquals(
+            PushRegistrationOutcome.QueuedForReconciliation,
+            client.registerPushToken(PushProvider.FCM, "synthetic-fcm-token"),
+        )
+        assertEquals(null, store.value)
+        assertTrue(transport.order.isEmpty())
+        client.loginIdentifiedUser("header.payload.signature")
+        assertEquals(listOf("register"), transport.order)
+        assertEquals(true, store.value?.registered)
     }
 
     @Test
@@ -729,6 +732,33 @@ class OnloClientLifecycleTest {
             val type = operation.getString("type"); if (type == "logout") order += "logout"
             val proposed = operation.getString("proposedCredential")
             return OnloHttpResponse(200, emptyMap(), "{\"requestId\":\"r\",\"serverTime\":\"t\",\"protocolVersion\":1,\"minimumProtocolVersion\":1,\"ok\":true,\"result\":{\"sessionId\":\"s\",\"chatToken\":\"initial-bearer\",\"installationId\":\"00000000-0000-0000-0000-000000000001\",\"generation\":1,\"proposedCredential\":\"$proposed\",\"identityClass\":\"anonymous\",\"publicationState\":\"testing\",\"attestationState\":\"x\",\"configRevision\":\"x\",\"configSchemaVersion\":1,\"configEtag\":\"x\"}}")
+        }
+    }
+
+    private class IdentityPushTransport : OnloTransport {
+        val order = mutableListOf<String>()
+
+        override suspend fun execute(request: OnloHttpRequest): OnloHttpResponse {
+            if (request.url.encodedPath.endsWith("push-token")) {
+                order += "register"
+                return OnloHttpResponse(
+                    200,
+                    emptyMap(),
+                    "{\"requestId\":\"r\",\"serverTime\":\"t\",\"protocolVersion\":1,\"minimumProtocolVersion\":1,\"ok\":true,\"result\":{\"state\":\"active\",\"provider\":\"fcm\",\"environment\":\"sandbox\",\"fingerprint\":\"redacted\",\"registeredAt\":\"t\"}}",
+                )
+            }
+            val operation = org.json.JSONObject(
+                checkNotNull(request.body).let { Buffer().also(it::writeTo).readUtf8() },
+            ).getJSONObject("operation")
+            val type = operation.getString("type")
+            val proposed = operation.getString("proposedCredential")
+            val identity = if (type == "identify") "identified" else "anonymous"
+            val generation = if (type == "identify") 2 else 1
+            return OnloHttpResponse(
+                200,
+                emptyMap(),
+                "{\"requestId\":\"r\",\"serverTime\":\"t\",\"protocolVersion\":1,\"minimumProtocolVersion\":1,\"ok\":true,\"result\":{\"sessionId\":\"session-$generation\",\"chatToken\":\"bearer-$generation\",\"installationId\":\"00000000-0000-0000-0000-000000000001\",\"generation\":$generation,\"proposedCredential\":\"$proposed\",\"identityClass\":\"$identity\",\"publicationState\":\"testing\",\"attestationState\":\"x\",\"configRevision\":\"x\",\"configSchemaVersion\":1,\"configEtag\":\"x\"}}",
+            )
         }
     }
 }

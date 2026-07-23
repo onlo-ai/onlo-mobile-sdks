@@ -21,6 +21,10 @@ final class MethodChannelOnloPlatform extends OnloPlatform {
   final EventChannel _stateChannel;
 
   @override
+  Future<void> setLogLevel(OnloLogLevel level) =>
+      _invokeVoid('setLogLevel', level.name);
+
+  @override
   Future<void> initialize(OnloInitializeOptions options) =>
       _invokeVoid('initialize', <String, Object?>{'sdkKey': options.sdkKey});
 
@@ -114,8 +118,9 @@ final class MethodChannelOnloPlatform extends OnloPlatform {
     final session = _sessionState(event['session']);
     final identity = _identityState(event['identity']);
     final connection = _connectionState(event['connection']);
-    final unreadCount = event['unreadCount'];
-    if (unreadCount != null && (unreadCount is! int || unreadCount < 0)) {
+    final rawUnreadCount = event['unreadCount'];
+    if (rawUnreadCount != null &&
+        (rawUnreadCount is! int || rawUnreadCount < 0)) {
       throw const OnloNativeException(
         OnloErrorCode.nativeOperationFailed,
         'Native Onlo bridge returned an invalid unread count.',
@@ -125,7 +130,7 @@ final class MethodChannelOnloPlatform extends OnloPlatform {
       session: session,
       identity: identity,
       connection: connection,
-      unreadCount: unreadCount as int?,
+      unreadCount: rawUnreadCount as int?,
     );
   }
 

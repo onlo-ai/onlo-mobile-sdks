@@ -75,14 +75,14 @@ internal object ProtocolJsonCodec {
 
     fun decodePushRegisterEnvelope(raw: String): ApiEnvelope<PushRegistrationResult> = decodeEnvelope(raw) { value ->
         val expected = setOf("state", "provider", "environment", "fingerprint", "registeredAt")
-        if (value.keySet() != expected) throw ProtocolViolation("push_register")
+        if (value.keys().asSequence().toSet() != expected) throw ProtocolViolation("push_register")
         PushRegistrationResult(value.requiredString("state"), value.requiredString("provider"), value.requiredString("environment"), value.requiredString("fingerprint"), value.requiredString("registeredAt")).also {
             if (it.state !in setOf("active", "muted") || it.provider != "fcm" || it.environment !in setOf("sandbox", "production") || it.fingerprint.isBlank() || it.registeredAt.isBlank()) throw ProtocolViolation("push_register")
         }
     }
 
     fun decodePushUnregisterEnvelope(raw: String): ApiEnvelope<PushUnregistrationResult> = decodeEnvelope(raw) { value ->
-        if (value.keySet() != setOf("state")) throw ProtocolViolation("push_unregister")
+        if (value.keys().asSequence().toSet() != setOf("state")) throw ProtocolViolation("push_unregister")
         PushUnregistrationResult(value.requiredString("state")).also { if (it.state != "inactive") throw ProtocolViolation("push_unregister") }
     }
 

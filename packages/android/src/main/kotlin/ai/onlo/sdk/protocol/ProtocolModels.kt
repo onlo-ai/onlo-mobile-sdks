@@ -2,8 +2,9 @@ package ai.onlo.sdk.protocol
 
 /** Exact mobile v1 transport model. Names map directly to the server contract. */
 public const val PROTOCOL_VERSION: Int = 1
-public const val MAX_MOBILE_IMAGES_PER_MESSAGE: Int = 3
 public const val MAX_MOBILE_IMAGE_BYTES: Long = 8L * 1024L * 1024L
+public const val MAX_MOBILE_SOURCE_IMAGE_BYTES: Long = 25L * 1024L * 1024L
+public const val MAX_MOBILE_IMAGES_PER_MESSAGE: Int = 5
 
 public enum class RuntimePlatform(public val wireValue: String) {
     ANDROID("android"),

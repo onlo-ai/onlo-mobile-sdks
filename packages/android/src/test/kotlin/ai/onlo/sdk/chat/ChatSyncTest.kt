@@ -35,6 +35,39 @@ class ChatSyncTest {
     }
 
     @Test
+    fun `native stream events remain associated with their durable client id`() = runBlocking {
+        val response = OnloHttpResponse(
+            200,
+            emptyMap(),
+            """
+            data: {"type":"accepted","clientMessageId":"__request_client_message_id__","messageId":"server-message","conversationId":"conversation","acceptedAt":"2026-01-01T00:00:00Z","duplicate":false,"processingStatus":"accepted"}
+
+            data: {"type":"text","content":"synthetic"}
+
+            data: {"type":"done","conversationId":"conversation"}
+
+            """.trimIndent(),
+        )
+        val events = mutableListOf<Pair<String, ChatEvent>>()
+        val store = MemoryOutbox()
+        val owner = OwnerScope.Anonymous("owner")
+        val outbox = DurableChatOutbox(
+            store,
+            WidgetChatApi(FixtureTransport(listOf(response)), requests()),
+            nowMs = { 10 },
+            onEvent = { entry, event -> events += entry.clientMessageId to event },
+        )
+        val entry = outbox.enqueue(owner, "conversation", "fixture")
+
+        outbox.flush(owner, "fixture-session", "fixture-bearer")
+
+        assertEquals(listOf(entry.clientMessageId, entry.clientMessageId, entry.clientMessageId), events.map { it.first })
+        assertTrue(events[0].second is ChatEvent.Accepted)
+        assertEquals(ChatEvent.Text("synthetic"), events[1].second)
+        assertTrue(events[2].second is ChatEvent.Done)
+    }
+
+    @Test
     fun `enqueue preserves contract attachment data for durable send`() = runBlocking {
         val store = MemoryOutbox()
         val outbox = DurableChatOutbox(store, WidgetChatApi(FixtureTransport(emptyList()), requests()), nowMs = { 10 })
@@ -244,7 +277,7 @@ class ChatSyncTest {
     @Test
     fun `persisted transcript merges full fields and fetched metadata wins`() = runBlocking {
         val store = MemoryOutbox(); val owner = OwnerScope.Anonymous("owner")
-        store.replaceTranscript(owner, "conversation", "{\"id\":\"conversation\",\"sessionId\":\"old-session\",\"status\":\"old\",\"isHumanTakeover\":false,\"previousCursor\":\"old-prev\",\"nextCursor\":\"old-next\",\"limit\":10,\"messages\":[{\"id\":\"old\",\"externalId\":\"external\",\"role\":\"user\",\"senderType\":\"contact\",\"senderName\":\"name\",\"senderTeam\":null,\"text\":\"old text\",\"attachments\":[\"{\\\"id\\\":\\\"a\\\"}\"],\"timestamp\":1},{\"id\":\"overlap\",\"externalId\":null,\"role\":\"assistant\",\"senderType\":null,\"senderName\":null,\"senderTeam\":null,\"text\":\"old overlap\",\"attachments\":[],\"timestamp\":2}]}")
+        store.replaceTranscript(owner, "conversation", "{\"id\":\"conversation\",\"sessionId\":\"new-session\",\"status\":\"old\",\"isHumanTakeover\":false,\"previousCursor\":\"old-prev\",\"nextCursor\":\"old-next\",\"limit\":10,\"messages\":[{\"id\":\"old\",\"externalId\":\"external\",\"role\":\"user\",\"senderType\":\"contact\",\"senderName\":\"name\",\"senderTeam\":null,\"text\":\"old text\",\"attachments\":[\"{\\\"id\\\":\\\"a\\\"}\"],\"timestamp\":1},{\"id\":\"overlap\",\"externalId\":null,\"role\":\"assistant\",\"senderType\":null,\"senderName\":null,\"senderTeam\":null,\"text\":\"old overlap\",\"attachments\":[],\"timestamp\":2}]}")
         val result = TranscriptConvergence(WidgetChatApi(FixtureTransport(listOf(transcriptChanged(), transcriptChanged())), requests()), store).fetchAfterFullSync(owner, "fixture", "conversation", null, "new-session")
         assertEquals("new", result.status); assertEquals(true, result.isHumanTakeover); assertEquals("new-next", result.nextCursor); assertEquals(50, result.limit)
         assertEquals(listOf("old", "overlap", "new"), result.messages.map { it.id }); assertEquals("new overlap", result.messages.first { it.id == "overlap" }.text); assertEquals("external", result.messages.first { it.id == "old" }.externalId)
@@ -266,20 +299,38 @@ class ChatSyncTest {
 
     @Test
     fun `conversation inbox uses the exact contract list route and fields`() = runBlocking {
-        val response = OnloHttpResponse(200, emptyMap(), "{\"conversations\":[{\"id\":\"conversation\",\"sessionId\":\"fixture-session\",\"title\":\"[redacted]\",\"unread\":true,\"unreadCount\":2,\"status\":\"open\",\"updatedAt\":\"2026-01-01T00:00:00Z\",\"messageCount\":3,\"lastMessageRole\":null}]}")
+        val response = OnloHttpResponse(200, emptyMap(), "{\"conversations\":[{\"id\":\"conversation\",\"sessionId\":\"fixture-session\",\"title\":\"[redacted]\",\"unread\":true,\"unreadCount\":2,\"status\":\"open\",\"updatedAt\":\"2026-01-01T00:00:00Z\",\"messageCount\":3,\"lastMessageRole\":null}],\"totalUnreadCount\":2}")
         val transport = FixtureTransport(listOf(response))
 
         val result = WidgetChatApi(transport, requests()).conversations("fixture-bearer", "fixture-session")
 
-        assertEquals("conversation", result.single().id)
-        assertEquals(2, result.single().unreadCount)
+        assertEquals("conversation", result.conversations.single().id)
+        assertEquals(2, result.conversations.single().unreadCount)
+        assertEquals(2, result.totalUnreadCount)
         assertEquals("/api/widget/conversations", transport.requests.single().url.encodedPath)
         assertEquals("50", transport.requests.single().url.queryParameter("limit"))
     }
 
     @Test
+    fun `read acknowledgement uses exact rendered message and plain widget response`() = runBlocking {
+        val response = OnloHttpResponse(
+            200,
+            emptyMap(),
+            "{\"conversationId\":\"conversation\",\"readThroughMessageId\":\"message\",\"unread\":false,\"unreadCount\":0}",
+        )
+        val transport = FixtureTransport(listOf(response))
+
+        val result = WidgetChatApi(transport, requests())
+            .acknowledgeRead("fixture-bearer", "conversation", "message")
+
+        assertEquals("message", result.readThroughMessageId)
+        assertEquals("PUT", transport.requests.single().method)
+        assertEquals("/api/widget/conversations/conversation/read", transport.requests.single().url.encodedPath)
+    }
+
+    @Test
     fun `malformed conversation list is never rendered as authorised inbox data`() = runBlocking {
-        val api = WidgetChatApi(FixtureTransport(listOf(OnloHttpResponse(200, emptyMap(), "{\"conversations\":[{\"id\":\"conversation\"}]}"))), requests())
+        val api = WidgetChatApi(FixtureTransport(listOf(OnloHttpResponse(200, emptyMap(), "{\"conversations\":[{\"id\":\"conversation\"}],\"totalUnreadCount\":0}"))), requests())
         try {
             api.conversations("fixture-bearer", "fixture-session")
             error("expected protocol violation")
@@ -289,7 +340,7 @@ class ChatSyncTest {
 
     @Test
     fun `cross session inbox entry is rejected as unauthorised`() = runBlocking {
-        val response = OnloHttpResponse(200, emptyMap(), "{\"conversations\":[{\"id\":\"conversation\",\"sessionId\":\"different-session\",\"title\":\"[redacted]\",\"unread\":false,\"unreadCount\":0,\"status\":\"open\",\"updatedAt\":\"2026-01-01T00:00:00Z\",\"messageCount\":0,\"lastMessageRole\":null}]}")
+        val response = OnloHttpResponse(200, emptyMap(), "{\"conversations\":[{\"id\":\"conversation\",\"sessionId\":\"different-session\",\"title\":\"[redacted]\",\"unread\":false,\"unreadCount\":0,\"status\":\"open\",\"updatedAt\":\"2026-01-01T00:00:00Z\",\"messageCount\":0,\"lastMessageRole\":null}],\"totalUnreadCount\":0}")
         val api = WidgetChatApi(FixtureTransport(listOf(response)), requests())
         try {
             api.conversations("fixture-bearer", "fixture-session")
@@ -308,6 +359,7 @@ class ChatSyncTest {
         assertFailsWith<java.io.IOException> {
             api.conversations("fixture-bearer", "fixture-session")
         }
+        Unit
     }
 
     // SQLite ciphertext-corruption purge is Android/Keystore-dependent and must be covered by

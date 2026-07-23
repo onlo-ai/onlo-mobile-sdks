@@ -81,6 +81,17 @@ class ProtocolRequestFactoryTest {
     }
 
     @Test
+    fun `Help Center requests reuse authenticated widget article routes`() {
+        val catalog = requests.helpCenter("memory-token")
+        val article = requests.helpCenterArticle("memory-token", "article-1")
+
+        assertEquals("/api/widget/articles", catalog.url.encodedPath)
+        assertEquals("/api/widget/articles/article-1", article.url.encodedPath)
+        assertEquals("Bearer memory-token", catalog.headers["Authorization"])
+        assertEquals("Bearer memory-token", article.headers["Authorization"])
+    }
+
+    @Test
     fun `chat request retains caller supplied stable id`() {
         val request = requests.chat(
             chatToken = "memory-token",

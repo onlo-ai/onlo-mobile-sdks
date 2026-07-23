@@ -25,10 +25,15 @@ internal class ForegroundStream(
                 frame.append(line.removePrefix("data:").trimStart())
                 if (frame.length > 64 * 1024) throw ProtocolViolation("stream_frame")
             } else if (line.isEmpty() && frame.isNotEmpty()) {
-                parse(frame.toString())?.let(onHint); frame.clear()
+                val hint = parse(frame.toString())
+                if (hint != null) onHint(hint)
+                frame.clear()
             }
         }
-        if (frame.isNotEmpty()) parse(frame.toString())?.let(onHint)
+        if (frame.isNotEmpty()) {
+            val hint = parse(frame.toString())
+            if (hint != null) onHint(hint)
+        }
         if (result !is ai.onlo.sdk.transport.SseStreamResult.Success) throw java.io.IOException("stream_unavailable")
     }
 

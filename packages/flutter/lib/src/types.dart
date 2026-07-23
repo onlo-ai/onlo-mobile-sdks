@@ -14,6 +14,8 @@ enum OnloIdentityState { unknown, anonymous, identified }
 
 enum OnloConnectionState { uninitialized, ready, offline, unavailable }
 
+enum OnloLogLevel { off, error, info, verbose }
+
 enum OnloPushProvider { apns, fcm }
 
 enum OnloNotificationPreference { enabled, muted }
@@ -157,14 +159,11 @@ final class OnloStateSnapshot {
     required this.session,
     required this.identity,
     required this.connection,
-    this.unreadCount,
+    required this.unreadCount,
   });
 
   final OnloSessionState session;
   final OnloIdentityState identity;
   final OnloConnectionState connection;
-
-  /// Absent while native authority is unavailable or crossing an account
-  /// boundary; otherwise derived from the authorised conversation list.
   final int? unreadCount;
 }

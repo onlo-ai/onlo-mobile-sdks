@@ -47,6 +47,19 @@ RCT_EXPORT_MODULE(OnloSDK)
 }
 #endif
 
+RCT_REMAP_METHOD(setLogLevel,
+                 setLogLevel:(NSString *)level
+                 resolve:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject) {
+  if (![level isKindOfClass:NSString.class] ||
+      ![@[ @"off", @"error", @"info", @"verbose" ] containsObject:level]) {
+    [self reject:reject payload:OnloInvalidArgument()]; return;
+  }
+  [self.nativeBridge setLogLevel:level completion:^(NSDictionary *error) {
+    [self complete:resolve reject:reject error:error];
+  }];
+}
+
 RCT_REMAP_METHOD(initialize,
                  initialize:(NSDictionary *)options
                  resolve:(RCTPromiseResolveBlock)resolve

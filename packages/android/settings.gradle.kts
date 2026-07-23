@@ -1,4 +1,8 @@
 pluginManagement {
+    plugins {
+        id("com.android.library") version "8.6.1"
+        kotlin("android") version "2.0.21"
+    }
     repositories {
         google()
         mavenCentral()
