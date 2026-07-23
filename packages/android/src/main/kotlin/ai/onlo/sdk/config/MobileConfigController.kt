@@ -8,6 +8,7 @@ import ai.onlo.sdk.protocol.RetryDirective
 import ai.onlo.sdk.transport.ConfigFetchResult
 import ai.onlo.sdk.transport.OnloConfigApi
 import java.io.IOException
+import java.util.UUID
 import kotlin.math.min
 import kotlin.random.Random
 import kotlinx.coroutines.CoroutineScope
@@ -38,10 +39,17 @@ internal class MobileConfigController(
     private var retryAttempt = 0
     private var sessionVersion = 0L
     private var retryJob: Job? = null
+    private var retryOwnershipToken: UUID? = null
     private val mutableSnapshot = MutableStateFlow(MobileConfigSnapshot(null, null, false))
     val snapshot: StateFlow<MobileConfigSnapshot> = mutableSnapshot.asStateFlow()
 
-    suspend fun onSessionBoundary(): Long = mutex.withLock { sessionVersion += 1; retryJob?.cancel(); retryJob = null; sessionVersion }
+    suspend fun onSessionBoundary(): Long = mutex.withLock {
+        sessionVersion += 1
+        retryOwnershipToken = null
+        retryJob?.cancel()
+        retryJob = null
+        sessionVersion
+    }
 
     suspend fun restoreLastKnownGood() = mutex.withLock {
         val stored = store.load() ?: return@withLock
@@ -112,14 +120,32 @@ internal class MobileConfigController(
     private fun retainedLocked(code: String): ConfigRefreshResult { mutableSnapshot.value = mutableSnapshot.value.copy(isLastKnownGood = mutableSnapshot.value.config != null, safeErrorCode = code); return ConfigRefreshResult.RetainedLastKnownGood(code) }
     private fun fallbackBackoffDelayMs(attempt: Int): Long { val base = min(30_000L, 500L shl min(attempt - 1, 5)); return (base * (0.75 + fallbackBackoffJitter().coerceIn(0.0, 1.0) * 0.5)).toLong() }
     private fun scheduleRetryLocked(chatToken: String, version: Long, delayMs: Long) {
-        if (retryJob?.isActive == true) return
+        if (retryOwnershipToken != null) return
+        val token = UUID.randomUUID()
+        retryOwnershipToken = token
         retryJob = scope?.launch {
-            delay(delayMs) // Server-supplied delay is intentionally exact.
-            val stillCurrent = mutex.withLock {
-                if (version != sessionVersion) false else { retryJob = null; true }
+            try {
+                delay(delayMs) // Server-supplied delay is intentionally exact.
+                val stillCurrent = mutex.withLock {
+                    if (retryOwnershipToken != token || version != sessionVersion) {
+                        false
+                    } else {
+                        retryOwnershipToken = null
+                        retryJob = null
+                        true
+                    }
+                }
+                if (stillCurrent) refresh(chatToken, version)
+            } finally {
+                mutex.withLock {
+                    if (retryOwnershipToken == token) {
+                        retryOwnershipToken = null
+                        retryJob = null
+                    }
+                }
             }
-            if (stillCurrent) refresh(chatToken, version)
         }
+        if (retryJob == null) retryOwnershipToken = null
     }
     private fun saturatingAdd(value: Long, delay: Long): Long = if (delay > 0 && value > Long.MAX_VALUE - delay) Long.MAX_VALUE else value + delay
     private data class RequestState(val etag: String?, val version: Long)

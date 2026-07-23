@@ -34,7 +34,13 @@ internal data class StoredPushToken(
     val transportPending: Boolean = false,
 )
 
-internal data class PushAuthority(val owner: OwnerScope, val chatToken: String) {
+internal data class PushAuthority(
+    val owner: OwnerScope,
+    val chatToken: String,
+    val sessionGeneration: Long = 0,
+    val sessionId: String = "",
+    val bearerVersion: Long = 0,
+) {
     val ownerScopeId: String get() = owner.storageKey()
 }
 
@@ -72,6 +78,11 @@ internal class PushRegistry(
     private val nowMs: () -> Long = { System.currentTimeMillis() },
 ) {
     private val mutex = Mutex()
+    private var activeAuthority: PushAuthority? = null
+
+    suspend fun activateAuthority(authority: PushAuthority?) = mutex.withLock {
+        activeAuthority = authority
+    }
 
     suspend fun hasPendingUnregister(ownerScopeId: String): Boolean = mutex.withLock {
         store.load()?.let { it.ownerScopeId == ownerScopeId && it.pendingUnregister } == true
@@ -101,33 +112,53 @@ internal class PushRegistry(
         token: String,
         notificationPreference: NotificationPreference? = null,
         locale: String? = null,
-    ): PushRegistrationOutcome = mutex.withLock {
-        if (provider != PushProvider.FCM) return@withLock PushRegistrationOutcome.UnsupportedProvider
-        if (token.isBlank()) return@withLock PushRegistrationOutcome.InvalidToken
-        val active = authority ?: return@withLock PushRegistrationOutcome.NoActiveSession
-        val existing = store.load()
-        if (existing != null && existing.ownerScopeId != active.ownerScopeId) {
-            // Never overwrite User A's durable unlink intent while User B is becoming active.
-            return@withLock PushRegistrationOutcome.BlockedByRetiringOwner
+    ): PushRegistrationOutcome {
+        if (provider != PushProvider.FCM) return PushRegistrationOutcome.UnsupportedProvider
+        if (token.isBlank()) return PushRegistrationOutcome.InvalidToken
+        val active = authority ?: return PushRegistrationOutcome.NoActiveSession
+        val prerequisite = mutex.withLock {
+            val existing = store.load()
+            if (existing != null && existing.ownerScopeId != active.ownerScopeId) {
+                return@withLock PushRegistrationOutcome.BlockedByRetiringOwner
+            }
+            if (activeAuthority != active) return@withLock PushRegistrationOutcome.NoActiveSession
+            if (existing?.pendingUnregister == true) return@withLock PushRegistrationOutcome.BlockedByRetiringOwner
+            if (existing?.ownerScopeId == active.ownerScopeId && existing.token == token && existing.registered && !existing.pendingUnregister) {
+                return@withLock PushRegistrationOutcome.Registered
+            }
+            store.save(StoredPushToken(active.ownerScopeId, token, registered = false, pendingUnregister = false, retryEligibleAtMs = nowMs(), notificationPreference = notificationPreference, locale = locale, transportPending = true))
+            null
         }
-        if (existing?.pendingUnregister == true) return@withLock PushRegistrationOutcome.BlockedByRetiringOwner
-        if (existing?.ownerScopeId == active.ownerScopeId && existing.token == token && existing.registered && !existing.pendingUnregister) {
-            return@withLock PushRegistrationOutcome.Registered
-        }
-        // Persist first: a lost response must not cause a token to be forgotten or reassociated.
-        // A process death after this durable intent but before the request response must reconcile.
-        store.save(StoredPushToken(active.ownerScopeId, token, registered = false, pendingUnregister = false, retryEligibleAtMs = nowMs(), notificationPreference = notificationPreference, locale = locale, transportPending = true))
-        return@withLock try {
-            when (val result = api.register(active.chatToken, token, notificationPreference, locale)) {
-                is ApiSuccess -> {
-                    store.save(StoredPushToken(active.ownerScopeId, token, registered = true, pendingUnregister = false, notificationPreference = notificationPreference, locale = locale))
-                    PushRegistrationOutcome.Registered
+        if (prerequisite != null) return prerequisite
+        if (mutex.withLock { activeAuthority != active }) return PushRegistrationOutcome.NoActiveSession
+        return try {
+            val result = api.register(active.chatToken, token, notificationPreference, locale)
+            mutex.withLock {
+                if (activeAuthority != active) return@withLock PushRegistrationOutcome.NoActiveSession
+                val current = store.load()
+                if (current?.ownerScopeId != active.ownerScopeId ||
+                    current.token != token ||
+                    current.pendingUnregister ||
+                    current.registered
+                ) return@withLock PushRegistrationOutcome.NoActiveSession
+                when (result) {
+                    is ApiSuccess -> {
+                        store.save(current.copy(registered = true, retryDirective = null, retryEligibleAtMs = null, retryAttempt = 0, transportPending = false))
+                        PushRegistrationOutcome.Registered
+                    }
+                    is ApiFailure -> persistServerFailure(active.ownerScopeId, token, false, result.error.retry.directive, result.error.retry.retryAfterMs)
                 }
-                is ApiFailure -> persistServerFailure(active.ownerScopeId, token, false, result.error.retry.directive, result.error.retry.retryAfterMs)
             }
         } catch (_: IOException) {
-            store.save(StoredPushToken(active.ownerScopeId, token, registered = false, pendingUnregister = false, retryEligibleAtMs = nowMs() + localBackoffMs(1), retryAttempt = 1, notificationPreference = notificationPreference, locale = locale, transportPending = true))
-            PushRegistrationOutcome.QueuedForReconciliation
+            mutex.withLock {
+                if (activeAuthority != active) return@withLock PushRegistrationOutcome.NoActiveSession
+                val current = store.load()
+                if (current?.ownerScopeId != active.ownerScopeId || current.token != token ||
+                    current.pendingUnregister || current.registered
+                ) return@withLock PushRegistrationOutcome.NoActiveSession
+                store.save(current.copy(retryEligibleAtMs = nowMs() + localBackoffMs(1), retryAttempt = 1, transportPending = true))
+                PushRegistrationOutcome.QueuedForReconciliation
+            }
         } catch (_: ProtocolViolation) {
             PushRegistrationOutcome.InvalidResponse
         }
@@ -140,6 +171,7 @@ internal class PushRegistry(
             // A stale caller may never unregister a token under a different owner.
             return@withLock PushRegistrationOutcome.NoActiveSession
         }
+        if (activeAuthority == authority) activeAuthority = null
         val retiring = existing.copy(pendingUnregister = true)
         store.save(retiring)
         return@withLock try {
@@ -193,20 +225,41 @@ internal class PushRegistry(
     }
 
     /** Lifecycle may retry only the documented safe registration/backoff case; it never resumes logout. */
-    suspend fun reconcileEligible(authority: PushAuthority?): PushRegistrationOutcome = mutex.withLock {
-        val existing = store.load() ?: return@withLock PushRegistrationOutcome.NoToken
-        val active = authority ?: return@withLock PushRegistrationOutcome.NoActiveSession
-        if (existing.ownerScopeId != active.ownerScopeId || existing.pendingUnregister) return@withLock PushRegistrationOutcome.BlockedByRetiringOwner
+    suspend fun reconcileEligible(authority: PushAuthority?): PushRegistrationOutcome {
+        val active = authority ?: return PushRegistrationOutcome.NoActiveSession
+        val existing = mutex.withLock {
+            if (activeAuthority != active) return@withLock null
+            store.load()
+        } ?: return PushRegistrationOutcome.NoToken
+        if (existing.ownerScopeId != active.ownerScopeId || existing.pendingUnregister) return PushRegistrationOutcome.BlockedByRetiringOwner
         if ((existing.retryDirective != RetryDirective.AFTER_BACKOFF && !existing.transportPending) || (existing.retryEligibleAtMs ?: Long.MAX_VALUE) > nowMs()) {
-            return@withLock existing.retryDirective?.let(PushRegistrationOutcome::PendingServer) ?: PushRegistrationOutcome.NoToken
+            return existing.retryDirective?.let(PushRegistrationOutcome::PendingServer) ?: PushRegistrationOutcome.NoToken
         }
-        try {
-            when (val result = api.register(active.chatToken, existing.token, existing.notificationPreference, existing.locale)) {
-                is ApiSuccess -> { store.save(existing.copy(registered = true, retryDirective = null, retryEligibleAtMs = null, transportPending = false)); PushRegistrationOutcome.Registered }
-                is ApiFailure -> persistServerFailure(existing.ownerScopeId, existing.token, false, result.error.retry.directive, result.error.retry.retryAfterMs)
+        if (mutex.withLock { activeAuthority != active || store.load() != existing }) {
+            return PushRegistrationOutcome.NoActiveSession
+        }
+        return try {
+            val result = api.register(active.chatToken, existing.token, existing.notificationPreference, existing.locale)
+            mutex.withLock {
+                if (activeAuthority != active || store.load() != existing) return@withLock PushRegistrationOutcome.NoActiveSession
+                when (result) {
+                    is ApiSuccess -> {
+                        store.save(existing.copy(registered = true, retryDirective = null, retryEligibleAtMs = null, transportPending = false))
+                        PushRegistrationOutcome.Registered
+                    }
+                    is ApiFailure -> persistServerFailure(existing.ownerScopeId, existing.token, false, result.error.retry.directive, result.error.retry.retryAfterMs)
+                }
             }
-        } catch (_: IOException) { val attempt = existing.retryAttempt + 1; store.save(existing.copy(transportPending = true, retryEligibleAtMs = nowMs() + localBackoffMs(attempt), retryAttempt = attempt)); PushRegistrationOutcome.QueuedForReconciliation }
-        catch (_: ProtocolViolation) { PushRegistrationOutcome.InvalidResponse }
+        } catch (_: IOException) {
+            mutex.withLock {
+                if (activeAuthority != active || store.load() != existing) return@withLock PushRegistrationOutcome.NoActiveSession
+                val attempt = existing.retryAttempt + 1
+                store.save(existing.copy(transportPending = true, retryEligibleAtMs = nowMs() + localBackoffMs(attempt), retryAttempt = attempt))
+                PushRegistrationOutcome.QueuedForReconciliation
+            }
+        } catch (_: ProtocolViolation) {
+            PushRegistrationOutcome.InvalidResponse
+        }
     }
 
     private fun localBackoffMs(attempt: Int): Long = 1_000L shl (attempt - 1).coerceIn(0, 5)

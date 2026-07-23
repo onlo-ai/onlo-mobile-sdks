@@ -3,9 +3,11 @@ package ai.onlo.sdk.chat
 import ai.onlo.sdk.protocol.ConversationPageQuery
 import ai.onlo.sdk.protocol.ChatAttachment
 import ai.onlo.sdk.storage.OutboxEntry
+import ai.onlo.sdk.storage.OutboxEntryFactory
 import ai.onlo.sdk.storage.OutboxState
 import ai.onlo.sdk.storage.OwnerScope
 import ai.onlo.sdk.storage.OwnerScopedOutboxStore
+import ai.onlo.sdk.storage.PersistenceAuthority
 import ai.onlo.sdk.transport.OnloHttpRequest
 import ai.onlo.sdk.transport.OnloHttpResponse
 import ai.onlo.sdk.transport.OnloTransport
@@ -16,7 +18,10 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import okhttp3.HttpUrl.Companion.toHttpUrl
 
 class ChatSyncTest {
@@ -249,23 +254,105 @@ class ChatSyncTest {
     }
 
     @Test
-    fun `every unaccepted outcome stops FIFO before later rows`() = runBlocking {
-        val cases = listOf(
-            retryableError(),
-            nonRetryableError(),
-            OnloHttpResponse(200, emptyMap(), "data: {\"type\":\"done\",\"conversationId\":\"conversation\"}\n\n"),
-            OnloHttpResponse(200, emptyMap(), "data: {bad}\n\n"),
-        )
-        cases.forEach { response ->
-            val store = MemoryOutbox(); val owner = OwnerScope.Anonymous("owner")
-            val outbox = DurableChatOutbox(store, WidgetChatApi(FixtureTransport(listOf(response)), requests()), { 10 })
-            val first = outbox.enqueue(owner, "conversation", "first")
-            val second = outbox.enqueue(owner, "conversation", "second")
-            outbox.flush(owner, "session", "bearer")
-            assertEquals(listOf(first.clientMessageId), store.sentIds)
-            assertTrue(store.rows.first { it.clientMessageId == first.clientMessageId }.state in setOf(OutboxState.FAILED_RETRYABLE, OutboxState.FAILED_TERMINAL))
-            assertEquals(OutboxState.QUEUED, store.rows.first { it.clientMessageId == second.clientMessageId }.state)
+    fun `terminal head advances queued text in the same flush with stable ids`() = runBlocking {
+        val transport = FixtureTransport(listOf(nonRetryableError(), accepted()))
+        val store = MemoryOutbox(); val owner = OwnerScope.Anonymous("owner")
+        val outbox = DurableChatOutbox(store, WidgetChatApi(transport, requests()), { 10 })
+        val first = outbox.enqueue(owner, "conversation", "first")
+        val second = outbox.enqueue(owner, "conversation", "second")
+
+        assertEquals(null, outbox.flush(owner, "session", "bearer"))
+
+        assertEquals(listOf(first.clientMessageId, second.clientMessageId), store.sentIds)
+        assertEquals(listOf(first.clientMessageId, second.clientMessageId), transport.requests.map { requestBody(it).getString("clientMessageId") })
+        assertEquals(OutboxState.FAILED_TERMINAL, store.rows.first { it.clientMessageId == first.clientMessageId }.state)
+        assertEquals(OutboxState.ACCEPTED, store.rows.first { it.clientMessageId == second.clientMessageId }.state)
+    }
+
+    @Test
+    fun `multiple consecutive terminal heads advance one dispatcher to queued text`() = runBlocking {
+        val transport = FixtureTransport(listOf(nonRetryableError(), nonRetryableError(), accepted()))
+        val store = MemoryOutbox(); val owner = OwnerScope.Anonymous("owner")
+        val outbox = DurableChatOutbox(store, WidgetChatApi(transport, requests()), { 10 })
+        val first = outbox.enqueue(owner, "conversation", "first")
+        val second = outbox.enqueue(owner, "conversation", "second")
+        val third = outbox.enqueue(owner, "conversation", "third")
+
+        outbox.flush(owner, "session", "bearer")
+
+        assertEquals(listOf(first.clientMessageId, second.clientMessageId, third.clientMessageId), store.sentIds)
+        assertEquals(listOf(OutboxState.FAILED_TERMINAL, OutboxState.FAILED_TERMINAL, OutboxState.ACCEPTED), store.rows.map(OutboxEntry::state))
+    }
+
+    @Test
+    fun `terminal head advances to retryable head which still blocks later queued work`() = runBlocking {
+        val transport = FixtureTransport(listOf(nonRetryableError(), retryableError()))
+        val store = MemoryOutbox(); val owner = OwnerScope.Anonymous("owner")
+        val outbox = DurableChatOutbox(store, WidgetChatApi(transport, requests()), { 10 })
+        val first = outbox.enqueue(owner, "conversation", "first")
+        val second = outbox.enqueue(owner, "conversation", "second")
+        val third = outbox.enqueue(owner, "conversation", "third")
+
+        val retryAt = outbox.flush(owner, "session", "bearer")
+
+        assertEquals(store.rows.first { it.clientMessageId == second.clientMessageId }.nextAttemptAtMs, retryAt)
+        assertEquals(listOf(first.clientMessageId, second.clientMessageId), store.sentIds)
+        assertEquals(OutboxState.FAILED_TERMINAL, store.rows.first { it.clientMessageId == first.clientMessageId }.state)
+        assertEquals(OutboxState.FAILED_RETRYABLE, store.rows.first { it.clientMessageId == second.clientMessageId }.state)
+        assertEquals(OutboxState.QUEUED, store.rows.first { it.clientMessageId == third.clientMessageId }.state)
+    }
+
+    @Test
+    fun `terminal advancement never makes accepted rows sendable again`() = runBlocking {
+        val transport = FixtureTransport(listOf(nonRetryableError(), accepted()))
+        val store = MemoryOutbox(); val owner = OwnerScope.Anonymous("owner")
+        val outbox = DurableChatOutbox(store, WidgetChatApi(transport, requests()), { 10 })
+        val first = outbox.enqueue(owner, "conversation", "first")
+        val accepted = outbox.enqueue(owner, "conversation", "already accepted")
+        val third = outbox.enqueue(owner, "conversation", "third")
+        store.rows.replaceAll {
+            if (it.clientMessageId == accepted.clientMessageId) {
+                it.copy(state = OutboxState.ACCEPTED, serverMessageId = "server-accepted", serverConversationId = "conversation")
+            } else {
+                it
+            }
         }
+
+        outbox.flush(owner, "session", "bearer")
+        outbox.flush(owner, "session", "bearer")
+
+        assertEquals(listOf(first.clientMessageId, third.clientMessageId), store.sentIds)
+        assertTrue(accepted.clientMessageId !in transport.requests.map { requestBody(it).getString("clientMessageId") })
+        assertEquals(OutboxState.ACCEPTED, store.rows.first { it.clientMessageId == accepted.clientMessageId }.state)
+    }
+
+    @Test
+    fun `authority and sending claim atomically reject stale failure after acceptance or replacement`() = runBlocking {
+        val store = MemoryOutbox()
+        val owner = OwnerScope.Anonymous("owner")
+        val old = PersistenceAuthority(owner, 1, "session-1", "bearer-1")
+        val replacement = PersistenceAuthority(owner, 2, "session-2", "bearer-2")
+        store.activateAuthority(old)
+        val accepted = OutboxEntryFactory.create(owner, "conversation", "first", emptyList(), 1)
+        store.enqueue(accepted)
+        assertTrue(store.markSendingIfAuthorised(old, accepted.clientMessageId))
+        assertTrue(store.markAcceptedIfSending(old, accepted.clientMessageId, 1, "server", "conversation"))
+        assertEquals(
+            false,
+            store.markRetryableFailureIfSending(old, accepted.clientMessageId, 1, "late_failure", 10),
+        )
+        assertEquals(OutboxState.ACCEPTED, store.rows.single().state)
+
+        val replacementRow = OutboxEntryFactory.create(owner, "conversation", "second", emptyList(), 2)
+        store.enqueue(replacementRow)
+        store.revokeAuthority(owner)
+        store.activateAuthority(replacement)
+        assertTrue(store.markSendingIfAuthorised(replacement, replacementRow.clientMessageId))
+        assertEquals(
+            false,
+            store.markTerminalFailureIfSending(old, replacementRow.clientMessageId, 1, "stale_dispatcher"),
+        )
+        assertEquals(OutboxState.SENDING, store.rows.last().state)
     }
 
     @Test
@@ -298,6 +385,33 @@ class ChatSyncTest {
     }
 
     @Test
+    fun `same conversation transcript observations are serialized before transport`() = runBlocking {
+        val owner = OwnerScope.Anonymous("serialized-owner")
+        val store = MemoryOutbox()
+        val transport = SerialTranscriptTransport()
+        val convergence = TranscriptConvergence(WidgetChatApi(transport, requests()), store)
+
+        val first = async {
+            convergence.fetchAfterFullSync(owner, "fixture-bearer", "conversation", null, "fixture-session")
+        }
+        transport.firstStarted.await()
+        val second = async {
+            convergence.fetchAfterFullSync(owner, "fixture-bearer", "conversation", null, "fixture-session")
+        }
+        yield()
+        assertEquals(false, transport.secondStarted.isCompleted)
+        transport.releaseFirst.complete(Unit)
+        first.await()
+        transport.secondStarted.await()
+        transport.releaseSecond.complete(Unit)
+        second.await()
+
+        val persisted = checkNotNull(store.transcript(owner, "conversation"))
+        assertTrue(persisted.contains("\"id\":\"older-message\""))
+        assertTrue(persisted.contains("\"id\":\"newer-message\""))
+    }
+
+    @Test
     fun `malformed persisted transcript is rejected before sync`() = runBlocking {
         val store = MemoryOutbox(); val owner = OwnerScope.Anonymous("owner")
         store.replaceTranscript(owner, "conversation", "not-json")
@@ -315,16 +429,26 @@ class ChatSyncTest {
     }
 
     @Test
-    fun `cross session transcript is rejected before it can be persisted`() = runBlocking {
+    fun `historical session transcript is accepted for the current owner`() = runBlocking {
         val store = MemoryOutbox(); val owner = OwnerScope.Anonymous("owner")
         val convergence = TranscriptConvergence(WidgetChatApi(FixtureTransport(listOf(transcript())), requests()), store)
 
-        try {
-            convergence.fetchAfterFullSync(owner, "fixture-bearer", "conversation", null, "different-session")
-            error("expected protocol violation")
-        } catch (_: ai.onlo.sdk.protocol.ProtocolViolation) {
+        val result = convergence.fetchAfterFullSync(owner, "fixture-bearer", "conversation", null, "different-session")
+
+        assertEquals("fixture-session", result.sessionId)
+        assertEquals(true, checkNotNull(store.transcript(owner, "conversation")).contains("\"sessionId\":\"fixture-session\""))
+    }
+
+    @Test
+    fun `blank persisted transcript session id is rejected`() = runBlocking {
+        val store = MemoryOutbox(); val owner = OwnerScope.Anonymous("owner")
+        store.replaceTranscript(owner, "conversation", "{\"id\":\"conversation\",\"sessionId\":\"\",\"status\":\"open\",\"isHumanTakeover\":false,\"previousCursor\":null,\"nextCursor\":null,\"limit\":100,\"messages\":[]}")
+
+        assertFailsWith<ai.onlo.sdk.protocol.ProtocolViolation> {
+            TranscriptConvergence(WidgetChatApi(FixtureTransport(emptyList()), requests()), store)
+                .fetchAfterFullSync(owner, "fixture-bearer", "conversation", null, "fixture-session")
         }
-        assertEquals(null, store.transcript(owner, "conversation"))
+        Unit
     }
 
     @Test
@@ -369,14 +493,24 @@ class ChatSyncTest {
     }
 
     @Test
-    fun `cross session inbox entry is rejected as unauthorised`() = runBlocking {
+    fun `historical session inbox entry is accepted for the current owner`() = runBlocking {
         val response = OnloHttpResponse(200, emptyMap(), "{\"conversations\":[{\"id\":\"conversation\",\"sessionId\":\"different-session\",\"title\":\"[redacted]\",\"unread\":false,\"unreadCount\":0,\"status\":\"open\",\"updatedAt\":\"2026-01-01T00:00:00Z\",\"messageCount\":0,\"lastMessageRole\":null}],\"totalUnreadCount\":0}")
         val api = WidgetChatApi(FixtureTransport(listOf(response)), requests())
-        try {
+
+        val result = api.conversations("fixture-bearer", "fixture-session")
+
+        assertEquals("different-session", result.conversations.single().sessionId)
+    }
+
+    @Test
+    fun `blank inbox session id is rejected`() = runBlocking {
+        val response = OnloHttpResponse(200, emptyMap(), "{\"conversations\":[{\"id\":\"conversation\",\"sessionId\":\"\",\"title\":\"[redacted]\",\"unread\":false,\"unreadCount\":0,\"status\":\"open\",\"updatedAt\":\"2026-01-01T00:00:00Z\",\"messageCount\":0,\"lastMessageRole\":null}],\"totalUnreadCount\":0}")
+        val api = WidgetChatApi(FixtureTransport(listOf(response)), requests())
+
+        assertFailsWith<ai.onlo.sdk.protocol.ProtocolViolation> {
             api.conversations("fixture-bearer", "fixture-session")
-            error("expected protocol violation")
-        } catch (_: ai.onlo.sdk.protocol.ProtocolViolation) {
         }
+        Unit
     }
 
     @Test
@@ -429,6 +563,33 @@ class ChatSyncTest {
         }
     }
 
+    private class SerialTranscriptTransport : OnloTransport {
+        val firstStarted = CompletableDeferred<Unit>()
+        val secondStarted = CompletableDeferred<Unit>()
+        val releaseFirst = CompletableDeferred<Unit>()
+        val releaseSecond = CompletableDeferred<Unit>()
+        private var calls = 0
+
+        override suspend fun execute(request: OnloHttpRequest): OnloHttpResponse {
+            calls += 1
+            return if (calls == 1) {
+                firstStarted.complete(Unit)
+                releaseFirst.await()
+                transcript("older-message", 1)
+            } else {
+                secondStarted.complete(Unit)
+                releaseSecond.await()
+                transcript("newer-message", 2)
+            }
+        }
+
+        private fun transcript(messageId: String, timestamp: Long) = OnloHttpResponse(
+            200,
+            emptyMap(),
+            """{"conversation":{"id":"conversation","sessionId":"fixture-session","status":"open","isHumanTakeover":false},"messages":[{"id":"$messageId","externalId":null,"role":"assistant","senderType":null,"senderName":null,"senderTeam":null,"text":"fixture","attachments":[],"timestamp":$timestamp}],"sync":{"previousCursor":null,"nextCursor":null,"limit":100}}""",
+        )
+    }
+
     private class ThrowingAfterResponseTransport(
         private val response: OnloHttpResponse,
         private val failure: java.io.IOException,
@@ -450,6 +611,7 @@ class ChatSyncTest {
         var acceptedId: String? = null
         val sentIds = mutableListOf<String>()
         private val transcripts = mutableMapOf<String, MutableMap<String, String>>()
+        private var activeAuthority: PersistenceAuthority? = null
         override suspend fun enqueue(entry: OutboxEntry) {
             val nextOrderingKey = (rows.filter { it.ownerScope == entry.ownerScope }.maxOfOrNull(OutboxEntry::orderingKey) ?: 0L) + 1L
             rows += entry.copy(orderingKey = nextOrderingKey)
@@ -483,5 +645,90 @@ class ChatSyncTest {
         override suspend fun clearAll() { transcripts.clear() }
         override suspend fun replaceTranscript(ownerScope: OwnerScope, conversationId: String, payload: String) { transcripts.getOrPut(ownerScope.storageKey()) { mutableMapOf() }[conversationId] = payload }
         override suspend fun transcript(ownerScope: OwnerScope, conversationId: String): String? = transcripts[ownerScope.storageKey()]?.get(conversationId)
+        override suspend fun activateAuthority(authority: PersistenceAuthority) {
+            activeAuthority = authority
+        }
+        override suspend fun revokeAuthority(ownerScope: OwnerScope) {
+            if (activeAuthority?.ownerScope == ownerScope) activeAuthority = null
+        }
+        override suspend fun markSendingIfAuthorised(
+            authority: PersistenceAuthority,
+            clientMessageId: String,
+        ): Boolean = activeAuthority == authority &&
+            markSending(authority.ownerScope, clientMessageId)
+        override suspend fun markAcceptedIfSending(
+            authority: PersistenceAuthority,
+            clientMessageId: String,
+            expectedAttemptCount: Int,
+            serverMessageId: String,
+            conversationId: String,
+        ): Boolean {
+            if (activeAuthority != authority) return false
+            val current = rows.singleOrNull {
+                it.ownerScope == authority.ownerScope &&
+                    it.clientMessageId == clientMessageId &&
+                    it.state == OutboxState.SENDING &&
+                    it.attemptCount == expectedAttemptCount
+            } ?: return false
+            rows.replaceAll {
+                if (it === current) it.copy(
+                    state = OutboxState.ACCEPTED,
+                    serverMessageId = serverMessageId,
+                    serverConversationId = conversationId,
+                ) else it
+            }
+            return true
+        }
+        override suspend fun markRetryableFailureIfSending(
+            authority: PersistenceAuthority,
+            clientMessageId: String,
+            expectedAttemptCount: Int,
+            errorCode: String,
+            nextAttemptAtMs: Long,
+        ): Boolean = updateFailureClaim(
+            authority,
+            clientMessageId,
+            expectedAttemptCount,
+            OutboxState.FAILED_RETRYABLE,
+            errorCode,
+            nextAttemptAtMs,
+        )
+        override suspend fun markTerminalFailureIfSending(
+            authority: PersistenceAuthority,
+            clientMessageId: String,
+            expectedAttemptCount: Int,
+            errorCode: String,
+        ): Boolean = updateFailureClaim(
+            authority,
+            clientMessageId,
+            expectedAttemptCount,
+            OutboxState.FAILED_TERMINAL,
+            errorCode,
+            null,
+        )
+        private fun updateFailureClaim(
+            authority: PersistenceAuthority,
+            clientMessageId: String,
+            expectedAttemptCount: Int,
+            state: OutboxState,
+            errorCode: String,
+            nextAttemptAtMs: Long?,
+        ): Boolean {
+            if (activeAuthority != authority) return false
+            val current = rows.singleOrNull {
+                it.ownerScope == authority.ownerScope &&
+                    it.clientMessageId == clientMessageId &&
+                    it.state == OutboxState.SENDING &&
+                    it.attemptCount == expectedAttemptCount
+            } ?: return false
+            rows.replaceAll {
+                if (it === current) it.copy(
+                    state = state,
+                    lastErrorCode = errorCode,
+                    nextAttemptAtMs = nextAttemptAtMs,
+                ) else it
+            }
+            return true
+        }
     }
 }

@@ -9,6 +9,8 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 
@@ -16,6 +18,8 @@ import org.json.JSONArray
 internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
     private val helper = Database(context.applicationContext)
     private val payloadCipher = KeystorePayloadCipher()
+    private val authorityMutex = Mutex()
+    private var activeAuthority: PersistenceAuthority? = null
 
     override suspend fun enqueue(entry: OutboxEntry): Unit = onDatabase { database ->
         ensureUnblocked(database, entry.ownerScope)
@@ -51,7 +55,8 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
                 "ordering_key ASC, client_message_id ASC",
                 limit.toString(),
             ).useCursor { cursor -> buildList { while (cursor.moveToNext()) add(cursor.toEntry()) } }
-        } catch (_: Exception) {
+        } catch (failure: Exception) {
+            if (!isDefinitivelyUnreadable(failure)) throw failure
             // A key invalidation or malformed ciphertext means no identified payload can be
             // trusted. Remove encrypted payloads but retain blocked-owner authorization markers.
             purgeUnreadableOutbox(it)
@@ -99,6 +104,13 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
         }
     }
 
+    override suspend fun markSendingIfAuthorised(
+        authority: PersistenceAuthority,
+        clientMessageId: String,
+    ): Boolean = authorityMutex.withLock {
+        activeAuthority == authority && markSending(authority.ownerScope, clientMessageId)
+    }
+
     override suspend fun markAccepted(ownerScope: OwnerScope, clientMessageId: String, serverMessageId: String, conversationId: String): Boolean = onDatabase {
         ensureUnblocked(it, ownerScope)
         it.update(
@@ -113,6 +125,36 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
             "owner_scope = ? AND client_message_id = ? AND state = ?",
             arrayOf(ownerScope.storageKey(), clientMessageId, OutboxState.SENDING.name),
         ) == 1
+    }
+
+    override suspend fun markAcceptedIfSending(
+        authority: PersistenceAuthority,
+        clientMessageId: String,
+        expectedAttemptCount: Int,
+        serverMessageId: String,
+        conversationId: String,
+    ): Boolean = authorityMutex.withLock {
+        if (activeAuthority != authority) return@withLock false
+        onDatabase {
+            ensureUnblocked(it, authority.ownerScope)
+            it.update(
+                OUTBOX_TABLE,
+                ContentValues().apply {
+                    put("state", OutboxState.ACCEPTED.name)
+                    put("server_message_id_ciphertext", payloadCipher.encrypt(serverMessageId))
+                    put("server_conversation_id_ciphertext", payloadCipher.encrypt(conversationId))
+                    putNull("last_error_code")
+                    putNull("next_attempt_at_ms")
+                },
+                "owner_scope = ? AND client_message_id = ? AND state = ? AND attempt_count = ?",
+                arrayOf(
+                    authority.ownerScope.storageKey(),
+                    clientMessageId,
+                    OutboxState.SENDING.name,
+                    expectedAttemptCount.toString(),
+                ),
+            ) == 1
+        }
     }
 
     override suspend fun acceptedAwaitingReconciliation(ownerScope: OwnerScope): List<OutboxEntry> = onDatabase {
@@ -134,34 +176,97 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
         ContentValues().apply { put("state", OutboxState.RECONCILED.name) },
     )
 
+    override suspend fun markReconciledIfAccepted(
+        authority: PersistenceAuthority,
+        clientMessageId: String,
+        expectedAttemptCount: Int,
+    ): Boolean = authorityMutex.withLock {
+        if (activeAuthority != authority) return@withLock false
+        onDatabase {
+            ensureUnblocked(it, authority.ownerScope)
+            it.update(
+                OUTBOX_TABLE,
+                ContentValues().apply { put("state", OutboxState.RECONCILED.name) },
+                "owner_scope = ? AND client_message_id = ? AND state = ? AND attempt_count = ?",
+                arrayOf(
+                    authority.ownerScope.storageKey(),
+                    clientMessageId,
+                    OutboxState.ACCEPTED.name,
+                    expectedAttemptCount.toString(),
+                ),
+            ) == 1
+        }
+    }
+
     override suspend fun markRetryableFailure(
         ownerScope: OwnerScope,
         clientMessageId: String,
         errorCode: String,
         nextAttemptAtMs: Long,
-    ): Unit = update(
-        ownerScope = ownerScope,
-        clientMessageId = clientMessageId,
-        values = ContentValues().apply {
+    ): Unit {
+        updateSending(
+            ownerScope,
+            clientMessageId,
+            values = ContentValues().apply {
             put("state", OutboxState.FAILED_RETRYABLE.name)
             put("last_error_code", errorCode)
             put("next_attempt_at_ms", nextAttemptAtMs)
-        },
-    )
+            },
+        )
+    }
 
     override suspend fun markTerminalFailure(
         ownerScope: OwnerScope,
         clientMessageId: String,
         errorCode: String,
-    ): Unit = update(
-        ownerScope = ownerScope,
-        clientMessageId = clientMessageId,
-        values = ContentValues().apply {
+    ): Unit {
+        updateSending(
+            ownerScope,
+            clientMessageId,
+            values = ContentValues().apply {
             put("state", OutboxState.FAILED_TERMINAL.name)
             put("last_error_code", errorCode)
             putNull("next_attempt_at_ms")
-        },
-    )
+            },
+        )
+    }
+
+    override suspend fun markRetryableFailureIfSending(
+        authority: PersistenceAuthority,
+        clientMessageId: String,
+        expectedAttemptCount: Int,
+        errorCode: String,
+        nextAttemptAtMs: Long,
+    ): Boolean = authorityMutex.withLock {
+        activeAuthority == authority && updateSending(
+            authority.ownerScope,
+            clientMessageId,
+            expectedAttemptCount,
+            ContentValues().apply {
+                put("state", OutboxState.FAILED_RETRYABLE.name)
+                put("last_error_code", errorCode)
+                put("next_attempt_at_ms", nextAttemptAtMs)
+            },
+        )
+    }
+
+    override suspend fun markTerminalFailureIfSending(
+        authority: PersistenceAuthority,
+        clientMessageId: String,
+        expectedAttemptCount: Int,
+        errorCode: String,
+    ): Boolean = authorityMutex.withLock {
+        activeAuthority == authority && updateSending(
+            authority.ownerScope,
+            clientMessageId,
+            expectedAttemptCount,
+            ContentValues().apply {
+                put("state", OutboxState.FAILED_TERMINAL.name)
+                put("last_error_code", errorCode)
+                putNull("next_attempt_at_ms")
+            },
+        )
+    }
 
     override suspend fun recoverInterruptedSends(ownerScope: OwnerScope, nowMs: Long): Unit = onDatabase {
         ensureUnblocked(it, ownerScope)
@@ -175,6 +280,15 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
             "owner_scope = ? AND state = ?",
             arrayOf(ownerScope.storageKey(), OutboxState.SENDING.name),
         )
+    }
+
+    override suspend fun recoverInterruptedSendsIfAuthorised(
+        authority: PersistenceAuthority,
+        nowMs: Long,
+    ): Boolean = authorityMutex.withLock {
+        if (activeAuthority != authority) return@withLock false
+        recoverInterruptedSends(authority.ownerScope, nowMs)
+        true
     }
 
     override suspend fun blockOwner(ownerScope: OwnerScope): Unit = onDatabase {
@@ -238,15 +352,18 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
         }
     }
 
-    override suspend fun clearAll(): Unit = onDatabase {
-        it.beginTransaction()
-        try {
-            it.delete(OUTBOX_TABLE, null, null)
-            it.delete(OWNER_ACCESS_TABLE, null, null)
-            it.delete(TRANSCRIPT_TABLE, null, null)
-            it.setTransactionSuccessful()
-        } finally {
-            it.endTransaction()
+    override suspend fun clearAll(): Unit = authorityMutex.withLock {
+        activeAuthority = null
+        onDatabase {
+            it.beginTransaction()
+            try {
+                it.delete(OUTBOX_TABLE, null, null)
+                it.delete(OWNER_ACCESS_TABLE, null, null)
+                it.delete(TRANSCRIPT_TABLE, null, null)
+                it.setTransactionSuccessful()
+            } finally {
+                it.endTransaction()
+            }
         }
     }
 
@@ -255,7 +372,13 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
         var unreadable = false
         it.beginTransaction()
         try {
-            val values = try { loadTranscriptMap(it, ownerScope) } catch (_: Exception) { unreadable = true; org.json.JSONObject() }.apply { put(conversationId, payload) }
+            val values = try {
+                loadTranscriptMap(it, ownerScope)
+            } catch (failure: Exception) {
+                if (!isDefinitivelyUnreadable(failure)) throw failure
+                unreadable = true
+                org.json.JSONObject()
+            }.apply { put(conversationId, payload) }
             if (!unreadable) {
                 it.insertWithOnConflict(TRANSCRIPT_TABLE, null, ContentValues().apply {
                     put("owner_scope", ownerScope.storageKey()); put("payload_ciphertext", payloadCipher.encrypt(values.toString()))
@@ -268,14 +391,109 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
             throw TranscriptStorageUnreadableException()
         }
     }
+
+    override suspend fun activateAuthority(authority: PersistenceAuthority) {
+        authorityMutex.withLock { activeAuthority = authority }
+    }
+
+    override suspend fun revokeAuthority(ownerScope: OwnerScope) {
+        authorityMutex.withLock {
+            if (activeAuthority?.ownerScope == ownerScope) activeAuthority = null
+        }
+    }
+
+    override suspend fun replaceTranscriptIfAuthorised(
+        authority: PersistenceAuthority,
+        conversationId: String,
+        payload: String,
+    ): Boolean = authorityMutex.withLock {
+        if (activeAuthority != authority) return@withLock false
+        replaceTranscript(authority.ownerScope, conversationId, payload)
+        true
+    }
+
+    override suspend fun reconcileAcceptedIfAuthorised(
+        authority: PersistenceAuthority,
+        clientMessageId: String,
+        expectedServerMessageId: String,
+        conversationId: String,
+        payload: String,
+    ): Boolean = authorityMutex.withLock {
+        if (activeAuthority != authority) return@withLock false
+        onDatabase { database ->
+            ensureUnblocked(database, authority.ownerScope)
+            database.beginTransaction()
+            try {
+                val encryptedServerMessageId = database.query(
+                    OUTBOX_TABLE,
+                    arrayOf("server_message_id_ciphertext"),
+                    "owner_scope = ? AND client_message_id = ? AND state = ?",
+                    arrayOf(
+                        authority.ownerScope.storageKey(),
+                        clientMessageId,
+                        OutboxState.ACCEPTED.name,
+                    ),
+                    null,
+                    null,
+                    null,
+                ).useCursor { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+                if (encryptedServerMessageId == null ||
+                    payloadCipher.decrypt(encryptedServerMessageId) != expectedServerMessageId
+                ) return@onDatabase false
+                val values = loadTranscriptMap(database, authority.ownerScope).apply {
+                    put(conversationId, payload)
+                }
+                database.insertWithOnConflict(
+                    TRANSCRIPT_TABLE,
+                    null,
+                    ContentValues().apply {
+                        put("owner_scope", authority.ownerScope.storageKey())
+                        put("payload_ciphertext", payloadCipher.encrypt(values.toString()))
+                    },
+                    SQLiteDatabase.CONFLICT_REPLACE,
+                )
+                val changed = database.update(
+                    OUTBOX_TABLE,
+                    ContentValues().apply { put("state", OutboxState.RECONCILED.name) },
+                    "owner_scope = ? AND client_message_id = ? AND state = ?",
+                    arrayOf(
+                        authority.ownerScope.storageKey(),
+                        clientMessageId,
+                        OutboxState.ACCEPTED.name,
+                    ),
+                ) == 1
+                if (changed) database.setTransactionSuccessful()
+                changed
+            } finally {
+                database.endTransaction()
+            }
+        }
+    }
     override suspend fun transcript(ownerScope: OwnerScope, conversationId: String): String? = onDatabase {
         ensureUnblocked(it, ownerScope)
-        try { loadTranscriptMap(it, ownerScope).optString(conversationId).takeUnless { it.isEmpty() || it == "null" } } catch (_: Exception) { purgeUnreadableOutbox(it); throw TranscriptStorageUnreadableException() }
+        try {
+            loadTranscriptMap(it, ownerScope).optString(conversationId).takeUnless { value ->
+                value.isEmpty() || value == "null"
+            }
+        } catch (failure: Exception) {
+            if (!isDefinitivelyUnreadable(failure)) throw failure
+            purgeUnreadableOutbox(it)
+            throw TranscriptStorageUnreadableException()
+        }
     }
 
     private fun loadTranscriptMap(database: SQLiteDatabase, ownerScope: OwnerScope): org.json.JSONObject = database.query(
         TRANSCRIPT_TABLE, arrayOf("payload_ciphertext"), "owner_scope = ?", arrayOf(ownerScope.storageKey()), null, null, null,
     ).useCursor { cursor -> if (cursor.moveToFirst()) org.json.JSONObject(payloadCipher.decrypt(cursor.getString(0))) else org.json.JSONObject() }
+
+    private fun isDefinitivelyUnreadable(failure: Exception): Boolean =
+        failure is IllegalArgumentException ||
+            failure is org.json.JSONException ||
+            failure is javax.crypto.AEADBadTagException ||
+            failure is javax.crypto.BadPaddingException ||
+            failure is javax.crypto.IllegalBlockSizeException ||
+            failure is android.security.keystore.KeyPermanentlyInvalidatedException ||
+            failure is ai.onlo.sdk.protocol.ProtocolViolation
 
     private suspend fun update(ownerScope: OwnerScope, clientMessageId: String, values: ContentValues) {
         onDatabase {
@@ -289,6 +507,32 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
             check(changed == 1) { "outbox_missing" }
         }
     }
+
+    /** Failure completion may never downgrade an acknowledgement persisted by a replacement callback. */
+    private suspend fun updateSending(
+        ownerScope: OwnerScope,
+        clientMessageId: String,
+        expectedAttemptCount: Int? = null,
+        values: ContentValues,
+    ): Boolean = onDatabase {
+            ensureUnblocked(it, ownerScope)
+            val where = if (expectedAttemptCount == null) {
+                "owner_scope = ? AND client_message_id = ? AND state = ?"
+            } else {
+                "owner_scope = ? AND client_message_id = ? AND state = ? AND attempt_count = ?"
+            }
+            val arguments = if (expectedAttemptCount == null) {
+                arrayOf(ownerScope.storageKey(), clientMessageId, OutboxState.SENDING.name)
+            } else {
+                arrayOf(ownerScope.storageKey(), clientMessageId, OutboxState.SENDING.name, expectedAttemptCount.toString())
+            }
+            it.update(
+                OUTBOX_TABLE,
+                values,
+                where,
+                arguments,
+            ) == 1
+        }
 
     private suspend fun <T> onDatabase(block: (SQLiteDatabase) -> T): T = withContext(Dispatchers.IO) {
         block(helper.writableDatabase)

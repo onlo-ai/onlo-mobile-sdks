@@ -16,6 +16,7 @@ import ai.onlo.sdk.security.ProtectedSession
 import ai.onlo.sdk.security.ProtectedSessionState
 import ai.onlo.sdk.storage.OutboxEntry
 import ai.onlo.sdk.storage.OutboxEntryFactory
+import ai.onlo.sdk.storage.OutboxState
 import ai.onlo.sdk.storage.OwnerBlockedException
 import ai.onlo.sdk.storage.OwnerScope
 import ai.onlo.sdk.storage.OwnerScopedOutboxStore
@@ -41,10 +42,12 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okio.Buffer
 
@@ -469,6 +472,77 @@ class OnloClientLifecycleTest {
     }
 
     @Test
+    fun `restored dispatcher terminalizes interrupted head and sends queued text without replacement`() = runBlocking {
+        val stored = protectedAnonymous()
+        val owner = OwnerScope.Anonymous(stored.ownerScopeId)
+        val first = OutboxEntryFactory.create(owner, "local", "first", emptyList(), 1).copy(
+            orderingKey = 1,
+            state = OutboxState.SENDING,
+            attemptCount = 1,
+        )
+        val second = OutboxEntryFactory.create(owner, "local", "second", emptyList(), 2).copy(orderingKey = 2)
+        val outbox = SchedulingOutbox().apply { rows += listOf(first, second) }
+        val transport = RestoredTerminalTransport()
+        val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
+        val client = OnloClient(
+            configuration = OnloConfiguration("public-sdk-key", "ai.onlo.fixture"),
+            credentialStore = FakeCredentials(stored),
+            outboxStore = outbox,
+            sessionApi = OnloSessionApi(transport, requests),
+            widgetChatApi = WidgetChatApi(transport, requests),
+            logger = SafeLogger { _: SafeLogEvent -> },
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            acceptedReconciliationDelayMs = 0,
+        )
+
+        client.loginUnidentifiedUser()
+        transport.twoChatRequests.await()
+
+        assertEquals(listOf(first.clientMessageId, second.clientMessageId), transport.chatClientMessageIds)
+        assertEquals(listOf(first.clientMessageId, second.clientMessageId), outbox.sentIds)
+        assertEquals(1, transport.maximumConcurrentChatRequests)
+        assertEquals(OutboxState.FAILED_TERMINAL, outbox.rows.first { it.clientMessageId == first.clientMessageId }.state)
+        assertTrue(outbox.rows.first { it.clientMessageId == second.clientMessageId }.state in setOf(OutboxState.ACCEPTED, OutboxState.RECONCILED))
+    }
+
+    @Test
+    fun `logout while terminal persistence is suspended revokes dispatcher before queued text`() = runBlocking {
+        val stored = protectedAnonymous()
+        val owner = OwnerScope.Anonymous(stored.ownerScopeId)
+        val first = OutboxEntryFactory.create(owner, "local", "first", emptyList(), 1).copy(
+            orderingKey = 1,
+            state = OutboxState.SENDING,
+            attemptCount = 1,
+        )
+        val second = OutboxEntryFactory.create(owner, "local", "second", emptyList(), 2).copy(orderingKey = 2)
+        val outbox = SchedulingOutbox(pauseAfterTerminalPersistence = true).apply {
+            rows += listOf(first, second)
+        }
+        val transport = RestoredTerminalTransport()
+        val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
+        val client = OnloClient(
+            configuration = OnloConfiguration("public-sdk-key", "ai.onlo.fixture"),
+            credentialStore = FakeCredentials(stored),
+            outboxStore = outbox,
+            sessionApi = OnloSessionApi(transport, requests),
+            widgetChatApi = WidgetChatApi(transport, requests),
+            logger = SafeLogger { _: SafeLogEvent -> },
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            acceptedReconciliationDelayMs = 0,
+        )
+
+        client.loginUnidentifiedUser()
+        outbox.terminalPersisted.await()
+        val outcome = client.logout()
+        outbox.resumeTerminalPersistence()
+
+        assertEquals(LogoutOutcome.Completed, outcome)
+        assertEquals(listOf(first.clientMessageId), transport.chatClientMessageIds)
+        assertEquals(1, transport.maximumConcurrentChatRequests)
+        assertTrue(second.clientMessageId !in transport.chatClientMessageIds)
+    }
+
+    @Test
     fun `same owner restoration reconciles accepted row without resending`() = runBlocking {
         val stored = protectedAnonymous()
         val owner = OwnerScope.Anonymous(stored.ownerScopeId)
@@ -792,6 +866,68 @@ class OnloClientLifecycleTest {
         assertEquals(MessengerPresentationIntent.HIDDEN, client.presentationIntent.value)
     }
 
+    @Test
+    fun `older inbox response cannot overwrite a newer observation`() = runBlocking {
+        val credentials = FakeCredentials().apply {
+            state = ProtectedSessionState(protectedIdentified(), null)
+        }
+        val transport = OutOfOrderConversationTransport()
+        val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
+        val client = client(
+            credentials,
+            FakeOutbox(),
+            transport = transport,
+            widgetChatApi = WidgetChatApi(transport, requests),
+        )
+        client.startRestoration()
+        assertEquals(OnloPhase.IDENTIFIED_READY, client.state.value.phase)
+
+        val older = async { client.loadMessengerInbox() }
+        transport.firstListStarted.await()
+        val newer = async { client.loadMessengerInbox() }
+        transport.secondListStarted.await()
+        transport.releaseSecondList.complete(Unit)
+        val newerResult = newer.await() as MessengerInboxResult.Ready
+        transport.releaseFirstList.complete(Unit)
+        val olderResult = older.await() as MessengerInboxResult.Ready
+
+        assertEquals("newer", newerResult.conversations.single().title)
+        assertEquals(newerResult.conversations, olderResult.conversations)
+        assertEquals(0, client.unreadCount.value)
+    }
+
+    @Test
+    fun `successful read acknowledgement fences an older inbox response`() = runBlocking {
+        val credentials = FakeCredentials().apply {
+            state = ProtectedSessionState(protectedIdentified(), null)
+        }
+        val transport = OutOfOrderConversationTransport()
+        val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
+        val client = client(
+            credentials,
+            FakeOutbox(),
+            transport = transport,
+            widgetChatApi = WidgetChatApi(transport, requests),
+        )
+        client.startRestoration()
+        assertEquals(OnloPhase.IDENTIFIED_READY, client.state.value.phase)
+
+        val staleInbox = async { client.loadMessengerInbox() }
+        transport.firstListStarted.await()
+        val acknowledgement = async {
+            client.acknowledgeRenderedConversation("conversation-1", "message-1")
+        }
+        transport.secondListStarted.await()
+        transport.releaseSecondList.complete(Unit)
+        acknowledgement.await()
+        transport.releaseFirstList.complete(Unit)
+        val staleResult = staleInbox.await() as MessengerInboxResult.Ready
+
+        assertEquals("newer", staleResult.conversations.single().title)
+        assertEquals(0, client.unreadCount.value)
+        assertEquals(1, transport.readRequests)
+    }
+
     private fun client(
         credentials: FakeCredentials,
         outbox: FakeOutbox,
@@ -801,6 +937,7 @@ class OnloClientLifecycleTest {
         nowMs: () -> Long = { 1_000L },
         fallbackBackoffJitter: () -> Double = { 0.0 },
         configController: MobileConfigController? = null,
+        widgetChatApi: WidgetChatApi? = null,
     ): OnloClient = OnloClient(
         configuration = OnloConfiguration("public-sdk-key", "ai.onlo.fixture"),
         credentialStore = credentials,
@@ -812,6 +949,7 @@ class OnloClientLifecycleTest {
         logger = SafeLogger { _: SafeLogEvent -> },
         scope = CoroutineScope(Dispatchers.Unconfined),
         configController = configController,
+        widgetChatApi = widgetChatApi,
         nowMs = nowMs,
         fallbackBackoffJitter = fallbackBackoffJitter,
     )
@@ -874,16 +1012,22 @@ class OnloClientLifecycleTest {
         override suspend fun transcript(ownerScope: OwnerScope, conversationId: String): String? = null
     }
 
-    private class SchedulingOutbox : OwnerScopedOutboxStore {
+    private class SchedulingOutbox(
+        private val pauseAfterTerminalPersistence: Boolean = false,
+    ) : OwnerScopedOutboxStore {
         val rows = mutableListOf<OutboxEntry>()
         val sentIds = mutableListOf<String>()
         val reconciled = CompletableDeferred<String>()
+        val terminalPersisted = CompletableDeferred<Unit>()
+        private val releaseTerminalPersistence = CompletableDeferred<Unit>()
+        private val blockedKeys = mutableSetOf<String>()
         override suspend fun enqueue(entry: OutboxEntry) {
+            if (entry.ownerScope.storageKey() in blockedKeys) throw OwnerBlockedException()
             val orderingKey = (rows.maxOfOrNull(OutboxEntry::orderingKey) ?: 0L) + 1
             rows += entry.copy(orderingKey = orderingKey)
         }
         override suspend fun eligible(ownerScope: OwnerScope, nowMs: Long, limit: Int): List<OutboxEntry> =
-            rows.filter {
+            if (ownerScope.storageKey() in blockedKeys) emptyList() else rows.filter {
                 it.ownerScope == ownerScope &&
                     it.state in setOf(
                         ai.onlo.sdk.storage.OutboxState.QUEUED,
@@ -946,14 +1090,51 @@ class OnloClientLifecycleTest {
                 } else it
             }
         }
-        override suspend fun markTerminalFailure(ownerScope: OwnerScope, clientMessageId: String, errorCode: String) = Unit
-        override suspend fun recoverInterruptedSends(ownerScope: OwnerScope, nowMs: Long) = Unit
-        override suspend fun blockOwner(ownerScope: OwnerScope) = Unit
-        override suspend fun blockAndPurgeOwner(ownerScope: OwnerScope) = Unit
-        override suspend fun purgeOwner(ownerScope: OwnerScope) = Unit
+        override suspend fun markTerminalFailure(ownerScope: OwnerScope, clientMessageId: String, errorCode: String) {
+            rows.replaceAll {
+                if (it.ownerScope == ownerScope && it.clientMessageId == clientMessageId && it.state == OutboxState.SENDING) {
+                    it.copy(state = OutboxState.FAILED_TERMINAL, lastErrorCode = errorCode, nextAttemptAtMs = null)
+                } else {
+                    it
+                }
+            }
+            terminalPersisted.complete(Unit)
+            if (pauseAfterTerminalPersistence) {
+                withContext(NonCancellable) { releaseTerminalPersistence.await() }
+            }
+        }
+        override suspend fun recoverInterruptedSends(ownerScope: OwnerScope, nowMs: Long) {
+            rows.replaceAll {
+                if (it.ownerScope == ownerScope && it.state == OutboxState.SENDING) {
+                    it.copy(state = OutboxState.FAILED_RETRYABLE, lastErrorCode = "interrupted", nextAttemptAtMs = nowMs)
+                } else {
+                    it
+                }
+            }
+        }
+        override suspend fun blockOwner(ownerScope: OwnerScope) {
+            blockedKeys += ownerScope.storageKey()
+            rows.replaceAll {
+                if (it.ownerScope == ownerScope && it.state in setOf(OutboxState.QUEUED, OutboxState.SENDING, OutboxState.FAILED_RETRYABLE)) {
+                    it.copy(state = OutboxState.CANCELLED)
+                } else {
+                    it
+                }
+            }
+        }
+        override suspend fun blockAndPurgeOwner(ownerScope: OwnerScope) {
+            blockedKeys += ownerScope.storageKey()
+            rows.removeAll { it.ownerScope == ownerScope }
+        }
+        override suspend fun purgeOwner(ownerScope: OwnerScope) {
+            rows.removeAll { it.ownerScope == ownerScope }
+        }
         override suspend fun clearAll() = Unit
         override suspend fun replaceTranscript(ownerScope: OwnerScope, conversationId: String, payload: String) = Unit
         override suspend fun transcript(ownerScope: OwnerScope, conversationId: String): String? = null
+        fun resumeTerminalPersistence() {
+            releaseTerminalPersistence.complete(Unit)
+        }
     }
 
     private class ConfigMemoryStore : ProtectedConfigStore {
@@ -985,6 +1166,59 @@ class OnloClientLifecycleTest {
         override suspend fun stream(request: OnloHttpRequest, onLine: suspend (String) -> Unit): SseStreamResult {
             streamAuthorizations += checkNotNull(request.headers["Authorization"])
             return SseStreamResult.Success(200)
+        }
+    }
+
+    private class RestoredTerminalTransport : OnloTransport, OnloSseTransport {
+        val chatClientMessageIds = mutableListOf<String>()
+        val twoChatRequests = CompletableDeferred<Unit>()
+        var maximumConcurrentChatRequests = 0
+        private var activeChatRequests = 0
+        private var currentSessionId = "synthetic-session-2"
+
+        override suspend fun execute(request: OnloHttpRequest): OnloHttpResponse {
+            if (request.url.encodedPath.contains("/conversations/")) {
+                return OnloHttpResponse(
+                    200,
+                    emptyMap(),
+                    """{"conversation":{"id":"conversation","sessionId":"$currentSessionId","status":"open","isHumanTakeover":false},"messages":[{"id":"server-2","externalId":null,"role":"user","senderType":"contact","senderName":null,"senderTeam":null,"text":"synthetic","attachments":[],"timestamp":1},{"id":"assistant-2","externalId":null,"role":"assistant","senderType":"ai","senderName":null,"senderTeam":null,"text":"synthetic","attachments":[],"timestamp":2}],"sync":{"previousCursor":null,"nextCursor":null,"limit":100}}""",
+                )
+            }
+            val body = request.body?.let { Buffer().also(it::writeTo).readUtf8() }.orEmpty()
+            val root = org.json.JSONObject(body)
+            val operation = root.getJSONObject("operation")
+            val proposed = operation.getString("proposedCredential")
+            val generation = operation.optInt("expectedGeneration", 0) + 1
+            currentSessionId = "synthetic-session-$generation"
+            return OnloHttpResponse(
+                200,
+                emptyMap(),
+                """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"$currentSessionId","chatToken":"synthetic-chat-token-$generation","installationId":"00000000-0000-0000-0000-000000000001","generation":$generation,"proposedCredential":"$proposed","identityClass":"anonymous","publicationState":"testing","attestationState":"not_required","configRevision":"fixture","configSchemaVersion":1,"configEtag":"fixture"}}""",
+            )
+        }
+
+        override suspend fun stream(
+            request: OnloHttpRequest,
+            onLine: suspend (String) -> Unit,
+        ): SseStreamResult {
+            activeChatRequests += 1
+            maximumConcurrentChatRequests = maxOf(maximumConcurrentChatRequests, activeChatRequests)
+            val clientMessageId = org.json.JSONObject(
+                checkNotNull(request.body).let { Buffer().also(it::writeTo).readUtf8() },
+            ).getString("clientMessageId")
+            chatClientMessageIds += clientMessageId
+            try {
+                if (chatClientMessageIds.size == 1) {
+                    onLine("""data: {"type":"error","error":"synthetic","retryable":false}""")
+                } else {
+                    onLine("""data: {"type":"accepted","clientMessageId":"$clientMessageId","messageId":"server-2","conversationId":"conversation","acceptedAt":"2026-01-01T00:00:00Z","duplicate":false,"processingStatus":"accepted"}""")
+                }
+                onLine("")
+                if (chatClientMessageIds.size == 2) twoChatRequests.complete(Unit)
+                return SseStreamResult.Success(200)
+            } finally {
+                activeChatRequests -= 1
+            }
         }
     }
 
@@ -1174,6 +1408,53 @@ class OnloClientLifecycleTest {
             val proposed = org.json.JSONObject(body).getJSONObject("operation").getString("proposedCredential")
             return OnloHttpResponse(200, emptyMap(), """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"synthetic-session","chatToken":"synthetic-chat-token","installationId":"00000000-0000-0000-0000-000000000001","generation":1,"proposedCredential":"$proposed","identityClass":"anonymous","publicationState":"testing","attestationState":"not_required","configRevision":"fixture","configSchemaVersion":1,"configEtag":"fixture"}}""")
         }
+    }
+
+    private class OutOfOrderConversationTransport : OnloTransport {
+        val firstListStarted = CompletableDeferred<Unit>()
+        val secondListStarted = CompletableDeferred<Unit>()
+        val releaseFirstList = CompletableDeferred<Unit>()
+        val releaseSecondList = CompletableDeferred<Unit>()
+        var readRequests = 0
+        private var listRequests = 0
+
+        override suspend fun execute(request: OnloHttpRequest): OnloHttpResponse {
+            val path = request.url.encodedPath
+            if (path.endsWith("/session")) {
+                val body = request.body?.let { Buffer().also(it::writeTo).readUtf8() }.orEmpty()
+                val proposed = org.json.JSONObject(body).getJSONObject("operation").getString("proposedCredential")
+                return OnloHttpResponse(
+                    200,
+                    emptyMap(),
+                    """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"synthetic-session","chatToken":"synthetic-chat-token","installationId":"00000000-0000-0000-0000-000000000001","generation":1,"proposedCredential":"$proposed","identityClass":"identified","publicationState":"testing","attestationState":"not_required","configRevision":"fixture","configSchemaVersion":1,"configEtag":"fixture"}}""",
+                )
+            }
+            if (request.method == "PUT" && path.endsWith("/read")) {
+                readRequests += 1
+                return OnloHttpResponse(
+                    200,
+                    emptyMap(),
+                    """{"conversationId":"conversation-1","readThroughMessageId":"message-1","unread":false,"unreadCount":0}""",
+                )
+            }
+            check(path.endsWith("/conversations"))
+            listRequests += 1
+            return if (listRequests == 1) {
+                firstListStarted.complete(Unit)
+                releaseFirstList.await()
+                conversationList("older", 2)
+            } else {
+                secondListStarted.complete(Unit)
+                releaseSecondList.await()
+                conversationList("newer", 0)
+            }
+        }
+
+        private fun conversationList(title: String, unread: Int) = OnloHttpResponse(
+            200,
+            emptyMap(),
+            """{"conversations":[{"id":"conversation-1","sessionId":"historical-session","title":"$title","unread":${unread > 0},"unreadCount":$unread,"status":"open","updatedAt":"2026-01-01T00:00:00Z","messageCount":1,"lastMessageRole":"assistant"}],"totalUnreadCount":$unread}""",
+        )
     }
 
     private class MemoryPushStore(var value: StoredPushToken?) : PushTokenStore {

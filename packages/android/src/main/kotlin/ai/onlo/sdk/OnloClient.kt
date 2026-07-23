@@ -25,6 +25,7 @@ import ai.onlo.sdk.config.MobileConfigController
 import ai.onlo.sdk.config.MobileConfigSnapshot
 import ai.onlo.sdk.storage.OwnerScope
 import ai.onlo.sdk.storage.OwnerScopedOutboxStore
+import ai.onlo.sdk.storage.PersistenceAuthority
 import ai.onlo.sdk.transport.OnloSessionApi
 import ai.onlo.sdk.chat.DurableChatOutbox
 import ai.onlo.sdk.chat.WidgetChatApi
@@ -49,7 +50,9 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -245,6 +248,11 @@ public class OnloClient internal constructor(
     )
     private val acceptedReconciliation = AcceptedReconciliationScheduler()
     private var foregroundJob: Job? = null
+    private enum class ForegroundPhase { STOPPED, STARTING, RUNNING }
+    private var foregroundPhase = ForegroundPhase.STOPPED
+    private var foregroundOwnershipToken: UUID? = null
+    private var foregroundOwner: OwnerScope? = null
+    private var foregroundVersion: Long? = null
     private data class PendingPushRegistration(
         val provider: ai.onlo.sdk.protocol.PushProvider,
         val token: String,
@@ -252,6 +260,14 @@ public class OnloClient internal constructor(
         val locale: String?,
     )
     private var pendingPushRegistration: PendingPushRegistration? = null
+    private var conversationObservationGeneration = 0L
+    private data class MessengerInboxCache(
+        val owner: OwnerScope,
+        val sessionId: String,
+        val bearerVersion: Long,
+        val conversations: List<ConversationSummary>,
+    )
+    private var messengerInboxCache: MessengerInboxCache? = null
 
     private val mutableState = MutableStateFlow(
         OnloState(OnloPhase.RESTORING, OnloIdentityState.UNKNOWN),
@@ -372,14 +388,34 @@ public class OnloClient internal constructor(
     public suspend fun handlePushPayload(payload: Map<String, String>): PushPayloadOutcome {
         val capture = operationMutex.withLock {
             val registry = pushRegistry ?: return PushPayloadOutcome.NotOnlo
-            PushPayloadCapture(registry, currentPushAuthority())
+            val authority = currentPushAuthority()
+            val protected = protectedSession
+            val session = inMemorySession
+            val persistence = if (authority != null && protected != null && session != null) {
+                persistenceAuthority(authority.owner, protected, session, configSessionVersion)
+            } else null
+            PushPayloadCapture(registry, authority, persistence)
         }
         return capture.registry.handlePayload(payload, capture.authority, { authority, conversationId, messageId ->
             val api = widgetChatApi ?: return@handlePayload false
-            val expectedSessionId = operationMutex.withLock {
-                inMemorySession?.takeIf { currentPushAuthority() == authority }?.sessionId
-            } ?: return@handlePayload false
-            val transcript = TranscriptConvergence(api, outboxStore).fetchAfterFullSync(authority.owner, authority.chatToken, conversationId, null, expectedSessionId)
+            val persistenceAuthority = capture.persistenceAuthority ?: return@handlePayload false
+            val expectedSessionId = persistenceAuthority.sessionId
+            val convergence = TranscriptConvergence(api, outboxStore)
+            val transcript = convergence.fetchAfterFullSync(
+                authority.owner,
+                authority.chatToken,
+                conversationId,
+                null,
+                expectedSessionId,
+                isAuthorised = { operationMutex.withLock { currentPushAuthority() == authority } },
+                commit = { value ->
+                    outboxStore.replaceTranscriptIfAuthorised(
+                        persistenceAuthority,
+                        conversationId,
+                        convergence.encodeTranscript(value),
+                    )
+                },
+            )
             transcript.messages.any { it.id == messageId }
         }) { authority -> operationMutex.withLock { currentPushAuthority() == authority } }
     }
@@ -391,10 +427,26 @@ public class OnloClient internal constructor(
             val session = inMemorySession ?: return@withLock null
             val protected = protectedSession ?: return@withLock null
             val api = widgetChatApi ?: return@withLock null
-            if (protected.logoutPending) null else ConversationOpenAuthority(protected, session.sessionId, session.chatToken, api)
+            if (protected.logoutPending) null else ConversationOpenAuthority(protected, session.sessionId, session.chatToken, configSessionVersion, api)
         } ?: return OpenConversationOutcome.NoActiveSession
         return try {
-            TranscriptConvergence(capture.api, outboxStore).fetchAfterFullSync(capture.session.ownerScope(), capture.chatToken, conversationId, null, capture.sessionId)
+            val convergence = TranscriptConvergence(capture.api, outboxStore)
+            val persistenceAuthority = persistenceAuthority(capture)
+            convergence.fetchAfterFullSync(
+                capture.session.ownerScope(),
+                capture.chatToken,
+                conversationId,
+                null,
+                capture.sessionId,
+                isAuthorised = { operationMutex.withLock { matchesMessengerAuthority(capture) } },
+                commit = { transcript ->
+                    outboxStore.replaceTranscriptIfAuthorised(
+                        persistenceAuthority,
+                        conversationId,
+                        convergence.encodeTranscript(transcript),
+                    )
+                },
+            )
             operationMutex.withLock {
                 if (protectedSession != capture.session || inMemorySession?.chatToken != capture.chatToken || inMemorySession?.sessionId != capture.sessionId || capture.session.logoutPending) OpenConversationOutcome.NoActiveSession
                 else {
@@ -403,30 +455,50 @@ public class OnloClient internal constructor(
                     OpenConversationOutcome.Opened
                 }
             }
-        } catch (_: IOException) { OpenConversationOutcome.Unavailable }
+        } catch (failure: CancellationException) {
+            currentCoroutineContext().ensureActive()
+            OpenConversationOutcome.NoActiveSession
+        }
+        catch (_: IOException) { OpenConversationOutcome.Unavailable }
         catch (_: ProtocolViolation) { OpenConversationOutcome.NotAuthorised }
         catch (_: ai.onlo.sdk.storage.OwnerBlockedException) { OpenConversationOutcome.NoActiveSession }
     }
 
     /** SDK messenger-only inbox fetch. The list route is contract-backed and bearer-authorised. */
     internal suspend fun loadMessengerInbox(): MessengerInboxResult {
-        val capture = operationMutex.withLock {
+        val observation = operationMutex.withLock {
             val session = inMemorySession ?: return@withLock null
             val protected = protectedSession ?: return@withLock null
             val api = widgetChatApi ?: return@withLock null
-            if (protected.logoutPending) null else ConversationOpenAuthority(protected, session.sessionId, session.chatToken, api)
+            if (protected.logoutPending) null else {
+                conversationObservationGeneration += 1
+                ConversationObservation(
+                    ConversationOpenAuthority(protected, session.sessionId, session.chatToken, configSessionVersion, api),
+                    conversationObservationGeneration,
+                )
+            }
         } ?: return MessengerInboxResult.NoActiveSession
         return try {
+            val capture = observation.authority
             val result = capture.api.conversations(capture.chatToken, capture.sessionId)
             operationMutex.withLock {
                 if (!matchesMessengerAuthority(capture)) MessengerInboxResult.NoActiveSession
+                else if (observation.generation != conversationObservationGeneration) {
+                    currentInbox(capture)?.let { MessengerInboxResult.Ready(it.conversations) }
+                        ?: MessengerInboxResult.Unavailable
+                }
                 else {
                     val identified = capture.session.identityClass == IdentityClass.IDENTIFIED
+                    val conversations = if (identified) result.conversations
+                    else result.conversations.map { it.copy(unread = false, unreadCount = 0) }
                     mutableUnreadCount.value = if (identified) result.totalUnreadCount else null
-                    MessengerInboxResult.Ready(
-                        if (identified) result.conversations
-                        else result.conversations.map { it.copy(unread = false, unreadCount = 0) },
+                    messengerInboxCache = MessengerInboxCache(
+                        owner = capture.session.ownerScope(),
+                        sessionId = capture.sessionId,
+                        bearerVersion = capture.version,
+                        conversations = conversations,
                     )
+                    MessengerInboxResult.Ready(conversations)
                 }
             }
         } catch (_: IOException) { MessengerInboxResult.Unavailable }
@@ -440,17 +512,29 @@ public class OnloClient internal constructor(
             val session = inMemorySession ?: return@withLock null
             val protected = protectedSession ?: return@withLock null
             val api = widgetChatApi ?: return@withLock null
-            if (protected.logoutPending) null else ConversationOpenAuthority(protected, session.sessionId, session.chatToken, api)
+            if (protected.logoutPending) null else ConversationOpenAuthority(protected, session.sessionId, session.chatToken, configSessionVersion, api)
         } ?: return MessengerTranscriptResult.NoActiveSession
         val convergence = TranscriptConvergence(capture.api, outboxStore)
+        val persistenceAuthority = persistenceAuthority(capture)
         return try {
             val transcript = convergence.fetchAfterFullSync(
                 capture.session.ownerScope(), capture.chatToken, conversationId, null, capture.sessionId,
+                isAuthorised = { operationMutex.withLock { matchesMessengerAuthority(capture) } },
+                commit = { value ->
+                    outboxStore.replaceTranscriptIfAuthorised(
+                        persistenceAuthority,
+                        conversationId,
+                        convergence.encodeTranscript(value),
+                    )
+                },
             )
             operationMutex.withLock {
                 if (!matchesMessengerAuthority(capture)) MessengerTranscriptResult.NoActiveSession
                 else MessengerTranscriptResult.Ready(transcript)
             }
+        } catch (failure: CancellationException) {
+            currentCoroutineContext().ensureActive()
+            MessengerTranscriptResult.NoActiveSession
         } catch (_: IOException) {
             val cached = runCatching { convergence.cached(capture.session.ownerScope(), conversationId, capture.sessionId) }.getOrNull()
             operationMutex.withLock {
@@ -467,7 +551,7 @@ public class OnloClient internal constructor(
             val session = inMemorySession ?: return@withLock null
             val protected = protectedSession ?: return@withLock null
             val api = widgetChatApi ?: return@withLock null
-            if (protected.logoutPending) null else ConversationOpenAuthority(protected, session.sessionId, session.chatToken, api)
+            if (protected.logoutPending) null else ConversationOpenAuthority(protected, session.sessionId, session.chatToken, configSessionVersion, api)
         } ?: return MessengerHelpCenterResult.NoActiveSession
         return try {
             val topics = capture.api.helpCenter(capture.chatToken)
@@ -485,7 +569,7 @@ public class OnloClient internal constructor(
             val session = inMemorySession ?: return@withLock null
             val protected = protectedSession ?: return@withLock null
             val api = widgetChatApi ?: return@withLock null
-            if (protected.logoutPending) null else ConversationOpenAuthority(protected, session.sessionId, session.chatToken, api)
+            if (protected.logoutPending) null else ConversationOpenAuthority(protected, session.sessionId, session.chatToken, configSessionVersion, api)
         } ?: return MessengerHelpArticleResult.NoActiveSession
         return try {
             val article = capture.api.helpCenterArticle(capture.chatToken, articleId)
@@ -510,12 +594,30 @@ public class OnloClient internal constructor(
             if (protected.logoutPending ||
                 protected.identityClass != IdentityClass.IDENTIFIED ||
                 state.value.phase != OnloPhase.IDENTIFIED_READY
-            ) null else ConversationOpenAuthority(protected, session.sessionId, session.chatToken, api)
+            ) null else {
+                conversationObservationGeneration += 1
+                ConversationOpenAuthority(protected, session.sessionId, session.chatToken, configSessionVersion, api)
+            }
         } ?: return
         capture.api.acknowledgeRead(capture.chatToken, conversationId, throughMessageId)
+        val observation = operationMutex.withLock {
+            if (!matchesMessengerAuthority(capture)) return
+            conversationObservationGeneration += 1
+            ConversationObservation(capture, conversationObservationGeneration)
+        }
         val list = capture.api.conversations(capture.chatToken, capture.sessionId)
         operationMutex.withLock {
-            if (matchesMessengerAuthority(capture)) mutableUnreadCount.value = list.totalUnreadCount
+            if (matchesMessengerAuthority(capture) &&
+                observation.generation == conversationObservationGeneration
+            ) {
+                mutableUnreadCount.value = list.totalUnreadCount
+                messengerInboxCache = MessengerInboxCache(
+                    owner = capture.session.ownerScope(),
+                    sessionId = capture.sessionId,
+                    bearerVersion = capture.version,
+                    conversations = list.conversations,
+                )
+            }
         }
     }
 
@@ -546,6 +648,7 @@ public class OnloClient internal constructor(
         mutablePresentation.value = MessengerPresentationIntent.HIDDEN
         mutablePresentationTarget.value = MessengerPresentationTarget.Inbox
         mutableUnreadCount.value = null
+        pushRegistry?.activateAuthority(null)
         invalidateConfigSession()
         val blocked = stored.copy(logoutPending = true)
         // This must be durable before unregister can suspend: server Logout is still unsent.
@@ -597,12 +700,12 @@ public class OnloClient internal constructor(
         val stored = checkNotNull(protectedSession) { "onlo_not_ready" }
         val owner = stored.ownerScope()
         val outbox = checkNotNull(widgetChatApi) { "chat_unavailable" }
-        val durable = durableChatOutbox(owner, session, outbox)
+        val version = configSessionVersion
+        val durable = durableChatOutbox(owner, session, version, outbox)
         // ChatRequest has no conversation target in v1; this constant only scopes local FIFO storage.
         val entry = durable.enqueue(owner, "v1-owner-global", message)
         // Let the native presenter render the durable row before transport can emit an event.
         onEnqueued(entry.clientMessageId)
-        val version = configSessionVersion
         startChatFlushIfNeeded(owner, session, version, durable)
         entry.clientMessageId
     }
@@ -610,35 +713,78 @@ public class OnloClient internal constructor(
     private fun durableChatOutbox(
         owner: OwnerScope,
         session: InMemorySession,
+        version: Long,
         api: WidgetChatApi,
-    ): DurableChatOutbox = DurableChatOutbox(
+    ): DurableChatOutbox = run {
+        val dispatchProtected = checkNotNull(protectedSession).takeIf {
+            it.ownerScope() == owner && !it.logoutPending
+        } ?: throw IllegalStateException("stale_chat_dispatcher")
+        val dispatchPersistence = persistenceAuthority(owner, dispatchProtected, session, version)
+        DurableChatOutbox(
         outboxStore,
         api,
         nowMs,
         onDuplicateAccepted = { conversationId ->
             // Duplicate acknowledgement is durable but may have lost the original stream.
-            TranscriptConvergence(api, outboxStore).fetchAfterFullSync(
+            val protected = operationMutex.withLock {
+                protectedSession?.takeIf {
+                    it.ownerScope() == owner &&
+                        !it.logoutPending &&
+                        it == dispatchProtected &&
+                        inMemorySession == session &&
+                        configSessionVersion == version
+                }
+            } ?: throw CancellationException("stale_chat_dispatcher")
+            val convergence = TranscriptConvergence(api, outboxStore)
+            convergence.fetchAfterFullSync(
                 owner,
                 session.chatToken,
                 conversationId,
                 null,
                 session.sessionId,
+                isAuthorised = {
+                    operationMutex.withLock {
+                        configSessionVersion == version &&
+                            protectedSession == protected &&
+                            inMemorySession == session &&
+                            !protected.logoutPending
+                    }
+                },
+                commit = { transcript ->
+                    outboxStore.replaceTranscriptIfAuthorised(
+                        dispatchPersistence,
+                        conversationId,
+                        convergence.encodeTranscript(transcript),
+                    )
+                },
             )
         },
         onEvent = { entry, event ->
+            suspend fun requireEventAuthority() {
+                val current = operationMutex.withLock {
+                    configSessionVersion == version &&
+                        protectedSession == dispatchProtected &&
+                        !dispatchProtected.logoutPending &&
+                        inMemorySession == session
+                }
+                if (!current) throw CancellationException("stale_chat_event")
+            }
+            requireEventAuthority()
             when (event) {
                 is ai.onlo.sdk.chat.ChatEvent.Accepted -> {
                     operationMutex.withLock {
                         if (
                             protectedSession?.ownerScope() == owner &&
                             protectedSession?.logoutPending == false &&
-                            inMemorySession == session
+                            protectedSession == dispatchProtected &&
+                            inMemorySession == session &&
+                            configSessionVersion == version
                         ) {
                             acceptedReconciliation.workGeneration += 1
                             ensureAcceptedReconciliationScheduler(
                                 owner,
                                 session,
-                                configSessionVersion,
+                                version,
                                 api,
                             )
                         }
@@ -646,29 +792,39 @@ public class OnloClient internal constructor(
                     mutableMessengerEvents.emit(
                         NativeMessengerEvent.Accepted(entry.clientMessageId, event.conversationId),
                     )
+                    requireEventAuthority()
                 }
                 is ai.onlo.sdk.chat.ChatEvent.Text -> {
                     mutableMessengerEvents.emit(
                         NativeMessengerEvent.Text(entry.clientMessageId, event.content),
                     )
+                    requireEventAuthority()
                 }
                 is ai.onlo.sdk.chat.ChatEvent.Done -> {
-                    outboxStore.markReconciled(owner, entry.clientMessageId)
+                    if (!outboxStore.markReconciledIfAccepted(
+                        dispatchPersistence,
+                        entry.clientMessageId,
+                        entry.attemptCount + 1,
+                    )) throw CancellationException("stale_chat_done")
+                    requireEventAuthority()
                     operationMutex.withLock {
                         acceptedReconciliation.wake?.complete(Unit)
                     }
                     mutableMessengerEvents.emit(
                         NativeMessengerEvent.Done(entry.clientMessageId, event.conversationId),
                     )
+                    requireEventAuthority()
                 }
                 is ai.onlo.sdk.chat.ChatEvent.Error -> {
                     mutableMessengerEvents.emit(
                         NativeMessengerEvent.Failed(entry.clientMessageId, event.retryable),
                     )
+                    requireEventAuthority()
                 }
             }
         },
-    )
+        )
+    }
 
     /** Called with [operationMutex] held. Enqueue only wakes the current owner dispatcher. */
     private suspend fun startChatFlushIfNeeded(
@@ -678,34 +834,55 @@ public class OnloClient internal constructor(
         durable: DurableChatOutbox,
         recoverInterrupted: Boolean = false,
     ) {
-        if (chatFlushJob?.isActive == true) {
+        if (chatFlushId != null) {
             if (chatFlushOwner == owner) chatFlushWakeRequested = true
             return
         }
+        val protected = protectedSession?.takeIf {
+            it.ownerScope() == owner && !it.logoutPending
+        } ?: return
+        val persistence = persistenceAuthority(owner, protected, session, version)
         if (recoverInterrupted) {
-            outboxStore.recoverInterruptedSends(owner, nowMs())
+            if (!outboxStore.recoverInterruptedSendsIfAuthorised(persistence, nowMs())) return
         }
         val flushId = UUID.randomUUID()
         chatFlushOwner = owner
         chatFlushId = flushId
         chatFlushWakeRequested = false
         chatFlushJob = scope.launch {
-            while (true) {
+            try {
+                while (true) {
                 val authorised = operationMutex.withLock {
                     chatFlushId == flushId &&
                         version == configSessionVersion &&
                         protectedSession?.ownerScope() == owner &&
-                        protectedSession?.logoutPending == false
+                        protectedSession?.logoutPending == false &&
+                        inMemorySession == session
                 }
                 if (!authorised) return@launch
-                val nextAttemptAtMs = durable.flush(owner, session.sessionId, session.chatToken)
+                val nextAttemptAtMs = durable.flush(
+                    owner,
+                    session.sessionId,
+                    session.chatToken,
+                    persistenceAuthority = persistence,
+                    isAuthorised = {
+                        operationMutex.withLock {
+                            chatFlushId == flushId &&
+                                version == configSessionVersion &&
+                                protectedSession?.ownerScope() == owner &&
+                                protectedSession?.logoutPending == false &&
+                                inMemorySession == session
+                        }
+                    },
+                )
                 val delayMs = operationMutex.withLock {
                     if (chatFlushId != flushId) {
                         null
                     } else if (
                         version != configSessionVersion ||
                         protectedSession?.ownerScope() != owner ||
-                        protectedSession?.logoutPending != false
+                        protectedSession?.logoutPending != false ||
+                        inMemorySession != session
                     ) {
                         chatFlushJob = null
                         chatFlushOwner = null
@@ -730,6 +907,16 @@ public class OnloClient internal constructor(
                 }
                 if (delayMs == null) return@launch
                 if (delayMs > 0) retryDelay(delayMs)
+                }
+            } finally {
+                operationMutex.withLock {
+                    if (chatFlushId == flushId) {
+                        chatFlushJob = null
+                        chatFlushOwner = null
+                        chatFlushId = null
+                        chatFlushWakeRequested = false
+                    }
+                }
             }
         }
     }
@@ -817,6 +1004,7 @@ public class OnloClient internal constructor(
         ownerScopeId: String,
         refreshConfigAfterSession: Boolean = true,
     ) {
+        val previousOwner = protectedSession?.ownerScope()
         val next = ProtectedSession(
             installationId = result.installationId,
             credential = result.proposedCredential,
@@ -827,8 +1015,24 @@ public class OnloClient internal constructor(
         )
         persist(next, null)
         val nextSession = InMemorySession(result.sessionId, result.chatToken)
-        inMemorySession = nextSession
+        outboxStore.revokeAuthority(previousOwner ?: next.ownerScope())
+        pushRegistry?.activateAuthority(null)
         invalidateConfigSession()
+        inMemorySession = nextSession
+        outboxStore.activateAuthority(
+            persistenceAuthority(next.ownerScope(), next, nextSession, configSessionVersion),
+        )
+        pushRegistry?.activateAuthority(
+            if (next.identityClass == IdentityClass.IDENTIFIED) {
+                PushAuthority(
+                    owner = next.ownerScope(),
+                    chatToken = nextSession.chatToken,
+                    sessionGeneration = next.generation,
+                    sessionId = nextSession.sessionId,
+                    bearerVersion = configSessionVersion,
+                )
+            } else null,
+        )
         mutableState.value = when (result.identityClass) {
             IdentityClass.ANONYMOUS -> OnloState(OnloPhase.ANONYMOUS_READY, OnloIdentityState.ANONYMOUS)
             IdentityClass.IDENTIFIED -> OnloState(OnloPhase.IDENTIFIED_READY, OnloIdentityState.IDENTIFIED)
@@ -844,7 +1048,7 @@ public class OnloClient internal constructor(
                 next.ownerScope(),
                 nextSession,
                 configSessionVersion,
-                durableChatOutbox(next.ownerScope(), nextSession, api),
+                durableChatOutbox(next.ownerScope(), nextSession, configSessionVersion, api),
                 recoverInterrupted = true,
             )
         }
@@ -907,7 +1111,7 @@ public class OnloClient internal constructor(
                 acceptedReconciliation.wake = null
                 acceptedReconciliation.workGeneration
             }
-            val empty = reconcileAcceptedOutbox(owner, session, api)
+            val empty = reconcileAcceptedOutbox(owner, session, version, token, api)
             if (empty) {
                 acceptedReconciliationBeforeEmptyCommit()
                 val continueRunning = operationMutex.withLock {
@@ -987,11 +1191,24 @@ public class OnloClient internal constructor(
     private suspend fun reconcileAcceptedOutbox(
         owner: OwnerScope,
         session: InMemorySession,
+        version: Long,
+        token: UUID,
         api: WidgetChatApi,
     ): Boolean {
-        for (entry in outboxStore.acceptedAwaitingReconciliation(owner)) {
+        suspend fun authority(): PersistenceAuthority? = operationMutex.withLock {
+            val protected = protectedSession
+            if (!acceptedReconciliationAuthorityMatches(owner, version, token) ||
+                protected == null ||
+                inMemorySession != session
+            ) null else persistenceAuthority(owner, protected, session, version)
+        }
+        val persistenceAuthority = authority() ?: throw CancellationException("stale_accepted_reconciler")
+        val entries = outboxStore.acceptedAwaitingReconciliation(owner)
+        if (authority() != persistenceAuthority) throw CancellationException("stale_accepted_reconciler")
+        for (entry in entries) {
             val conversationId = entry.serverConversationId ?: continue
             val serverMessageId = entry.serverMessageId ?: continue
+            if (authority() != persistenceAuthority) throw CancellationException("stale_accepted_reconciler")
             val transcript = try {
                 api.transcript(
                     session.chatToken,
@@ -1004,14 +1221,13 @@ public class OnloClient internal constructor(
             } catch (_: Exception) {
                 continue
             }
+            if (authority() != persistenceAuthority) throw CancellationException("stale_accepted_reconciler")
             val acceptedIndex = transcript.messages.indexOfFirst { it.id == serverMessageId }
             if (acceptedIndex >= 0 && transcript.messages.drop(acceptedIndex + 1).any {
                     it.role != "user" && it.role != "customer"
                 }
             ) {
-                outboxStore.replaceTranscript(
-                    owner,
-                    conversationId,
+                val payload =
                     org.json.JSONObject().apply {
                         put("id", transcript.id)
                         put("sessionId", transcript.sessionId)
@@ -1035,12 +1251,23 @@ public class OnloClient internal constructor(
                                 })
                             }
                         })
-                    }.toString(),
-                )
-                outboxStore.markReconciled(owner, entry.clientMessageId)
+                    }.toString()
+                if (authority() != persistenceAuthority) {
+                    throw CancellationException("stale_accepted_reconciler")
+                }
+                if (!outboxStore.reconcileAcceptedIfAuthorised(
+                    persistenceAuthority,
+                    entry.clientMessageId,
+                    serverMessageId,
+                    conversationId,
+                    payload,
+                )) throw CancellationException("stale_accepted_commit")
             }
         }
-        return outboxStore.acceptedAwaitingReconciliation(owner).isEmpty()
+        if (authority() != persistenceAuthority) throw CancellationException("stale_accepted_reconciler")
+        val empty = outboxStore.acceptedAwaitingReconciliation(owner).isEmpty()
+        if (authority() != persistenceAuthority) throw CancellationException("stale_accepted_reconciler")
+        return empty
     }
 
     private fun schedulePendingPushRegistration() {
@@ -1150,7 +1377,7 @@ public class OnloClient internal constructor(
                     state.value.phase !in setOf(OnloPhase.ANONYMOUS_READY, OnloPhase.IDENTIFIED_READY)
                 ) null else Triple(stored.ownerScope(), session, configSessionVersion)
             } ?: return@launch
-            val outbox = durableChatOutbox(capture.first, capture.second, api)
+            val outbox = durableChatOutbox(capture.first, capture.second, capture.third, api)
             operationMutex.withLock {
                 if (
                     protectedSession?.ownerScope() == capture.first &&
@@ -1180,11 +1407,37 @@ public class OnloClient internal constructor(
         logout()
     }
 
-    private fun startForegroundStream(token: String, version: Long) {
-        if (foregroundJob?.isActive == true) return
+    private suspend fun startForegroundStream(token: String, version: Long) = operationMutex.withLock {
         val stream = foregroundStream ?: return
+        val session = inMemorySession ?: return
+        val protected = protectedSession ?: return
+        val owner = protected.ownerScope()
+        if (protected.logoutPending ||
+            session.chatToken != token ||
+            configSessionVersion != version
+        ) return
+        if (foregroundPhase != ForegroundPhase.STOPPED) {
+            check(
+                foregroundOwner == owner &&
+                    foregroundVersion == version,
+            ) { "foreground_stream_authority" }
+            return
+        }
+        val ownershipToken = UUID.randomUUID()
+        foregroundPhase = ForegroundPhase.STARTING
+        foregroundOwnershipToken = ownershipToken
+        foregroundOwner = owner
+        foregroundVersion = version
         foregroundJob = scope.launch {
             try {
+                operationMutex.withLock {
+                    if (foregroundOwnershipToken != ownershipToken ||
+                        !matchesForegroundAuthority(
+                            ForegroundAuthority(token, session.sessionId, version, owner),
+                        )
+                    ) return@launch
+                    foregroundPhase = ForegroundPhase.RUNNING
+                }
                 stream.collect(token) { hint ->
                     val authority = foregroundAuthority(token, version)
                         ?: throw CancellationException("stale_foreground_stream")
@@ -1211,6 +1464,16 @@ public class OnloClient internal constructor(
                 throw failure
             } catch (_: IOException) {
                 // Foreground hints are best effort; lifecycle/network recovery starts a new stream.
+            } finally {
+                operationMutex.withLock {
+                    if (foregroundOwnershipToken == ownershipToken) {
+                        foregroundPhase = ForegroundPhase.STOPPED
+                        foregroundOwnershipToken = null
+                        foregroundOwner = null
+                        foregroundVersion = null
+                        foregroundJob = null
+                    }
+                }
             }
         }
     }
@@ -1227,14 +1490,28 @@ public class OnloClient internal constructor(
         val protected = protectedSession ?: return null
         val session = inMemorySession ?: return null
         if (protected.logoutPending || protected.identityClass != IdentityClass.IDENTIFIED) return null
-        return PushAuthority(protected.ownerScope(), session.chatToken)
+        return PushAuthority(
+            owner = protected.ownerScope(),
+            chatToken = session.chatToken,
+            sessionGeneration = protected.generation,
+            sessionId = session.sessionId,
+            bearerVersion = configSessionVersion,
+        )
     }
 
     private fun matchesMessengerAuthority(capture: ConversationOpenAuthority): Boolean =
         protectedSession == capture.session &&
+            configSessionVersion == capture.version &&
             inMemorySession?.chatToken == capture.chatToken &&
             inMemorySession?.sessionId == capture.sessionId &&
             !capture.session.logoutPending
+
+    private fun currentInbox(capture: ConversationOpenAuthority): MessengerInboxCache? =
+        messengerInboxCache?.takeIf {
+            it.owner == capture.session.ownerScope() &&
+                it.sessionId == capture.sessionId &&
+                it.bearerVersion == capture.version
+        }
 
     private fun matchesForegroundAuthority(capture: ForegroundAuthority): Boolean {
         val session = inMemorySession ?: return false
@@ -1246,18 +1523,65 @@ public class OnloClient internal constructor(
             !protected.logoutPending
     }
 
+    private fun persistenceAuthority(
+        owner: OwnerScope,
+        protected: ProtectedSession,
+        session: InMemorySession,
+        version: Long,
+    ): PersistenceAuthority = PersistenceAuthority(
+        ownerScope = owner,
+        sessionGeneration = protected.generation,
+        sessionId = session.sessionId,
+        bearerContext = "$version:${session.chatToken}",
+    )
+
+    private fun persistenceAuthority(capture: ConversationOpenAuthority): PersistenceAuthority =
+        PersistenceAuthority(
+            ownerScope = capture.session.ownerScope(),
+            sessionGeneration = capture.session.generation,
+            sessionId = capture.sessionId,
+            bearerContext = "${capture.version}:${capture.chatToken}",
+        )
+
     /** Only logout recovery may use this retained bearer; ordinary APIs remain blocked by logoutPending. */
     private fun blockedOwnerAuthority(stored: ProtectedSession): PushAuthority? {
         val session = inMemorySession ?: return null
         val current = protectedSession ?: return null
         if (!current.logoutPending || current.ownerScopeId != stored.ownerScopeId) return null
-        return PushAuthority(stored.ownerScope(), session.chatToken)
+        return PushAuthority(
+            owner = stored.ownerScope(),
+            chatToken = session.chatToken,
+            sessionGeneration = stored.generation,
+            sessionId = session.sessionId,
+            bearerVersion = configSessionVersion,
+        )
     }
 
     private suspend fun convergeHintTranscript(conversationId: String, authority: ForegroundAuthority) {
         val api = widgetChatApi ?: return
+        val persistenceAuthority = operationMutex.withLock {
+            val protected = protectedSession
+            val session = inMemorySession
+            if (protected == null || session == null || !matchesForegroundAuthority(authority)) null
+            else persistenceAuthority(authority.owner, protected, session, authority.version)
+        } ?: return
+        val convergence = TranscriptConvergence(api, outboxStore)
         try {
-            TranscriptConvergence(api, outboxStore).fetchAfterFullSync(authority.owner, authority.token, conversationId, null, authority.sessionId)
+            convergence.fetchAfterFullSync(
+                authority.owner,
+                authority.token,
+                conversationId,
+                null,
+                authority.sessionId,
+                isAuthorised = { operationMutex.withLock { matchesForegroundAuthority(authority) } },
+                commit = { transcript ->
+                    outboxStore.replaceTranscriptIfAuthorised(
+                        persistenceAuthority,
+                        conversationId,
+                        convergence.encodeTranscript(transcript),
+                    )
+                },
+            )
         } catch (failure: CancellationException) {
             throw failure
         } catch (_: IOException) {
@@ -1271,16 +1595,28 @@ public class OnloClient internal constructor(
 
     private suspend fun refetchUnreadAfterHint(authority: ForegroundAuthority) {
         val api = widgetChatApi ?: return
-        val identified = operationMutex.withLock {
-            matchesForegroundAuthority(authority) &&
-                protectedSession?.identityClass == IdentityClass.IDENTIFIED
+        val observation = operationMutex.withLock {
+            if (!matchesForegroundAuthority(authority) ||
+                protectedSession?.identityClass != IdentityClass.IDENTIFIED
+            ) null else {
+                conversationObservationGeneration += 1
+                conversationObservationGeneration
+            }
         }
-        if (!identified) return
+        if (observation == null) return
         try {
             val result = api.conversations(authority.token, authority.sessionId)
             operationMutex.withLock {
-                if (matchesForegroundAuthority(authority)) {
+                if (matchesForegroundAuthority(authority) &&
+                    observation == conversationObservationGeneration
+                ) {
                     mutableUnreadCount.value = result.totalUnreadCount
+                    messengerInboxCache = MessengerInboxCache(
+                        owner = authority.owner,
+                        sessionId = authority.sessionId,
+                        bearerVersion = authority.version,
+                        conversations = result.conversations,
+                    )
                 }
             }
         } catch (_: IOException) {
@@ -1319,7 +1655,13 @@ public class OnloClient internal constructor(
         val reconciliationJob = acceptedReconciliation.job
         clearAcceptedReconciliationOwnership()
         reconciliationJob?.cancel()
-        foregroundJob?.cancel(); foregroundJob = null
+        val oldForegroundJob = foregroundJob
+        foregroundPhase = ForegroundPhase.STOPPED
+        foregroundOwnershipToken = null
+        foregroundOwner = null
+        foregroundVersion = null
+        foregroundJob = null
+        oldForegroundJob?.cancel()
         configSessionVersion = configController?.onSessionBoundary() ?: (configSessionVersion + 1)
     }
 
@@ -1612,12 +1954,19 @@ public class OnloClient internal constructor(
         val session: ProtectedSession,
         val sessionId: String,
         val chatToken: String,
+        val version: Long,
         val api: WidgetChatApi,
+    )
+
+    private data class ConversationObservation(
+        val authority: ConversationOpenAuthority,
+        val generation: Long,
     )
 
     private data class PushPayloadCapture(
         val registry: PushRegistry,
         val authority: PushAuthority?,
+        val persistenceAuthority: PersistenceAuthority?,
     )
 
     private data class ForegroundAuthority(

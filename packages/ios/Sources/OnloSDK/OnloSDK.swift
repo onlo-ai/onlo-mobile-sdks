@@ -135,6 +135,7 @@ public actor OnloSDK {
     private var foregroundReconnectID: UUID?
     private var foregroundReconnectAttempt = 0
     private var configRetryTask: Task<Void, Never>?
+    private var configRetryID: UUID?
     private var suppressAutomaticConfigRefresh = false
     private var configAuthority = UUID()
     private var configurationValidationAuthority: UUID?
@@ -149,14 +150,22 @@ public actor OnloSDK {
         let topics: [HelpCenterTopic]
     }
     private var messengerInboxCache: MessengerInboxCache?
+    private var conversationObservationGeneration: UInt64 = 0
     private var helpCenterCache: HelpCenterCache?
     /// A persisted transcript is reusable online only after the current
     /// in-memory bearer authority has authorised it. Owner-scoped storage
     /// protects account boundaries; this map prevents a prior session's cache
     /// from bypassing the first authorization fetch of a resumed session.
     private var transcriptValidationAuthorities: [String: UUID] = [:]
+    private struct TranscriptOperationKey: Hashable {
+        let ownerScope: OwnerScope
+        let conversationId: String
+    }
+    private var activeTranscriptOperations: Set<TranscriptOperationKey> = []
+    private var transcriptOperationWaiters: [TranscriptOperationKey: [CheckedContinuation<Void, Never>]] = [:]
     private var pushRetryTask: Task<Void, Never>?
-    private var pushReconciliationInProgress = false
+    private var pushReconciliationID: UUID?
+    private var pushReconciliationWakeRequested = false
     private struct PendingAPNsRegistration: Sendable {
         let token: Data
         let notificationPreference: PushTokenRequest.NotificationPreference?
@@ -168,6 +177,43 @@ public actor OnloSDK {
     /// core awaits these before progressing a logout/account boundary, so an
     /// old transcript cannot remain visible while a new owner becomes usable.
     private var messengerPresentationInvalidators: [UUID: @MainActor @Sendable () -> Void] = [:]
+
+    private func persistenceAuthority(
+        for session: RuntimeSession,
+        bearerContext: UUID
+    ) -> PersistenceAuthority {
+        PersistenceAuthority(
+            ownerScope: session.credential.ownerScope,
+            sessionGeneration: session.credential.generation,
+            sessionId: session.sessionId,
+            bearerContext: bearerContext
+        )
+    }
+
+    private func activatePersistenceAuthority(for session: RuntimeSession) async throws {
+        guard let store = ownerStore as? any AuthorityFencedPersisting else {
+            throw OnloError.persistenceUnavailable
+        }
+        let authority = persistenceAuthority(for: session, bearerContext: configAuthority)
+        await store.activateAuthority(authority)
+        if let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring {
+            await pushStore.activateAuthority(authority)
+        }
+        if let fencedConfigStore = configStore as? any AuthorityFencedConfigStoring {
+            await fencedConfigStore.activateAuthority(authority)
+        }
+    }
+
+    private func revokePersistenceAuthority(for scope: OwnerScope) async {
+        guard let store = ownerStore as? any AuthorityFencedPersisting else { return }
+        await store.revokeAuthority(for: scope)
+        if let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring {
+            await pushStore.revokeAuthority(for: scope)
+        }
+        if let fencedConfigStore = configStore as? any AuthorityFencedConfigStoring {
+            await fencedConfigStore.revokeAuthority(for: scope)
+        }
+    }
 
     /// Creates the native core with SDK-owned storage boundaries. The public API
     /// never accepts a host persistence implementation or plain-text fallback.
@@ -416,7 +462,10 @@ public actor OnloSDK {
         // No config request authenticated by the prior account may be allowed
         // to complete once an account transition has begun.
         configAuthority = UUID()
-        if let scope = runtimeSession?.credential.ownerScope { cancelForegroundStream(for: scope) }
+        if let scope = runtimeSession?.credential.ownerScope {
+            await revokePersistenceAuthority(for: scope)
+            cancelForegroundStream(for: scope)
+        }
         let protectedState = try await credentialStore.loadState()
         if state == .reauthRequired,
            let stored = protectedState.credential,
@@ -445,27 +494,36 @@ public actor OnloSDK {
             if case let .remote(remote) = error, remote.code == .identityDisabled {
                 state = .anonymousReady
                 configAuthority = UUID()
+                try await activatePersistenceAuthority(for: anonymousSession)
                 await refreshConfigurationAfterSessionSuccess()
                 startDurableDispatchIfNeeded()
                 startForegroundStreamIfAvailable()
                 return state
             }
             state = .anonymousReady
+            try await activatePersistenceAuthority(for: anonymousSession)
+            startDurableDispatchIfNeeded()
             startForegroundStreamIfAvailable()
             throw error
         } catch {
             state = .anonymousReady
+            try await activatePersistenceAuthority(for: anonymousSession)
+            startDurableDispatchIfNeeded()
             startForegroundStreamIfAvailable()
             throw error
         }
 
         guard pending.accepts(result.result), result.result.identityClass == .identified else {
             state = .anonymousReady
+            try await activatePersistenceAuthority(for: anonymousSession)
+            startDurableDispatchIfNeeded()
+            startForegroundStreamIfAvailable()
             throw OnloError.invalidResponse
         }
 
         // The anonymous partition is no longer usable after the server accepts identity.
         cancelActiveSends(for: anonymousSession.credential.ownerScope)
+        await revokePersistenceAuthority(for: anonymousSession.credential.ownerScope)
         await invalidateMessengerPresentations()
         try await ownerStore.beginLogout(for: anonymousSession.credential.ownerScope)
         try await ownerStore.finishLogout(for: anonymousSession.credential.ownerScope)
@@ -482,6 +540,7 @@ public actor OnloSDK {
         try await commitProtectedState(credential: credential, pendingTransition: nil)
         runtimeSession = RuntimeSession(sessionId: result.result.sessionId, chatToken: result.result.chatToken, credential: credential)
         configAuthority = UUID()
+        try await activatePersistenceAuthority(for: runtimeSession!)
         state = .identifiedReady
         await refreshConfigurationAfterSessionSuccess()
         startDurableDispatchIfNeeded()
@@ -583,6 +642,35 @@ public actor OnloSDK {
         for observer in messengerUpdateObservers.values { observer.yield(update) }
     }
 
+    private func withSerializedTranscriptObservation<Value>(
+        ownerScope: OwnerScope,
+        conversationId: String,
+        operation: () async throws -> Value
+    ) async throws -> Value {
+        let key = TranscriptOperationKey(ownerScope: ownerScope, conversationId: conversationId)
+        if activeTranscriptOperations.contains(key) {
+            await withCheckedContinuation { continuation in
+                transcriptOperationWaiters[key, default: []].append(continuation)
+            }
+        } else {
+            activeTranscriptOperations.insert(key)
+        }
+        defer { finishTranscriptObservation(key) }
+        try Task.checkCancellation()
+        return try await operation()
+    }
+
+    private func finishTranscriptObservation(_ key: TranscriptOperationKey) {
+        guard var waiters = transcriptOperationWaiters[key], !waiters.isEmpty else {
+            transcriptOperationWaiters[key] = nil
+            activeTranscriptOperations.remove(key)
+            return
+        }
+        let next = waiters.removeFirst()
+        transcriptOperationWaiters[key] = waiters.isEmpty ? nil : waiters
+        next.resume()
+    }
+
     func registerMessengerPresentationInvalidator(_ invalidator: @escaping @MainActor @Sendable () -> Void) -> UUID {
         let id = UUID()
         messengerPresentationInvalidators[id] = invalidator
@@ -605,40 +693,86 @@ public actor OnloSDK {
     /// v1 has no conversation target, so dispatchable rows remain globally
     /// ordered per owner. Terminal rows stay available for UI diagnostics but
     /// cannot permanently deadlock later customer messages.
-    func nextDurableTextDispatch() async throws -> OutboxEntry? {
+    func nextDurableTextDispatch(
+        dispatchID: UUID? = nil,
+        expectedAuthority: UUID? = nil
+    ) async throws -> OutboxEntry? {
         guard let session = runtimeSession, state == .anonymousReady || state == .identifiedReady else { throw OnloError.invalidState }
         let authority = configAuthority
-        let entries = try await ownerStore.recoverEligibleEntries(for: session.credential.ownerScope, now: now())
-        guard configAuthority == authority,
-              runtimeSession?.credential.ownerScope == session.credential.ownerScope else { throw OnloError.invalidState }
-        let all = try await ownerStore.outboxEntries(for: session.credential.ownerScope)
-        guard let head = all.first(where: {
-            $0.state == .queued || $0.state == .sending || $0.state == .failedRetryable
-        }) else { return nil }
-        guard entries.contains(where: { $0.clientMessageId == head.clientMessageId }) else { return nil }
-        var sending = head
-        if sending.attachments.contains(where: { attachment in
-            guard let expiresAt = attachment.receiptExpiresAt,
-                  let expiry = serverDate(expiresAt) else { return true }
-            return expiry <= now()
-        }) {
-            sending.state = .failedTerminal
-            sending.lastErrorCode = APIErrorCode.mediaUnavailable.rawValue
-            sending.nextAttemptAt = nil
-            try await ownerStore.update(sending)
-            return nil
+        let scope = session.credential.ownerScope
+        let sessionId = session.sessionId
+        let persistence = persistenceAuthority(for: session, bearerContext: authority)
+        func hasSelectionAuthority() -> Bool {
+            !Task.isCancelled &&
+                configAuthority == authority &&
+                (dispatchID == nil || activeDispatchIDs[scope] == dispatchID) &&
+                (expectedAuthority == nil || expectedAuthority == authority) &&
+                (state == .anonymousReady || state == .identifiedReady) &&
+                runtimeSession?.sessionId == sessionId &&
+                runtimeSession?.chatToken == session.chatToken &&
+                runtimeSession?.credential.generation == session.credential.generation &&
+                runtimeSession?.credential.ownerScope == scope
         }
-        sending.state = .sending
-        sending.attemptCount += 1
-        sending.nextAttemptAt = nil
-        try await ownerStore.update(sending)
-        return sending
+
+        while true {
+            guard hasSelectionAuthority() else { throw OnloError.invalidState }
+            guard let store = ownerStore as? any AuthorityFencedPersisting,
+                  let entries = try await store.recoverEligibleEntries(
+                      for: scope,
+                      now: now(),
+                      authority: persistence
+                  ) else { throw OnloError.invalidState }
+            guard hasSelectionAuthority() else { throw OnloError.invalidState }
+            let all = try await ownerStore.outboxEntries(for: scope)
+            guard hasSelectionAuthority() else { throw OnloError.invalidState }
+            guard let head = all.first(where: {
+                $0.state == .queued || $0.state == .sending || $0.state == .failedRetryable
+            }) else { return nil }
+            guard entries.contains(where: { $0.clientMessageId == head.clientMessageId }) else { return nil }
+            var sending = head
+            if sending.attachments.contains(where: { attachment in
+                guard let expiresAt = attachment.receiptExpiresAt,
+                      let expiry = serverDate(expiresAt) else { return true }
+                return expiry <= now()
+            }) {
+                sending.state = .failedTerminal
+                sending.lastErrorCode = APIErrorCode.mediaUnavailable.rawValue
+                sending.nextAttemptAt = nil
+                guard try await store.update(
+                          sending,
+                          expectedState: head.state,
+                          expectedAttemptCount: head.attemptCount,
+                          authority: persistence
+                      ) else { throw OnloError.invalidState }
+                finishObserver(
+                    for: sending,
+                    error: OnloError.transport(code: APIErrorCode.mediaUnavailable.rawValue)
+                )
+                continue
+            }
+            sending.state = .sending
+            sending.attemptCount += 1
+            sending.nextAttemptAt = nil
+            guard try await store.update(
+                      sending,
+                      expectedState: head.state,
+                      expectedAttemptCount: head.attemptCount,
+                      authority: persistence
+                  ) else { throw OnloError.invalidState }
+            guard hasSelectionAuthority() else { throw OnloError.invalidState }
+            return sending
+        }
     }
 
     /// Persists bounded retry eligibility for a failed durable attempt. Only
     /// transport/chat-retryable failures may re-enter FIFO; protocol failures
     /// become terminal and therefore cannot accidentally be resent.
-    func recordDurableDispatchFailure(_ entry: OutboxEntry, retryable: Bool, safeCode: String) async throws {
+    func recordDurableDispatchFailure(
+        _ entry: OutboxEntry,
+        retryable: Bool,
+        safeCode: String,
+        authority: PersistenceAuthority? = nil
+    ) async throws {
         guard let session = runtimeSession,
               session.credential.ownerScope == entry.ownerScope else { throw OnloError.invalidState }
         var updated = entry
@@ -653,7 +787,19 @@ public actor OnloSDK {
             updated.state = .failedTerminal
             updated.nextAttemptAt = nil
         }
-        try await ownerStore.update(updated)
+        let commitAuthority = authority ?? persistenceAuthority(
+            for: session,
+            bearerContext: configAuthority
+        )
+        guard let store = ownerStore as? any AuthorityFencedPersisting else {
+            throw OnloError.persistenceUnavailable
+        }
+        _ = try await store.update(
+            updated,
+            expectedState: .sending,
+            expectedAttemptCount: entry.attemptCount,
+            authority: commitAuthority
+        )
     }
 
     /// Token-free last-known-good configuration for native presentation and
@@ -834,6 +980,9 @@ public actor OnloSDK {
     /// only for a verified identity; anonymous summaries are scrubbed.
     private func authorisedInbox(for session: RuntimeSession) async throws -> (conversations: [ConversationSummary], requestId: String?) {
         guard let requestFactory else { throw OnloError.invalidState }
+        conversationObservationGeneration &+= 1
+        let observationGeneration = conversationObservationGeneration
+        let authority = configAuthority
         let response = try await transport.execute(try requestFactory.conversations(chatToken: session.chatToken, limit: 50))
         let inbox = try OnloResponseDecoder.widget(ConversationListResult.self, from: response)
         var conversationIDs = Set<String>()
@@ -845,11 +994,23 @@ public actor OnloSDK {
                 conversation.messageCount >= 0 &&
                 conversationIDs.insert(conversation.id).inserted
         }
-        guard runtimeSession?.sessionId == session.sessionId,
+        guard configAuthority == authority,
+              runtimeSession?.sessionId == session.sessionId,
               runtimeSession?.credential.ownerScope == session.credential.ownerScope,
               inbox.totalUnreadCount >= 0,
               summariesAreValid else {
             throw OnloError.invalidResponse
+        }
+        if observationGeneration != conversationObservationGeneration {
+            guard let cached = messengerInboxCache,
+                  cached.authority == authority,
+                  cached.ownerScope == session.credential.ownerScope else {
+                throw OnloError.invalidResponse
+            }
+            return (
+                conversations: cached.conversations,
+                requestId: Self.header("x-onlo-request-id", in: response.headers)
+            )
         }
         if session.credential.identityClass == .identified {
             unreadCount = inbox.totalUnreadCount
@@ -995,6 +1156,7 @@ public actor OnloSDK {
                   let session = runtimeSession,
                   session.credential.identityClass == .identified,
                   let requestFactory else { return }
+            conversationObservationGeneration &+= 1
             let authority = configAuthority
             let response = try await transport.execute(
                 try requestFactory.acknowledgeRead(
@@ -1051,6 +1213,7 @@ public actor OnloSDK {
         guard state == .anonymousReady || state == .identifiedReady,
               let session = runtimeSession,
               let requestFactory else { throw OnloError.invalidState }
+        let authority = configAuthority
         if transcriptValidationAuthorities[conversationId] == configAuthority,
            let cached = try await transcriptStore.transcript(
                conversationId: conversationId,
@@ -1064,24 +1227,34 @@ public actor OnloSDK {
             )
             return cached
         }
-        let response = try await transport.execute(try requestFactory.transcript(conversationId: conversationId, query: .latest(limit: 100), chatToken: session.chatToken))
-        let transcript = try OnloResponseDecoder.widget(ConversationTranscriptResult.self, from: response)
-        guard isAuthorisedTranscript(transcript, conversationId: conversationId, session: session) else {
-            throw OnloError.invalidResponse
+        return try await withSerializedTranscriptObservation(
+            ownerScope: session.credential.ownerScope,
+            conversationId: conversationId
+        ) {
+            let response = try await transport.execute(try requestFactory.transcript(conversationId: conversationId, query: .latest(limit: 100), chatToken: session.chatToken))
+            let transcript = try OnloResponseDecoder.widget(ConversationTranscriptResult.self, from: response)
+            guard isAuthorisedTranscript(transcript, conversationId: conversationId, session: session) else {
+                throw OnloError.invalidResponse
+            }
+            guard let fencedStore = ownerStore as? any AuthorityFencedPersisting,
+                  try await fencedStore.replaceTranscript(
+                      transcript,
+                      authority: persistenceAuthority(for: session, bearerContext: authority)
+                  ) else { return nil }
+            guard configAuthority == authority,
+                  runtimeSession?.sessionId == session.sessionId,
+                  runtimeSession?.credential.ownerScope == session.credential.ownerScope else {
+                return nil
+            }
+            transcriptValidationAuthorities[conversationId] = configAuthority
+            await record(
+                operation: "transcript",
+                code: "ok",
+                requestId: Self.header("x-onlo-request-id", in: response.headers),
+                startedAt: startedAt
+            )
+            return transcript
         }
-        try await transcriptStore.replaceTranscript(transcript, for: session.credential.ownerScope)
-        guard runtimeSession?.sessionId == session.sessionId,
-              runtimeSession?.credential.ownerScope == session.credential.ownerScope else {
-            return nil
-        }
-        transcriptValidationAuthorities[conversationId] = configAuthority
-        await record(
-            operation: "transcript",
-            code: "ok",
-            requestId: Self.header("x-onlo-request-id", in: response.headers),
-            startedAt: startedAt
-        )
-        return transcript
         } catch let error as OnloError {
             await record(operation: "transcript", code: error.safeCode, requestId: error.requestId, startedAt: startedAt)
             throw error
@@ -1283,6 +1456,7 @@ public actor OnloSDK {
         _ registration: PendingAPNsRegistration,
         session: RuntimeSession
     ) async throws -> OnloPushRegistrationState {
+        let authority = persistenceAuthority(for: session, bearerContext: configAuthority)
         let existing = try await pushIntentStore.load()
         // A pending intent belongs to the scope that created it. A newly
         // authenticated account must never overwrite it or inherit its token.
@@ -1297,7 +1471,10 @@ public actor OnloSDK {
             notificationPreference: registration.notificationPreference,
             locale: registration.locale
         )
-        try await pushIntentStore.save(intent) // persist before any network work
+        guard let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring,
+              try await pushStore.save(intent, authority: authority) else {
+            throw OnloError.invalidState
+        }
         return try await reconcilePushIntent(allowTokenRefresh: true)
     }
 
@@ -1336,27 +1513,35 @@ public actor OnloSDK {
             chatToken: session.chatToken
         )
         do {
-            let response = try await transport.execute(request)
-            let transcript = try OnloResponseDecoder.widget(ConversationTranscriptResult.self, from: response)
-            guard transcript.conversation.id == payload.conversationId,
-                  !transcript.conversation.sessionId.isEmpty,
-                  transcript.messages.contains(where: { $0.id == payload.messageId }) else {
-                return .notOnlo
+            return try await withSerializedTranscriptObservation(
+                ownerScope: scope,
+                conversationId: payload.conversationId
+            ) {
+                let response = try await transport.execute(request)
+                let transcript = try OnloResponseDecoder.widget(ConversationTranscriptResult.self, from: response)
+                guard transcript.conversation.id == payload.conversationId,
+                      !transcript.conversation.sessionId.isEmpty,
+                      transcript.messages.contains(where: { $0.id == payload.messageId }) else {
+                    return .notOnlo
+                }
+                // Network suspension can cross logout/account switch. Check again
+                // immediately before persisting or returning a route.
+                guard configAuthority == authority,
+                      runtimeSession?.sessionId == session.sessionId,
+                      runtimeSession?.credential.ownerScope == scope else { return .deferred }
+                guard let transcriptStore = ownerStore as? any AuthorityFencedPersisting else {
+                    throw OnloError.persistenceUnavailable
+                }
+                guard try await transcriptStore.replaceTranscript(
+                    transcript,
+                    authority: persistenceAuthority(for: session, bearerContext: authority)
+                ) else { return .deferred }
+                guard configAuthority == authority,
+                      runtimeSession?.sessionId == session.sessionId,
+                      runtimeSession?.credential.ownerScope == scope else { return .deferred }
+                transcriptValidationAuthorities[payload.conversationId] = authority
+                return .handled(.messenger(conversationId: payload.conversationId))
             }
-            // Network suspension can cross logout/account switch. Check again
-            // immediately before persisting or returning a route.
-            guard configAuthority == authority,
-                  runtimeSession?.sessionId == session.sessionId,
-                  runtimeSession?.credential.ownerScope == scope else { return .deferred }
-            guard let transcriptStore = ownerStore as? any TranscriptPersisting else {
-                throw OnloError.persistenceUnavailable
-            }
-            try await transcriptStore.replaceTranscript(transcript, for: scope)
-            guard configAuthority == authority,
-                  runtimeSession?.sessionId == session.sessionId,
-                  runtimeSession?.credential.ownerScope == scope else { return .deferred }
-            transcriptValidationAuthorities[payload.conversationId] = authority
-            return .handled(.messenger(conversationId: payload.conversationId))
         } catch let error as OnloError {
             if error.transportCode != nil { return .deferred }
             throw error
@@ -1375,12 +1560,39 @@ public actor OnloSDK {
     /// it never creates a new token or substitutes a different owner scope.
     @discardableResult
     private func reconcilePushIntent(allowTokenRefresh: Bool) async throws -> OnloPushRegistrationState {
-        guard !pushReconciliationInProgress else { return .pendingRetry }
+        guard pushReconciliationID == nil else {
+            pushReconciliationWakeRequested = true
+            return .pendingRetry
+        }
         guard let session = runtimeSession,
               state == .anonymousReady || state == .identifiedReady else {
             throw OnloError.requiresNetwork
         }
+        let operationID = UUID()
+        let authority = configAuthority
+        let persistence = persistenceAuthority(for: session, bearerContext: authority)
+        pushReconciliationID = operationID
+        defer {
+            if pushReconciliationID == operationID {
+                pushReconciliationID = nil
+                if pushReconciliationWakeRequested {
+                    pushReconciliationWakeRequested = false
+                    Task { [weak self] in
+                        _ = try? await self?.reconcilePushIntent(allowTokenRefresh: true)
+                    }
+                }
+            }
+        }
         guard let intent = try await pushIntentStore.load() else { return .registered }
+        guard pushReconciliationID == operationID,
+              configAuthority == authority,
+              runtimeSession?.sessionId == session.sessionId,
+              runtimeSession?.chatToken == session.chatToken,
+              runtimeSession?.credential.generation == session.credential.generation,
+              runtimeSession?.credential.ownerScope == session.credential.ownerScope else {
+            pushReconciliationWakeRequested = true
+            return .pendingRetry
+        }
         guard intent.ownerScope == session.credential.ownerScope else {
             // Keep the previous account's protected work unavailable rather
             // than attempting to authorise it with the current account.
@@ -1393,15 +1605,21 @@ public actor OnloSDK {
         // own best-effort reconciliation hook. Without ownership established
         // first, a reconstructed after_token_refresh intent recursively
         // resumes before the durable prerequisite can be consumed.
-        pushReconciliationInProgress = true
-        defer { pushReconciliationInProgress = false }
         if intent.requiresFreshBearer {
             guard allowTokenRefresh else { return .requiresHostAction }
             try await resume(session.credential)
             guard let refreshed = runtimeSession, refreshed.credential.ownerScope == intent.ownerScope else { return .pendingRetry }
             let once = copiedPushIntent(intent, retryDirective: nil, requiresFreshBearer: false)
-            try await pushIntentStore.save(once)
+            let refreshedAuthority = persistenceAuthority(for: refreshed, bearerContext: configAuthority)
+            guard let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring,
+                  try await pushStore.save(once, authority: refreshedAuthority) else {
+                pushReconciliationWakeRequested = true
+                return .pendingRetry
+            }
             return try await sendPushIntent(once, session: refreshed, allowTokenRefresh: false, permitsBlockedOwner: false)
+        }
+        guard persistence == persistenceAuthority(for: session, bearerContext: authority) else {
+            return .pendingRetry
         }
         return try await sendPushIntent(intent, session: session, allowTokenRefresh: allowTokenRefresh, permitsBlockedOwner: false)
     }
@@ -1418,8 +1636,15 @@ public actor OnloSDK {
             let result = try await resumeForLogoutUnlink(session.credential)
             let credential = StoredSessionCredential(installationId: result.installationId, generation: result.generation, proposedCredential: result.proposedCredential, identityClass: result.identityClass, ownerScope: intent.ownerScope, logoutPending: true)
             let once = copiedPushIntent(intent, retryDirective: nil, requiresFreshBearer: false)
-            try await pushIntentStore.save(once)
-            return try await sendPushIntent(once, session: RuntimeSession(sessionId: result.sessionId, chatToken: result.chatToken, credential: credential), allowTokenRefresh: false, permitsBlockedOwner: true)
+            let refreshed = RuntimeSession(sessionId: result.sessionId, chatToken: result.chatToken, credential: credential)
+            let refreshedAuthority = persistenceAuthority(for: refreshed, bearerContext: configAuthority)
+            if let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring {
+                await pushStore.activateAuthority(refreshedAuthority)
+                guard try await pushStore.save(once, authority: refreshedAuthority) else { return .pendingRetry }
+            } else {
+                throw OnloError.persistenceUnavailable
+            }
+            return try await sendPushIntent(once, session: refreshed, allowTokenRefresh: false, permitsBlockedOwner: true)
         }
         return try await sendPushIntent(intent, session: session, allowTokenRefresh: true, permitsBlockedOwner: true)
     }
@@ -1430,11 +1655,21 @@ public actor OnloSDK {
         allowTokenRefresh: Bool,
         permitsBlockedOwner: Bool
     ) async throws -> OnloPushRegistrationState {
+        let bearerAuthority = configAuthority
+        let persistence = persistenceAuthority(for: session, bearerContext: bearerAuthority)
+        if permitsBlockedOwner,
+           let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring {
+            await pushStore.activateAuthority(persistence)
+        }
         let authorised: Bool
         if permitsBlockedOwner {
             authorised = state == .logoutPending && session.credential.ownerScope == intent.ownerScope
         } else {
-            authorised = runtimeSession?.sessionId == session.sessionId && runtimeSession?.credential.ownerScope == intent.ownerScope
+            authorised = configAuthority == bearerAuthority &&
+                runtimeSession?.sessionId == session.sessionId &&
+                runtimeSession?.chatToken == session.chatToken &&
+                runtimeSession?.credential.generation == session.credential.generation &&
+                runtimeSession?.credential.ownerScope == intent.ownerScope
         }
         guard authorised, let requestFactory else { return .pendingRetry }
         let body: PushTokenRequest
@@ -1449,7 +1684,10 @@ public actor OnloSDK {
             let response = try await transport.execute(try requestFactory.pushToken(body, chatToken: session.chatToken))
             let envelope = try OnloResponseDecoder.envelope(PushTokenResult.self, from: response)
             if !permitsBlockedOwner {
-                guard runtimeSession?.sessionId == session.sessionId,
+                guard configAuthority == bearerAuthority,
+                      runtimeSession?.sessionId == session.sessionId,
+                      runtimeSession?.chatToken == session.chatToken,
+                      runtimeSession?.credential.generation == session.credential.generation,
                       runtimeSession?.credential.ownerScope == intent.ownerScope else { return .pendingRetry }
             }
             switch (intent.action, envelope.result) {
@@ -1458,7 +1696,8 @@ public actor OnloSDK {
                 // Retain the active token only in protected storage. It is
                 // needed to durably convert an active association into an
                 // unregister intent when this owner logs out.
-                try await pushIntentStore.save(ProtectedPushIntent(
+                guard let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring,
+                      try await pushStore.save(ProtectedPushIntent(
                     ownerScope: intent.ownerScope,
                     action: .register,
                     token: intent.token,
@@ -1468,10 +1707,11 @@ public actor OnloSDK {
                     eligibleAt: nil,
                     isRegistered: true,
                     automaticallyRetryable: false
-                ))
+                ), authority: persistence) else { return .pendingRetry }
             case (.unregister, .inactive(let state)):
                 guard state == .inactive else { throw OnloError.invalidResponse }
-                try await pushIntentStore.clear()
+                guard let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring,
+                      try await pushStore.clear(authority: persistence) else { return .pendingRetry }
             default:
                 throw OnloError.invalidResponse
             }
@@ -1484,7 +1724,8 @@ public actor OnloSDK {
                     // Persist this prerequisite before touching session state;
                     // recovery can never retry with the stale bearer.
                     let gated = copiedPushIntent(intent, retryDirective: .afterTokenRefresh, requiresFreshBearer: true)
-                    try await pushIntentStore.save(gated)
+                    guard let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring,
+                          try await pushStore.save(gated, authority: persistence) else { return .pendingRetry }
                     let refreshed: RuntimeSession
                     if permitsBlockedOwner {
                         let result = try await resumeForLogoutUnlink(session.credential)
@@ -1496,12 +1737,20 @@ public actor OnloSDK {
                         refreshed = active
                     }
                     let once = copiedPushIntent(gated, retryDirective: nil, requiresFreshBearer: false)
-                    try await pushIntentStore.save(once)
+                    let refreshedAuthority = persistenceAuthority(for: refreshed, bearerContext: configAuthority)
+                    if permitsBlockedOwner {
+                        await pushStore.activateAuthority(refreshedAuthority)
+                    }
+                    guard try await pushStore.save(once, authority: refreshedAuthority) else { return .pendingRetry }
                     return try await sendPushIntent(once, session: refreshed, allowTokenRefresh: false, permitsBlockedOwner: permitsBlockedOwner)
                 case .afterBackoff:
-                    return try await deferPushIntent(intent, serverRetryAfterMs: remote.retry.retryAfterMs, directive: .afterBackoff)
+                    return try await deferPushIntent(intent, serverRetryAfterMs: remote.retry.retryAfterMs, directive: .afterBackoff, authority: persistence)
                 case .never, .afterAttestation, .afterFullSync, .afterTokenRefresh:
-                    try await pushIntentStore.save(copiedPushIntent(intent, retryDirective: remote.retry.directive, requiresFreshBearer: false, automaticallyRetryable: false))
+                    guard let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring,
+                          try await pushStore.save(
+                              copiedPushIntent(intent, retryDirective: remote.retry.directive, requiresFreshBearer: false, automaticallyRetryable: false),
+                              authority: persistence
+                          ) else { return .pendingRetry }
                     return .requiresHostAction
                 }
             }
@@ -1509,11 +1758,11 @@ public actor OnloSDK {
             // idempotent, so retain the exact protected intent with bounded
             // local backoff rather than treating it as server-directed retry.
             if error.transportCode != nil {
-                return try await deferPushIntent(intent, serverRetryAfterMs: nil, directive: nil)
+                return try await deferPushIntent(intent, serverRetryAfterMs: nil, directive: nil, authority: persistence)
             }
             throw error
         } catch {
-            return try await deferPushIntent(intent, serverRetryAfterMs: nil, directive: nil)
+            return try await deferPushIntent(intent, serverRetryAfterMs: nil, directive: nil, authority: persistence)
         }
     }
 
@@ -1521,9 +1770,20 @@ public actor OnloSDK {
         ProtectedPushIntent(ownerScope: intent.ownerScope, action: intent.action, token: intent.token, notificationPreference: intent.notificationPreference, locale: intent.locale, attemptCount: attemptCount ?? intent.attemptCount, eligibleAt: eligibleAt, retryDirective: retryDirective, requiresFreshBearer: requiresFreshBearer, isRegistered: false, automaticallyRetryable: automaticallyRetryable ?? intent.automaticallyRetryable)
     }
 
-    private func deferPushIntent(_ intent: ProtectedPushIntent, serverRetryAfterMs: Int?, directive: RetryDirective?) async throws -> OnloPushRegistrationState {
+    private func deferPushIntent(
+        _ intent: ProtectedPushIntent,
+        serverRetryAfterMs: Int?,
+        directive: RetryDirective?,
+        authority: PersistenceAuthority
+    ) async throws -> OnloPushRegistrationState {
+        guard let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring else {
+            throw OnloError.persistenceUnavailable
+        }
         guard intent.attemptCount < 3 else {
-            try await pushIntentStore.save(copiedPushIntent(intent, retryDirective: directive, requiresFreshBearer: false, automaticallyRetryable: false))
+            guard try await pushStore.save(
+                copiedPushIntent(intent, retryDirective: directive, requiresFreshBearer: false, automaticallyRetryable: false),
+                authority: authority
+            ) else { return .pendingRetry }
             return .requiresHostAction
         }
         let attempt = intent.attemptCount + 1
@@ -1536,14 +1796,17 @@ public actor OnloSDK {
             delay = (base * (1 + jitter)) / 1_000
         }
         let deferred = copiedPushIntent(intent, retryDirective: directive, requiresFreshBearer: false, eligibleAt: now().addingTimeInterval(delay), attemptCount: attempt)
-        try await pushIntentStore.save(deferred)
-        schedulePushRetry(for: deferred, delay: delay)
+        guard try await pushStore.save(deferred, authority: authority) else { return .pendingRetry }
+        schedulePushRetry(for: deferred, delay: delay, authority: authority)
         return .pendingRetry
     }
 
-    private func schedulePushRetry(for intent: ProtectedPushIntent, delay: TimeInterval) {
+    private func schedulePushRetry(
+        for intent: ProtectedPushIntent,
+        delay: TimeInterval,
+        authority: PersistenceAuthority
+    ) {
         pushRetryTask?.cancel()
-        let scope = intent.ownerScope
         pushRetryTask = Task { [weak self] in
             let maxSleep = Double(UInt64.max) / 1_000_000_000
             if delay > 0, delay.isFinite, delay <= maxSleep {
@@ -1551,17 +1814,40 @@ public actor OnloSDK {
             } else {
                 return // lifecycle recovery observes the persisted eligibility
             }
-            guard !Task.isCancelled,
-                  await self?.runtimeSession?.credential.ownerScope == scope else { return }
-            _ = try? await self?.reconcilePushIntent(allowTokenRefresh: true)
+            guard !Task.isCancelled else { return }
+            await self?.wakePushRetry(authority: authority)
         }
+    }
+
+    private func wakePushRetry(authority: PersistenceAuthority) async {
+        pushRetryTask = nil
+        guard let session = runtimeSession,
+              persistenceAuthority(for: session, bearerContext: configAuthority) == authority,
+              state == .anonymousReady || state == .identifiedReady else { return }
+        _ = try? await reconcilePushIntent(allowTokenRefresh: true)
     }
 
     private func persistPushUnregister(for scope: OwnerScope) async throws {
         guard let intent = try await pushIntentStore.load(), intent.ownerScope == scope else { return }
+        let protectedState = try await credentialStore.loadState()
+        guard let credential = protectedState.credential,
+              credential.ownerScope == scope else { throw OnloError.invalidState }
+        let authority = PersistenceAuthority(
+            ownerScope: scope,
+            sessionGeneration: credential.generation,
+            sessionId: runtimeSession?.sessionId ?? "",
+            bearerContext: configAuthority
+        )
+        guard let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring else {
+            throw OnloError.persistenceUnavailable
+        }
+        await pushStore.activateAuthority(authority)
         // This protected replacement is committed before the account boundary
         // performs any network work. It contains no bearer or identity proof.
-        try await pushIntentStore.save(ProtectedPushIntent(ownerScope: scope, action: .unregister))
+        guard try await pushStore.save(
+            ProtectedPushIntent(ownerScope: scope, action: .unregister),
+            authority: authority
+        ) else { throw OnloError.invalidState }
     }
 
     private func reconcilePushAfterSessionSuccess() async {
@@ -1607,6 +1893,7 @@ public actor OnloSDK {
         try await commitProtectedState(credential: credential, pendingTransition: nil)
         runtimeSession = RuntimeSession(sessionId: result.result.sessionId, chatToken: result.result.chatToken, credential: credential)
         configAuthority = UUID()
+        try await activatePersistenceAuthority(for: runtimeSession!)
         state = .anonymousReady
         await refreshConfigurationAfterSessionSuccess()
         startDurableDispatchIfNeeded()
@@ -1696,6 +1983,21 @@ public actor OnloSDK {
         activeDispatchIDs[scope] = nil
     }
 
+    private func hasDispatchAuthority(
+        dispatchID: UUID,
+        scope: OwnerScope,
+        authority: UUID,
+        session: RuntimeSession
+    ) -> Bool {
+        activeDispatchIDs[scope] == dispatchID &&
+            configAuthority == authority &&
+            (state == .anonymousReady || state == .identifiedReady) &&
+            runtimeSession?.credential.ownerScope == scope &&
+            runtimeSession?.credential.generation == session.credential.generation &&
+            runtimeSession?.sessionId == session.sessionId &&
+            runtimeSession?.chatToken == session.chatToken
+    }
+
     private func runDurableDispatch(dispatchID: UUID, scope: OwnerScope, authority: UUID) async {
         let dispatchStartedAt = Date()
         var shouldAdvanceQueue = false
@@ -1707,12 +2009,18 @@ public actor OnloSDK {
             }
         }
         do {
-            guard configAuthority == authority,
-                  let session = runtimeSession,
+            guard let session = runtimeSession,
                   session.credential.ownerScope == scope,
+                  hasDispatchAuthority(
+                      dispatchID: dispatchID,
+                      scope: scope,
+                      authority: authority,
+                      session: session
+                  ),
                   let requestFactory,
                   let streamTransport = transport as? any OnloChatSSETransport else { return }
-            guard await reconcileAcceptedOutbox(session: session) else {
+            let persistence = persistenceAuthority(for: session, bearerContext: authority)
+            guard await reconcileAcceptedOutbox(session: session, authority: persistence) else {
                 scheduleAcceptedReconciliationRetry(
                     scope: scope,
                     authority: authority,
@@ -1720,7 +2028,12 @@ public actor OnloSDK {
                 )
                 return
             }
-            guard let entry = try await nextDurableTextDispatch() else { return }
+            guard hasDispatchAuthority(dispatchID: dispatchID, scope: scope, authority: authority, session: session),
+                  let entry = try await nextDurableTextDispatch(
+                      dispatchID: dispatchID,
+                      expectedAuthority: authority
+                  ),
+                  hasDispatchAuthority(dispatchID: dispatchID, scope: scope, authority: authority, session: session) else { return }
             let request = try requestFactory.chat(
                 ChatRequest(sessionId: session.sessionId, clientMessageId: entry.clientMessageId.uuidString, message: entry.message, attachments: entry.attachments.map(\.attachment)),
                 chatToken: session.chatToken
@@ -1738,8 +2051,12 @@ public actor OnloSDK {
             do {
                 for try await event in streamTransport.chatEvents(for: request) {
                     guard !Task.isCancelled,
-                          configAuthority == authority,
-                          runtimeSession?.credential.ownerScope == scope else { return }
+                          hasDispatchAuthority(
+                              dispatchID: dispatchID,
+                              scope: scope,
+                              authority: authority,
+                              session: session
+                          ) else { return }
                     if case let .accepted(clientMessageId, messageId, conversationId, _, duplicate, _) = event {
                         guard !accepted else {
                             throw OnloError.transport(code: "duplicate_accepted_event")
@@ -1752,7 +2069,19 @@ public actor OnloSDK {
                             ),
                             startedAt: chatStartedAt
                         )
-                        try await markChatAccepted(clientMessageId: clientMessageId, messageId: messageId, conversationId: conversationId, entry: entry)
+                        try await markChatAccepted(
+                            clientMessageId: clientMessageId,
+                            messageId: messageId,
+                            conversationId: conversationId,
+                            entry: entry,
+                            authority: persistence
+                        )
+                        guard hasDispatchAuthority(
+                            dispatchID: dispatchID,
+                            scope: scope,
+                            authority: authority,
+                            session: session
+                        ) else { return }
                         accepted = true
                         acceptedConversationId = conversationId
                         await record(
@@ -1794,13 +2123,25 @@ public actor OnloSDK {
                             guard acceptedConversationId == conversationId else {
                                 throw OnloError.transport(code: "done_conversation_mismatch")
                             }
-                            try await markChatReconciled(entry: entry)
+                            try await markChatReconciled(entry: entry, authority: persistence)
+                            guard hasDispatchAuthority(
+                                dispatchID: dispatchID,
+                                scope: scope,
+                                authority: authority,
+                                session: session
+                            ) else { return }
                         case .error:
                             break
                         case .accepted:
                             break
                         }
                         try await handleChatEvent(event, entry: entry, session: session)
+                        guard hasDispatchAuthority(
+                            dispatchID: dispatchID,
+                            scope: scope,
+                            authority: authority,
+                            session: session
+                        ) else { return }
                         yield(event, for: entry)
                         if case .done = event {
                             await record(
@@ -1816,16 +2157,21 @@ public actor OnloSDK {
                 }
                 if !accepted {
                     let error = OnloError.transport(code: "network_unavailable")
-                    try await recordDurableDispatchFailure(entry, retryable: true, safeCode: error.safeCode)
+                    try await recordDurableDispatchFailure(entry, retryable: true, safeCode: error.safeCode, authority: persistence)
                     finishObserver(for: entry, error: error)
-                    await scheduleRetryWake(for: scope)
+                    await scheduleRetryWake(
+                        for: scope,
+                        dispatchID: dispatchID,
+                        authority: authority,
+                        session: session
+                    )
                 } else {
                     finishObserver(for: entry)
                     shouldAdvanceQueue = true
                 }
             } catch let error as OnloError {
                 guard !Task.isCancelled, configAuthority == authority,
-                      runtimeSession?.credential.ownerScope == scope else { return }
+                      hasDispatchAuthority(dispatchID: dispatchID, scope: scope, authority: authority, session: session) else { return }
                 await record(
                     operation: "chat",
                     code: error.safeCode,
@@ -1836,10 +2182,15 @@ public actor OnloSDK {
                 )
                 if !accepted {
                     let retryable = isRetryableChatFailure(error)
-                    try? await recordDurableDispatchFailure(entry, retryable: retryable, safeCode: error.safeCode)
+                    try? await recordDurableDispatchFailure(entry, retryable: retryable, safeCode: error.safeCode, authority: persistence)
                     finishObserver(for: entry, error: error)
                     if retryable {
-                        await scheduleRetryWake(for: scope)
+                        await scheduleRetryWake(
+                            for: scope,
+                            dispatchID: dispatchID,
+                            authority: authority,
+                            session: session
+                        )
                     } else {
                         shouldAdvanceQueue = true
                     }
@@ -1849,7 +2200,7 @@ public actor OnloSDK {
                 }
             } catch {
                 guard !Task.isCancelled, configAuthority == authority,
-                      runtimeSession?.credential.ownerScope == scope else { return }
+                      hasDispatchAuthority(dispatchID: dispatchID, scope: scope, authority: authority, session: session) else { return }
                 let error = OnloError.transport(code: "network_unavailable")
                 await record(
                     operation: "chat",
@@ -1863,9 +2214,14 @@ public actor OnloSDK {
                     finishObserver(for: entry, error: error)
                     shouldAdvanceQueue = true
                 } else {
-                    try? await recordDurableDispatchFailure(entry, retryable: true, safeCode: error.safeCode)
+                    try? await recordDurableDispatchFailure(entry, retryable: true, safeCode: error.safeCode, authority: persistence)
                     finishObserver(for: entry, error: error)
-                    await scheduleRetryWake(for: scope)
+                    await scheduleRetryWake(
+                        for: scope,
+                        dispatchID: dispatchID,
+                        authority: authority,
+                        session: session
+                    )
                 }
             }
         } catch let error as OnloError {
@@ -1885,21 +2241,50 @@ public actor OnloSDK {
         }
     }
 
-    private func scheduleRetryWake(for scope: OwnerScope) async {
+    private func scheduleRetryWake(
+        for scope: OwnerScope,
+        dispatchID: UUID,
+        authority: UUID,
+        session: RuntimeSession
+    ) async {
         retryWakeTasks.removeValue(forKey: scope)?.cancel()
+        guard hasDispatchAuthority(
+            dispatchID: dispatchID,
+            scope: scope,
+            authority: authority,
+            session: session
+        ) else { return }
         guard let entries = try? await ownerStore.outboxEntries(for: scope),
+              hasDispatchAuthority(
+                  dispatchID: dispatchID,
+                  scope: scope,
+                  authority: authority,
+                  session: session
+              ),
               let nextAttemptAt = entries.first(where: { $0.state == .failedRetryable })?.nextAttemptAt else { return }
         let delay = max(0, nextAttemptAt.timeIntervalSince(now()))
         retryWakeTasks[scope] = Task {
             if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
             guard !Task.isCancelled else { return }
-            self.wakeDurableDispatch(scope: scope)
+            self.wakeDurableDispatch(
+                scope: scope,
+                authority: authority,
+                session: session
+            )
         }
     }
 
-    private func wakeDurableDispatch(scope: OwnerScope) {
+    private func wakeDurableDispatch(
+        scope: OwnerScope,
+        authority: UUID,
+        session: RuntimeSession
+    ) {
         retryWakeTasks[scope] = nil
-        guard runtimeSession?.credential.ownerScope == scope else { return }
+        guard configAuthority == authority,
+              runtimeSession?.sessionId == session.sessionId,
+              runtimeSession?.chatToken == session.chatToken,
+              runtimeSession?.credential.generation == session.credential.generation,
+              runtimeSession?.credential.ownerScope == scope else { return }
         startDurableDispatchIfNeeded()
     }
 
@@ -1952,9 +2337,12 @@ public actor OnloSDK {
         var recordedReady = false
         do {
             for try await event in transport.streamEvents(for: request) {
-                guard !Task.isCancelled,
-                      configAuthority == authority,
-                      runtimeSession?.credential.ownerScope == scope else { return }
+                guard hasForegroundAuthority(
+                    streamID: streamID,
+                    authority: authority,
+                    scope: scope,
+                    session: session
+                ) else { return }
                 switch event {
                 case .ready:
                     foregroundReconnectAttempt = 0
@@ -1966,19 +2354,31 @@ public actor OnloSDK {
                 case .configChanged:
                     helpCenterCache = nil
                     try? await refreshConfiguration()
-                    guard configAuthority == authority,
-                          runtimeSession?.credential.ownerScope == scope else { return }
+                    guard hasForegroundAuthority(
+                        streamID: streamID,
+                        authority: authority,
+                        scope: scope,
+                        session: session
+                    ) else { return }
                 case let .inboxConversation(conversationId), let .inboxMessage(conversationId):
                     let transcript = try? await reconcileTranscript(
                         conversationId: conversationId,
                         session: session
                     )
                     startDurableDispatchIfNeeded()
-                    guard configAuthority == authority,
-                          runtimeSession?.credential.ownerScope == scope else { return }
+                    guard hasForegroundAuthority(
+                        streamID: streamID,
+                        authority: authority,
+                        scope: scope,
+                        session: session
+                    ) else { return }
                     guard let inbox = try? await authorisedInbox(for: session) else { continue }
-                    guard configAuthority == authority,
-                          runtimeSession?.credential.ownerScope == scope else { return }
+                    guard hasForegroundAuthority(
+                        streamID: streamID,
+                        authority: authority,
+                        scope: scope,
+                        session: session
+                    ) else { return }
                     publishMessengerUpdate(MessengerRealtimeUpdate(
                         conversationId: conversationId,
                         transcript: transcript,
@@ -1991,6 +2391,23 @@ public actor OnloSDK {
         } catch {
             await record(operation: "stream", code: "network_unavailable", requestId: nil, startedAt: startedAt)
         }
+    }
+
+    private func hasForegroundAuthority(
+        streamID: UUID,
+        authority: UUID,
+        scope: OwnerScope,
+        session: RuntimeSession
+    ) -> Bool {
+        !Task.isCancelled &&
+            foregroundStreamID == streamID &&
+            foregroundStreamScope == scope &&
+            configAuthority == authority &&
+            runtimeSession?.sessionId == session.sessionId &&
+            runtimeSession?.chatToken == session.chatToken &&
+            runtimeSession?.credential.generation == session.credential.generation &&
+            runtimeSession?.credential.ownerScope == scope &&
+            (state == .anonymousReady || state == .identifiedReady)
     }
 
     private func finishForegroundStream(
@@ -2084,7 +2501,13 @@ public actor OnloSDK {
         return code == "network_unavailable" || code == "chat_retryable"
     }
 
-    private func markChatAccepted(clientMessageId: String, messageId: String, conversationId: String, entry: OutboxEntry) async throws {
+    private func markChatAccepted(
+        clientMessageId: String,
+        messageId: String,
+        conversationId: String,
+        entry: OutboxEntry,
+        authority: PersistenceAuthority
+    ) async throws {
         guard UUID(uuidString: clientMessageId) == entry.clientMessageId else {
             throw OnloError.transport(code: "accepted_client_message_mismatch")
         }
@@ -2103,20 +2526,38 @@ public actor OnloSDK {
                 serverMessageId: messageId,
                 aiRunId: entry.aiRunId
             )
-        try await ownerStore.update(accepted)
+        guard let store = ownerStore as? any AuthorityFencedPersisting,
+              try await store.update(
+                  accepted,
+                  expectedState: .sending,
+                  expectedAttemptCount: entry.attemptCount,
+                  authority: authority
+              ) else { throw OnloError.invalidState }
     }
 
-    private func markChatReconciled(entry: OutboxEntry) async throws {
+    private func markChatReconciled(
+        entry: OutboxEntry,
+        authority: PersistenceAuthority
+    ) async throws {
         guard let accepted = try await ownerStore.outboxEntries(for: entry.ownerScope).first(where: {
             $0.clientMessageId == entry.clientMessageId && $0.state == .accepted
         }) else { return }
         var reconciled = accepted
         reconciled.state = .reconciled
-        try await ownerStore.update(reconciled)
+        guard let store = ownerStore as? any AuthorityFencedPersisting,
+              try await store.update(
+                  reconciled,
+                  expectedState: .accepted,
+                  expectedAttemptCount: accepted.attemptCount,
+                  authority: authority
+              ) else { throw OnloError.invalidState }
         acceptedReconciliationRetryTasks.removeValue(forKey: entry.ownerScope)?.cancel()
     }
 
-    private func reconcileAcceptedOutbox(session: RuntimeSession) async -> Bool {
+    private func reconcileAcceptedOutbox(
+        session: RuntimeSession,
+        authority: PersistenceAuthority
+    ) async -> Bool {
         let entries: [OutboxEntry]
         do {
             entries = try await ownerStore.outboxEntries(for: session.credential.ownerScope)
@@ -2137,9 +2578,13 @@ public actor OnloSDK {
                 }), transcript.messages.dropFirst(acceptedIndex + 1).contains(where: {
                     $0.role != "user" && $0.role != "customer"
                 }) else { return false }
-                var reconciled = entry
-                reconciled.state = .reconciled
-                try await ownerStore.update(reconciled)
+                guard let store = ownerStore as? any AuthorityFencedPersisting,
+                      try await store.reconcileAccepted(
+                          entry,
+                          transcript: transcript,
+                          expectedServerMessageId: serverMessageId,
+                          authority: authority
+                      ) else { return false }
             } catch {
                 return false
             }
@@ -2204,23 +2649,31 @@ public actor OnloSDK {
         session: RuntimeSession
     ) async throws -> ConversationTranscriptResult {
         guard let requestFactory else { throw OnloError.notInitialized }
-        let authority = configAuthority
-        let request = try requestFactory.transcript(conversationId: conversationId, query: .latest(limit: 100), chatToken: session.chatToken)
-        let response = try await transport.execute(request)
-        let transcript = try OnloResponseDecoder.widget(ConversationTranscriptResult.self, from: response)
-        guard configAuthority == authority,
-              isAuthorisedTranscript(transcript, conversationId: conversationId, session: session) else {
-            throw OnloError.invalidResponse
+        return try await withSerializedTranscriptObservation(
+            ownerScope: session.credential.ownerScope,
+            conversationId: conversationId
+        ) {
+            let authority = configAuthority
+            let request = try requestFactory.transcript(conversationId: conversationId, query: .latest(limit: 100), chatToken: session.chatToken)
+            let response = try await transport.execute(request)
+            let transcript = try OnloResponseDecoder.widget(ConversationTranscriptResult.self, from: response)
+            guard configAuthority == authority,
+                  isAuthorisedTranscript(transcript, conversationId: conversationId, session: session) else {
+                throw OnloError.invalidResponse
+            }
+            guard let transcriptStore = ownerStore as? any AuthorityFencedPersisting else { throw OnloError.persistenceUnavailable }
+            guard try await transcriptStore.replaceTranscript(
+                transcript,
+                authority: persistenceAuthority(for: session, bearerContext: authority)
+            ) else { throw OnloError.invalidState }
+            guard configAuthority == authority,
+                  runtimeSession?.sessionId == session.sessionId,
+                  runtimeSession?.credential.ownerScope == session.credential.ownerScope else {
+                throw OnloError.invalidState
+            }
+            transcriptValidationAuthorities[conversationId] = authority
+            return transcript
         }
-        guard let transcriptStore = ownerStore as? any TranscriptPersisting else { throw OnloError.persistenceUnavailable }
-        try await transcriptStore.replaceTranscript(transcript, for: session.credential.ownerScope)
-        guard configAuthority == authority,
-              runtimeSession?.sessionId == session.sessionId,
-              runtimeSession?.credential.ownerScope == session.credential.ownerScope else {
-            throw OnloError.invalidState
-        }
-        transcriptValidationAuthorities[conversationId] = authority
-        return transcript
     }
 
     /// The server authorises the requested conversation against the active
@@ -2298,12 +2751,16 @@ public actor OnloSDK {
     }
 
     private func applyResumedSession(_ result: SessionResult, previous: StoredSessionCredential) async throws {
+        // Rotate the actor-visible bearer authority before the persistence
+        // actor arbitrates the final old-vs-revocation ordering.
+        configAuthority = UUID()
         let scope: OwnerScope
         if previous.identityClass == result.identityClass {
             scope = previous.ownerScope
         } else {
             // A server-side identity transition cannot expose the old partition locally.
             cancelActiveSends(for: previous.ownerScope)
+            await revokePersistenceAuthority(for: previous.ownerScope)
             await invalidateMessengerPresentations()
             try await ownerStore.beginLogout(for: previous.ownerScope)
             try await ownerStore.finishLogout(for: previous.ownerScope)
@@ -2315,6 +2772,7 @@ public actor OnloSDK {
         // foreground recovery cannot remain attached to stale authority.
         if runtimeSession?.credential.ownerScope == scope {
             cancelActiveSends(for: scope)
+            await revokePersistenceAuthority(for: scope)
         }
         let credential = StoredSessionCredential(
             installationId: result.installationId,
@@ -2326,7 +2784,7 @@ public actor OnloSDK {
         )
         try await commitProtectedState(credential: credential, pendingTransition: nil)
         runtimeSession = RuntimeSession(sessionId: result.sessionId, chatToken: result.chatToken, credential: credential)
-        configAuthority = UUID()
+        try await activatePersistenceAuthority(for: runtimeSession!)
         state = result.identityClass == .anonymous ? .anonymousReady : .identifiedReady
         await refreshConfigurationAfterSessionSuccess()
         startDurableDispatchIfNeeded()
@@ -2367,6 +2825,7 @@ public actor OnloSDK {
             let result = try await sendSession(try pending.sessionOperation(userJwt: userJwt), installationId: installationId)
             guard pending.accepts(result.result), result.result.identityClass == .identified else { throw OnloError.invalidResponse }
             cancelActiveSends(for: previous.ownerScope)
+            await revokePersistenceAuthority(for: previous.ownerScope)
             await invalidateMessengerPresentations()
             try await ownerStore.beginLogout(for: previous.ownerScope)
             try await ownerStore.finishLogout(for: previous.ownerScope)
@@ -2376,6 +2835,7 @@ public actor OnloSDK {
             try await commitProtectedState(credential: credential, pendingTransition: nil)
             runtimeSession = RuntimeSession(sessionId: result.result.sessionId, chatToken: result.result.chatToken, credential: credential)
             configAuthority = UUID()
+            try await activatePersistenceAuthority(for: runtimeSession!)
             state = .identifiedReady
             await refreshConfigurationAfterSessionSuccess()
             startDurableDispatchIfNeeded()
@@ -2396,6 +2856,7 @@ public actor OnloSDK {
                 }
                 state = .anonymousReady
                 configAuthority = UUID()
+                try await activatePersistenceAuthority(for: anonymousSession)
                 await refreshConfigurationAfterSessionSuccess()
                 startDurableDispatchIfNeeded()
                 startForegroundStreamIfAvailable()
@@ -2412,10 +2873,19 @@ public actor OnloSDK {
     private func continuePendingLogout(_ stored: StoredSessionCredential, pendingTransition: PendingSessionTransition?) async throws {
         if let pendingTransition, pendingTransition.matchesResume(stored) {
             let resumed = try await resumeForLogoutUnlink(stored)
-            if let intent = try await pushIntentStore.load(), intent.requiresFreshBearer {
-                try await pushIntentStore.save(copiedPushIntent(intent, retryDirective: nil, requiresFreshBearer: false))
-            }
             let refreshed = StoredSessionCredential(installationId: resumed.installationId, generation: resumed.generation, proposedCredential: resumed.proposedCredential, identityClass: resumed.identityClass, ownerScope: stored.ownerScope, logoutPending: true)
+            if let intent = try await pushIntentStore.load(), intent.requiresFreshBearer {
+                let session = RuntimeSession(sessionId: resumed.sessionId, chatToken: resumed.chatToken, credential: refreshed)
+                let authority = persistenceAuthority(for: session, bearerContext: configAuthority)
+                guard let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring else {
+                    throw OnloError.persistenceUnavailable
+                }
+                await pushStore.activateAuthority(authority)
+                guard try await pushStore.save(
+                    copiedPushIntent(intent, retryDirective: nil, requiresFreshBearer: false),
+                    authority: authority
+                ) else { throw OnloError.invalidState }
+            }
             _ = try await logout(refreshed, chatToken: resumed.chatToken, sessionId: resumed.sessionId)
             return
         }
@@ -2439,12 +2909,21 @@ public actor OnloSDK {
             guard intent.automaticallyRetryable,
                   intent.eligibleAt.map({ now() >= $0 }) ?? true else { return }
             let resumed = try await resumeForLogoutUnlink(stored)
+            let refreshed = StoredSessionCredential(installationId: resumed.installationId, generation: resumed.generation, proposedCredential: resumed.proposedCredential, identityClass: resumed.identityClass, ownerScope: stored.ownerScope, logoutPending: true)
             if intent.requiresFreshBearer {
                 // This durable marker is consumed by the single recovery
                 // Resume above; the subsequent unregister cannot resume again.
-                try await pushIntentStore.save(copiedPushIntent(intent, retryDirective: nil, requiresFreshBearer: false))
+                let session = RuntimeSession(sessionId: resumed.sessionId, chatToken: resumed.chatToken, credential: refreshed)
+                let authority = persistenceAuthority(for: session, bearerContext: configAuthority)
+                guard let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring else {
+                    throw OnloError.persistenceUnavailable
+                }
+                await pushStore.activateAuthority(authority)
+                guard try await pushStore.save(
+                    copiedPushIntent(intent, retryDirective: nil, requiresFreshBearer: false),
+                    authority: authority
+                ) else { throw OnloError.invalidState }
             }
-            let refreshed = StoredSessionCredential(installationId: resumed.installationId, generation: resumed.generation, proposedCredential: resumed.proposedCredential, identityClass: resumed.identityClass, ownerScope: stored.ownerScope, logoutPending: true)
             _ = try await logout(refreshed, chatToken: resumed.chatToken, sessionId: resumed.sessionId)
             return
         }
@@ -2465,6 +2944,7 @@ public actor OnloSDK {
         runtimeSession = nil
         configAuthority = UUID()
         cancelActiveSends(for: credential.ownerScope)
+        await revokePersistenceAuthority(for: credential.ownerScope)
         try await ownerStore.beginLogout(for: credential.ownerScope)
         let pendingCredential = StoredSessionCredential(
             installationId: credential.installationId,
@@ -2520,6 +3000,7 @@ public actor OnloSDK {
             credential: anonymousCredential
         )
         configAuthority = UUID()
+        try await activatePersistenceAuthority(for: runtimeSession!)
         state = .anonymousReady
         await refreshConfigurationAfterSessionSuccess()
         startDurableDispatchIfNeeded()
@@ -2535,9 +3016,12 @@ public actor OnloSDK {
         guard let session = runtimeSession, let requestFactory else { throw OnloError.requiresNetwork }
         let startedAt = Date()
         let authority = configAuthority
+        let persistence = persistenceAuthority(for: session, bearerContext: authority)
         var persisted = ProtectedMobileConfigState(config: nil, etag: nil, retry: nil)
         do {
-            persisted = try await loadConfigurationStateRecoveringCorruptCache()
+            persisted = try await loadConfigurationStateRecoveringCorruptCache(
+                authority: persistence
+            )
             guard hasConfigurationAuthority(authority, session: session) else { throw OnloError.invalidState }
             if case let .afterBackoff(eligibleAt, _) = persisted.retry, now() < eligibleAt {
                 throw OnloError.requiresNetwork
@@ -2551,20 +3035,31 @@ public actor OnloSDK {
                 let returnedETag = Self.header("etag", in: response.headers)
                 guard returnedETag == nil || returnedETag == persisted.etag else { throw OnloError.invalidResponse }
                 let etag = persisted.etag
-                try await configStore.saveConfigState(ProtectedMobileConfigState(config: persisted.config, etag: etag, retry: nil))
+                try await saveConfigurationState(
+                    ProtectedMobileConfigState(config: persisted.config, etag: etag, retry: nil),
+                    authority: persistence
+                )
                 configurationValidationAuthority = authority
                 await record(operation: "config", code: "not_modified", requestId: nil, startedAt: startedAt)
                 return
             }
             let envelope = try OnloResponseDecoder.envelope(MobileConfig.self, from: response)
             guard let etag = Self.header("etag", in: response.headers), !etag.isEmpty else { throw OnloError.invalidResponse }
-            try await configStore.saveConfigState(ProtectedMobileConfigState(config: envelope.result, etag: etag, retry: nil))
+            try await saveConfigurationState(
+                ProtectedMobileConfigState(config: envelope.result, etag: etag, retry: nil),
+                authority: persistence
+            )
             configurationValidationAuthority = authority
             configRetryTask?.cancel(); configRetryTask = nil
             await record(operation: "config", code: "ok", requestId: envelope.requestId, startedAt: startedAt)
         } catch let error as OnloError {
             await record(operation: "config", code: error.safeCode, requestId: error.requestId, startedAt: startedAt)
-            if try await resolveConfigurationFailure(error, previous: persisted, allowTokenRefresh: allowTokenRefresh) { return }
+            if try await resolveConfigurationFailure(
+                error,
+                previous: persisted,
+                allowTokenRefresh: allowTokenRefresh,
+                authority: persistence
+            ) { return }
             throw error
         } catch {
             let safe = OnloError.transport(code: "network_unavailable")
@@ -2574,7 +3069,19 @@ public actor OnloSDK {
         }
     }
 
-    private func loadConfigurationStateRecoveringCorruptCache() async throws -> ProtectedMobileConfigState {
+    private func saveConfigurationState(
+        _ state: ProtectedMobileConfigState,
+        authority: PersistenceAuthority
+    ) async throws {
+        guard let store = configStore as? any AuthorityFencedConfigStoring,
+              try await store.saveConfigState(state, authority: authority) else {
+            throw OnloError.invalidState
+        }
+    }
+
+    private func loadConfigurationStateRecoveringCorruptCache(
+        authority: PersistenceAuthority? = nil
+    ) async throws -> ProtectedMobileConfigState {
         do {
             return try await configStore.loadConfigState()
         } catch let error as OnloError {
@@ -2583,7 +3090,9 @@ public actor OnloSDK {
                 throw error
             }
             let empty = ProtectedMobileConfigState(config: nil, etag: nil, retry: nil)
-            try await configStore.saveConfigState(empty)
+            if let authority {
+                try await saveConfigurationState(empty, authority: authority)
+            }
             configurationValidationAuthority = nil
             await logger.record(SDKLogEvent(
                 operation: "config",
@@ -2596,7 +3105,12 @@ public actor OnloSDK {
         }
     }
 
-    private func resolveConfigurationFailure(_ error: OnloError, previous: ProtectedMobileConfigState, allowTokenRefresh: Bool) async throws -> Bool {
+    private func resolveConfigurationFailure(
+        _ error: OnloError,
+        previous: ProtectedMobileConfigState,
+        allowTokenRefresh: Bool,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
         guard case let .remote(remote) = error else { return false }
         guard remote.code == .configUnavailable else {
             if remote.code == .incompatibleClient || remote.retry.directive == .never || remote.retry.directive == .afterFullSync { return false }
@@ -2624,11 +3138,23 @@ public actor OnloSDK {
             delay = (base * (1 + min(max(backoffJitter(attempt), -0.2), 0.2))) / 1_000
         }
         let eligibleAt = now().addingTimeInterval(delay)
-        try await configStore.saveConfigState(ProtectedMobileConfigState(config: previous.config, etag: previous.etag, retry: .afterBackoff(eligibleAt: eligibleAt, attempt: attempt)))
+        try await saveConfigurationState(
+            ProtectedMobileConfigState(
+                config: previous.config,
+                etag: previous.etag,
+                retry: .afterBackoff(eligibleAt: eligibleAt, attempt: attempt)
+            ),
+            authority: authority
+        )
         guard attempt < 3 else { return false }
         cancelConfigRetry()
         let expectedSessionId = runtimeSession?.sessionId
         let expectedScope = runtimeSession?.credential.ownerScope
+        let expectedGeneration = runtimeSession?.credential.generation
+        let expectedToken = runtimeSession?.chatToken
+        let expectedAuthority = configAuthority
+        let retryID = UUID()
+        configRetryID = retryID
         configRetryTask = Task { [weak self] in
             let ns: UInt64
             if delay.isFinite, delay > 0, delay < Double(UInt64.max) / 1_000_000_000 {
@@ -2638,8 +3164,14 @@ public actor OnloSDK {
             }
             try? await Task.sleep(nanoseconds: ns)
             guard !Task.isCancelled else { return }
-            guard await self?.hasConfigurationRetryAuthority(sessionId: expectedSessionId, scope: expectedScope) == true else { return }
-            _ = try? await self?.refreshConfiguration()
+            await self?.fireConfigurationRetry(
+                retryID: retryID,
+                authority: expectedAuthority,
+                sessionId: expectedSessionId,
+                token: expectedToken,
+                generation: expectedGeneration,
+                scope: expectedScope
+            )
         }
         return false
     }
@@ -2649,6 +3181,7 @@ public actor OnloSDK {
     }
 
     private func cancelConfigRetry() {
+        configRetryID = nil
         configRetryTask?.cancel()
         configRetryTask = nil
     }
@@ -2658,14 +3191,33 @@ public actor OnloSDK {
         try? await refreshConfiguration()
     }
 
-    private func hasConfigurationRetryAuthority(sessionId: String?, scope: OwnerScope?) -> Bool {
-        guard let sessionId, let scope, let active = runtimeSession else { return false }
-        return active.sessionId == sessionId && active.credential.ownerScope == scope && !active.credential.logoutPending
+    private func fireConfigurationRetry(
+        retryID: UUID,
+        authority: UUID,
+        sessionId: String?,
+        token: String?,
+        generation: Int?,
+        scope: OwnerScope?
+    ) async {
+        guard configRetryID == retryID else { return }
+        configRetryID = nil
+        configRetryTask = nil
+        guard let sessionId, let token, let generation, let scope, let active = runtimeSession,
+              configAuthority == authority,
+              active.sessionId == sessionId,
+              active.chatToken == token,
+              active.credential.generation == generation,
+              active.credential.ownerScope == scope,
+              !active.credential.logoutPending else { return }
+        try? await refreshConfiguration()
     }
 
     private func hasConfigurationAuthority(_ authority: UUID, session: RuntimeSession) -> Bool {
         guard configAuthority == authority, let active = runtimeSession else { return false }
-        return active.sessionId == session.sessionId && active.credential.ownerScope == session.credential.ownerScope
+        return active.sessionId == session.sessionId &&
+            active.chatToken == session.chatToken &&
+            active.credential.generation == session.credential.generation &&
+            active.credential.ownerScope == session.credential.ownerScope
     }
 
     private func sendSession(_ operation: SessionOperation, installationId: String? = nil) async throws -> APIResponse<SessionResult> {

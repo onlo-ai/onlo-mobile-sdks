@@ -75,14 +75,22 @@ protocol PushIntentStoring: Sendable {
     func clear() async throws
 }
 
+protocol AuthorityFencedPushIntentStoring: Sendable {
+    func activateAuthority(_ authority: PersistenceAuthority) async
+    func revokeAuthority(for scope: OwnerScope) async
+    func save(_ intent: ProtectedPushIntent, authority: PersistenceAuthority) async throws -> Bool
+    func clear(authority: PersistenceAuthority) async throws -> Bool
+}
+
 /// A single protected record is sufficient because an installation can only
 /// have one current owner scope. It is deliberately separate from the session
 /// credential record so retry metadata cannot alter session transitions.
-final class KeychainPushIntentStore: PushIntentStoring, @unchecked Sendable {
+actor KeychainPushIntentStore: PushIntentStoring, AuthorityFencedPushIntentStoring {
     private let service = "ai.onlo.sdk.push-intent"
     private let account = "v1"
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private var activeAuthority: PersistenceAuthority?
 
     func load() async throws -> ProtectedPushIntent? {
         var query: [String: Any] = baseQuery
@@ -97,6 +105,10 @@ final class KeychainPushIntentStore: PushIntentStoring, @unchecked Sendable {
     }
 
     func save(_ intent: ProtectedPushIntent) async throws {
+        try saveSynchronously(intent)
+    }
+
+    private func saveSynchronously(_ intent: ProtectedPushIntent) throws {
         let data: Data
         do { data = try encoder.encode(intent) }
         catch { throw OnloError.credentialStore(code: "push_intent_encode_failed") }
@@ -111,8 +123,32 @@ final class KeychainPushIntentStore: PushIntentStoring, @unchecked Sendable {
     }
 
     func clear() async throws {
+        try clearSynchronously()
+    }
+
+    private func clearSynchronously() throws {
         let status = SecItemDelete(baseQuery as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw OnloError.credentialStore(code: "push_intent_delete_failed") }
+    }
+
+    func activateAuthority(_ authority: PersistenceAuthority) {
+        activeAuthority = authority
+    }
+
+    func revokeAuthority(for scope: OwnerScope) {
+        if activeAuthority?.ownerScope == scope { activeAuthority = nil }
+    }
+
+    func save(_ intent: ProtectedPushIntent, authority: PersistenceAuthority) async throws -> Bool {
+        guard activeAuthority == authority, intent.ownerScope == authority.ownerScope else { return false }
+        try saveSynchronously(intent)
+        return true
+    }
+
+    func clear(authority: PersistenceAuthority) async throws -> Bool {
+        guard activeAuthority == authority else { return false }
+        try clearSynchronously()
+        return true
     }
 
     private var baseQuery: [String: Any] {
@@ -120,9 +156,24 @@ final class KeychainPushIntentStore: PushIntentStoring, @unchecked Sendable {
     }
 }
 
-actor InMemoryPushIntentStore: PushIntentStoring {
+actor InMemoryPushIntentStore: PushIntentStoring, AuthorityFencedPushIntentStoring {
     private var intent: ProtectedPushIntent?
+    private var activeAuthority: PersistenceAuthority?
     func load() async throws -> ProtectedPushIntent? { intent }
     func save(_ intent: ProtectedPushIntent) async throws { self.intent = intent }
     func clear() async throws { intent = nil }
+    func activateAuthority(_ authority: PersistenceAuthority) { activeAuthority = authority }
+    func revokeAuthority(for scope: OwnerScope) {
+        if activeAuthority?.ownerScope == scope { activeAuthority = nil }
+    }
+    func save(_ intent: ProtectedPushIntent, authority: PersistenceAuthority) async throws -> Bool {
+        guard activeAuthority == authority, intent.ownerScope == authority.ownerScope else { return false }
+        self.intent = intent
+        return true
+    }
+    func clear(authority: PersistenceAuthority) async throws -> Bool {
+        guard activeAuthority == authority else { return false }
+        intent = nil
+        return true
+    }
 }

@@ -368,6 +368,39 @@ protocol TranscriptPersisting: Sendable {
     func transcript(conversationId: String, for scope: OwnerScope) async throws -> ConversationTranscriptResult?
 }
 
+struct PersistenceAuthority: Sendable, Equatable {
+    let ownerScope: OwnerScope
+    let sessionGeneration: Int
+    let sessionId: String
+    let bearerContext: UUID
+}
+
+protocol AuthorityFencedPersisting: Sendable {
+    func activateAuthority(_ authority: PersistenceAuthority) async
+    func revokeAuthority(for scope: OwnerScope) async
+    func update(
+        _ entry: OutboxEntry,
+        expectedState: OutboxState,
+        expectedAttemptCount: Int,
+        authority: PersistenceAuthority
+    ) async throws -> Bool
+    func recoverEligibleEntries(
+        for scope: OwnerScope,
+        now: Date,
+        authority: PersistenceAuthority
+    ) async throws -> [OutboxEntry]?
+    func replaceTranscript(
+        _ transcript: ConversationTranscriptResult,
+        authority: PersistenceAuthority
+    ) async throws -> Bool
+    func reconcileAccepted(
+        _ entry: OutboxEntry,
+        transcript: ConversationTranscriptResult,
+        expectedServerMessageId: String,
+        authority: PersistenceAuthority
+    ) async throws -> Bool
+}
+
 protocol OutboxEncryptionKeyStoring: Sendable {
     func loadOrCreate() async throws -> SymmetricKey
 }
@@ -402,7 +435,7 @@ private final class KeychainOutboxEncryptionKeyStore: OutboxEncryptionKeyStoring
 /// excluded from backups. Message, attachment, conversation, and server payload
 /// fields are AES-GCM encrypted; only opaque scope, status, and ordering metadata
 /// remain available for queue scheduling.
-public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting {
+public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting, AuthorityFencedPersisting {
     private final class SQLiteConnection: @unchecked Sendable {
         let handle: OpaquePointer
 
@@ -427,6 +460,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
     private var encryptionKey: SymmetricKey?
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private var activeAuthority: PersistenceAuthority?
 
     public init() {
         self.databaseURL = Self.defaultDatabaseURL()
@@ -500,6 +534,72 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         }
     }
 
+    func activateAuthority(_ authority: PersistenceAuthority) {
+        activeAuthority = authority
+    }
+
+    func revokeAuthority(for scope: OwnerScope) {
+        if activeAuthority?.ownerScope == scope { activeAuthority = nil }
+    }
+
+    func update(
+        _ entry: OutboxEntry,
+        expectedState: OutboxState,
+        expectedAttemptCount: Int,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        let db = try await database()
+        guard activeAuthority == authority else { return false }
+        let payload = try encrypt(entry)
+        var changed = false
+        try transaction(db) {
+            guard !(try isBlocked(entry.ownerScope, db: db)) else { throw OnloError.invalidState }
+            changed = try execute(
+                "UPDATE outbox SET state = ?, attempt_count = ?, next_attempt_at = ?, ordering_key = ?, payload = ? WHERE client_message_id = ? AND scope_id = ? AND state = ? AND attempt_count = ?",
+                values: [
+                    entry.state.rawValue,
+                    entry.attemptCount,
+                    entry.nextAttemptAt?.timeIntervalSince1970,
+                    entry.orderingKey,
+                    payload,
+                    entry.clientMessageId.uuidString,
+                    entry.ownerScope.id.uuidString,
+                    expectedState.rawValue,
+                    expectedAttemptCount,
+                ],
+                db: db
+            ) == 1
+        }
+        return changed
+    }
+
+    func recoverEligibleEntries(
+        for scope: OwnerScope,
+        now: Date,
+        authority: PersistenceAuthority
+    ) async throws -> [OutboxEntry]? {
+        let db = try await database()
+        guard activeAuthority == authority, authority.ownerScope == scope else { return nil }
+        try transaction(db) {
+            guard !(try isBlocked(scope, db: db)) else { throw OnloError.invalidState }
+            try execute(
+                "UPDATE outbox SET state = ?, next_attempt_at = ? WHERE scope_id = ? AND state = ?",
+                values: [
+                    OutboxState.failedRetryable.rawValue,
+                    now.timeIntervalSince1970,
+                    scope.id.uuidString,
+                    OutboxState.sending.rawValue,
+                ],
+                db: db
+            )
+        }
+        guard activeAuthority == authority else { return nil }
+        return try await outboxEntries(for: scope).filter {
+            ($0.state == .queued || $0.state == .failedRetryable) &&
+                ($0.nextAttemptAt.map { $0 <= now } ?? true)
+        }
+    }
+
     public func outboxEntries(for scope: OwnerScope) async throws -> [OutboxEntry] {
         let db = try await database()
         guard !(try isBlocked(scope, db: db)) else { throw OnloError.invalidState }
@@ -518,7 +618,9 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
             }
         } catch {
             sqlite3_finalize(statement)
-            try? purge(scope, db: db)
+            if isUnreadableProtectedPayload(error, code: "owner_store_decrypt_failed") {
+                try? purge(scope, db: db)
+            }
             throw error
         }
         sqlite3_finalize(statement)
@@ -546,7 +648,9 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         do {
             previous = try storedTranscript(conversationID: transcript.conversation.id, scope: scope, db: db)
         } catch {
-            try? purge(scope, db: db)
+            if isUnreadableProtectedPayload(error, code: "transcript_decrypt_failed") {
+                try? purge(scope, db: db)
+            }
             throw error
         }
         var merged = Dictionary(uniqueKeysWithValues: (previous?.messages ?? []).map { ($0.id, $0) })
@@ -559,6 +663,103 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         try transaction(db) {
             try execute("INSERT INTO transcripts(scope_id, conversation_id, payload) VALUES(?, ?, ?) ON CONFLICT(scope_id, conversation_id) DO UPDATE SET payload = excluded.payload", values: [scope.id.uuidString, transcript.conversation.id, payload], db: db)
         }
+    }
+
+    func replaceTranscript(
+        _ transcript: ConversationTranscriptResult,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        let db = try await database()
+        guard activeAuthority == authority else { return false }
+        do {
+            try transaction(db) {
+                try replaceTranscriptSynchronously(transcript, for: authority.ownerScope, db: db)
+            }
+        } catch {
+            if isUnreadableProtectedPayload(error, code: "transcript_decrypt_failed") {
+                try? purge(authority.ownerScope, db: db)
+            }
+            throw error
+        }
+        return true
+    }
+
+    func reconcileAccepted(
+        _ entry: OutboxEntry,
+        transcript: ConversationTranscriptResult,
+        expectedServerMessageId: String,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        let db = try await database()
+        guard activeAuthority == authority else { return false }
+        var changed = false
+        do {
+            try transaction(db) {
+                guard !(try isBlocked(entry.ownerScope, db: db)) else { throw OnloError.invalidState }
+                let row = try statement(
+                "SELECT state, attempt_count, payload FROM outbox WHERE client_message_id = ? AND scope_id = ?",
+                db: db
+                )
+                defer { sqlite3_finalize(row) }
+                try bind([entry.clientMessageId.uuidString, entry.ownerScope.id.uuidString], to: row)
+                guard sqlite3_step(row) == SQLITE_ROW,
+                      sqliteText(row, 0) == OutboxState.accepted.rawValue,
+                      let payloadData = sqliteData(row, 2) else { return }
+                let payload = try decrypt(payloadData)
+                guard payload.serverMessageId == expectedServerMessageId else { return }
+                try replaceTranscriptSynchronously(transcript, for: authority.ownerScope, db: db)
+                var reconciled = entry
+                reconciled.state = .reconciled
+                let encrypted = try encrypt(reconciled)
+                changed = try execute(
+                "UPDATE outbox SET state = ?, attempt_count = ?, next_attempt_at = ?, ordering_key = ?, payload = ? WHERE client_message_id = ? AND scope_id = ? AND state = ?",
+                values: [
+                    reconciled.state.rawValue,
+                    reconciled.attemptCount,
+                    reconciled.nextAttemptAt?.timeIntervalSince1970,
+                    reconciled.orderingKey,
+                    encrypted,
+                    reconciled.clientMessageId.uuidString,
+                    reconciled.ownerScope.id.uuidString,
+                    OutboxState.accepted.rawValue,
+                ],
+                    db: db
+                ) == 1
+            }
+        } catch {
+            if isUnreadableProtectedPayload(error, code: "owner_store_decrypt_failed") ||
+                isUnreadableProtectedPayload(error, code: "transcript_decrypt_failed") {
+                try? purge(authority.ownerScope, db: db)
+            }
+            throw error
+        }
+        return changed
+    }
+
+    private func replaceTranscriptSynchronously(
+        _ transcript: ConversationTranscriptResult,
+        for scope: OwnerScope,
+        db: OpaquePointer
+    ) throws {
+        guard !(try isBlocked(scope, db: db)) else { throw OnloError.invalidState }
+        let previous = try storedTranscript(conversationID: transcript.conversation.id, scope: scope, db: db)
+        var merged = Dictionary(uniqueKeysWithValues: (previous?.messages ?? []).map { ($0.id, $0) })
+        for message in transcript.messages { merged[message.id] = message }
+        let uniqueMessages = merged.values.sorted { $0.timestamp < $1.timestamp }
+        let authoritative = ConversationTranscriptResult(
+            conversation: transcript.conversation,
+            messages: uniqueMessages,
+            sync: transcript.sync
+        )
+        guard let key = encryptionKey else { throw OnloError.invalidState }
+        guard let payload = try AES.GCM.seal(encoder.encode(authoritative), using: key).combined else {
+            throw OnloError.credentialStore(code: "transcript_encrypt_failed")
+        }
+        try execute(
+            "INSERT INTO transcripts(scope_id, conversation_id, payload) VALUES(?, ?, ?) ON CONFLICT(scope_id, conversation_id) DO UPDATE SET payload = excluded.payload",
+            values: [scope.id.uuidString, transcript.conversation.id, payload],
+            db: db
+        )
     }
 
     func transcript(conversationId: String, for scope: OwnerScope) async throws -> ConversationTranscriptResult? {
@@ -627,6 +828,11 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         guard let encryptionKey, let box = try? AES.GCM.SealedBox(combined: data) else { throw OnloError.credentialStore(code: "owner_store_decrypt_failed") }
         do { return try decoder.decode(EncryptedPayload.self, from: AES.GCM.open(box, using: encryptionKey)) }
         catch { throw OnloError.credentialStore(code: "owner_store_decrypt_failed") }
+    }
+
+    private func isUnreadableProtectedPayload(_ error: Error, code: String) -> Bool {
+        guard case let OnloError.credentialStore(actualCode) = error else { return false }
+        return actualCode == code
     }
 
     private func purge(_ scope: OwnerScope, db: OpaquePointer) throws {
@@ -726,9 +932,10 @@ private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self
 
 /// Non-durable test support for exercising owner and outbox invariants. Production
 /// integrations must provide a transactional native database implementation.
-public actor InMemoryOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting {
+public actor InMemoryOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting, AuthorityFencedPersisting {
     private var entries: [OwnerScope: [UUID: OutboxEntry]] = [:]
     private var transcripts: [OwnerScope: [String: ConversationTranscriptResult]] = [:]
+    private var activeAuthority: PersistenceAuthority?
     private var blockedScopes = Set<OwnerScope>()
 
     public init() {}
@@ -770,6 +977,47 @@ public actor InMemoryOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisti
         entries[entry.ownerScope]?[entry.clientMessageId] = entry
     }
 
+    func activateAuthority(_ authority: PersistenceAuthority) {
+        activeAuthority = authority
+    }
+
+    func revokeAuthority(for scope: OwnerScope) {
+        if activeAuthority?.ownerScope == scope { activeAuthority = nil }
+    }
+
+    func update(
+        _ entry: OutboxEntry,
+        expectedState: OutboxState,
+        expectedAttemptCount: Int,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        guard activeAuthority == authority,
+              let current = entries[entry.ownerScope]?[entry.clientMessageId],
+              current.state == expectedState,
+              current.attemptCount == expectedAttemptCount else { return false }
+        entries[entry.ownerScope]?[entry.clientMessageId] = entry
+        return true
+    }
+
+    func recoverEligibleEntries(
+        for scope: OwnerScope,
+        now: Date,
+        authority: PersistenceAuthority
+    ) async throws -> [OutboxEntry]? {
+        guard activeAuthority == authority, authority.ownerScope == scope,
+              !blockedScopes.contains(scope) else { return nil }
+        var scoped = entries[scope, default: [:]]
+        for id in scoped.keys where scoped[id]?.state == .sending {
+            scoped[id]?.state = .failedRetryable
+            scoped[id]?.nextAttemptAt = now
+        }
+        entries[scope] = scoped
+        return scoped.values.sorted { $0.orderingKey < $1.orderingKey }.filter {
+            ($0.state == .queued || $0.state == .failedRetryable) &&
+                ($0.nextAttemptAt.map { $0 <= now } ?? true)
+        }
+    }
+
     public func outboxEntries(for scope: OwnerScope) async throws -> [OutboxEntry] {
         guard !blockedScopes.contains(scope) else { throw OnloError.invalidState }
         return entries[scope, default: [:]].values.sorted { $0.orderingKey < $1.orderingKey }
@@ -789,6 +1037,13 @@ public actor InMemoryOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisti
     }
 
     func replaceTranscript(_ transcript: ConversationTranscriptResult, for scope: OwnerScope) async throws {
+        try replaceTranscriptSynchronously(transcript, for: scope)
+    }
+
+    private func replaceTranscriptSynchronously(
+        _ transcript: ConversationTranscriptResult,
+        for scope: OwnerScope
+    ) throws {
         guard !blockedScopes.contains(scope) else { throw OnloError.invalidState }
         let unique = Dictionary(transcript.messages.map { ($0.id, $0) }, uniquingKeysWith: { _, newest in newest }).values.sorted { $0.timestamp < $1.timestamp }
         transcripts[scope, default: [:]][transcript.conversation.id] = ConversationTranscriptResult(conversation: transcript.conversation, messages: unique, sync: transcript.sync)
@@ -797,6 +1052,32 @@ public actor InMemoryOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisti
     func transcript(conversationId: String, for scope: OwnerScope) async throws -> ConversationTranscriptResult? {
         guard !blockedScopes.contains(scope) else { throw OnloError.invalidState }
         return transcripts[scope]?[conversationId]
+    }
+
+    func replaceTranscript(
+        _ transcript: ConversationTranscriptResult,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        guard activeAuthority == authority else { return false }
+        try replaceTranscriptSynchronously(transcript, for: authority.ownerScope)
+        return true
+    }
+
+    func reconcileAccepted(
+        _ entry: OutboxEntry,
+        transcript: ConversationTranscriptResult,
+        expectedServerMessageId: String,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        guard activeAuthority == authority,
+              let current = entries[entry.ownerScope]?[entry.clientMessageId],
+              current.state == .accepted,
+              current.serverMessageId == expectedServerMessageId else { return false }
+        try replaceTranscriptSynchronously(transcript, for: authority.ownerScope)
+        var reconciled = current
+        reconciled.state = .reconciled
+        entries[entry.ownerScope]?[entry.clientMessageId] = reconciled
+        return true
     }
 }
 

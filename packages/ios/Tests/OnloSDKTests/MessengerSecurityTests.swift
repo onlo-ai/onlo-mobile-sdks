@@ -240,6 +240,111 @@ final class MessengerSecurityTests: XCTestCase {
         XCTAssertEqual(convergedState?.unreadCount, 0)
     }
 
+    func testOlderInboxResponseCannotOverwriteNewerObservation() async throws {
+        let transport = OutOfOrderInboxTransport()
+        let sdk = OnloSDK(
+            credentialStore: InMemoryCredentialStore(),
+            ownerStore: InMemoryOwnerScopedStore(),
+            transport: transport,
+            hostAppIdentifier: "com.example.host",
+            lifecycleBindingEnabled: false
+        )
+        _ = try await sdk.initialize(OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        ))
+        _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
+
+        let older = Task { try await sdk.messengerInbox() }
+        await transport.waitForFirstList()
+        let newer = Task { try await sdk.messengerInbox() }
+        await transport.waitForSecondList()
+        await transport.releaseSecondList()
+        let newerInbox = try await newer.value
+        await transport.releaseFirstList()
+        let olderInbox = try await older.value
+        let states = await sdk.observeFrameworkState()
+        var iterator = states.makeAsyncIterator()
+        let snapshot = await iterator.next()
+
+        XCTAssertEqual(newerInbox.first?.title, "newer")
+        XCTAssertEqual(olderInbox, newerInbox)
+        XCTAssertEqual(snapshot?.unreadCount, 0)
+    }
+
+    func testSuccessfulReadAcknowledgementFencesOlderInboxResponse() async throws {
+        let transport = OutOfOrderInboxTransport()
+        let sdk = OnloSDK(
+            credentialStore: InMemoryCredentialStore(),
+            ownerStore: InMemoryOwnerScopedStore(),
+            transport: transport,
+            hostAppIdentifier: "com.example.host",
+            lifecycleBindingEnabled: false
+        )
+        _ = try await sdk.initialize(OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        ))
+        _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
+
+        let staleInbox = Task { try await sdk.messengerInbox() }
+        await transport.waitForFirstList()
+        let acknowledgement = Task {
+            try await sdk.acknowledgeRenderedConversation(
+                conversationId: "conversation-1",
+                throughMessageId: "message-1"
+            )
+        }
+        await transport.waitForSecondList()
+        await transport.releaseSecondList()
+        try await acknowledgement.value
+        await transport.releaseFirstList()
+        let staleResult = try await staleInbox.value
+        let states = await sdk.observeFrameworkState()
+        var iterator = states.makeAsyncIterator()
+        let snapshot = await iterator.next()
+        let readRequestCount = await transport.readRequestCount()
+
+        XCTAssertEqual(staleResult.first?.title, "newer")
+        XCTAssertEqual(snapshot?.unreadCount, 0)
+        XCTAssertEqual(readRequestCount, 1)
+    }
+
+    func testSameConversationTranscriptObservationsSerializeBeforeTransport() async throws {
+        let transport = SerializedTranscriptTransport()
+        let store = InMemoryOwnerScopedStore()
+        let sdk = OnloSDK(
+            credentialStore: InMemoryCredentialStore(),
+            ownerStore: store,
+            transport: transport,
+            hostAppIdentifier: "com.example.host",
+            lifecycleBindingEnabled: false
+        )
+        _ = try await sdk.initialize(OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        ))
+
+        let first = Task { try await sdk.messengerTranscript(conversationId: "conversation-1") }
+        await transport.waitForFirstTranscript()
+        let second = Task { try await sdk.messengerTranscript(conversationId: "conversation-1") }
+        await Task.yield()
+        let requestsBeforeRelease = await transport.transcriptRequestCount()
+        XCTAssertEqual(requestsBeforeRelease, 1)
+        await transport.releaseFirstTranscript()
+        _ = try await first.value
+        await transport.waitForSecondTranscript()
+        await transport.releaseSecondTranscript()
+        let finalTranscript = try await second.value
+        let finalRequestCount = await transport.transcriptRequestCount()
+
+        XCTAssertEqual(finalTranscript?.messages.map(\.id), ["newer-message"])
+        XCTAssertEqual(finalRequestCount, 2)
+    }
+
     func testNormalOwnerFreshBearerIntentUsesOneResumeThenOnePush() async throws {
         let owner = OwnerScope(kind: .identified)
         let credentials = InMemoryCredentialStore(StoredSessionCredential(installationId: "installation-1", generation: 1, proposedCredential: "credential-1", identityClass: .identified, ownerScope: owner))
@@ -377,6 +482,141 @@ private actor ReadAcknowledgementTransport: OnloHTTPTransport {
 
     func readRequestCount() -> Int { readBodies.count }
     func lastReadBody() -> String? { readBodies.last }
+}
+
+private actor OutOfOrderInboxTransport: OnloHTTPTransport {
+    private var sessionCount = 0
+    private var listCount = 0
+    private var readCount = 0
+    private var firstListReached = false
+    private var secondListReached = false
+    private var firstListWaiters: [CheckedContinuation<Void, Never>] = []
+    private var secondListWaiters: [CheckedContinuation<Void, Never>] = []
+    private var firstRelease: CheckedContinuation<Void, Never>?
+    private var secondRelease: CheckedContinuation<Void, Never>?
+
+    func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
+        switch (request.httpMethod, request.url?.path) {
+        case ("POST", "/api/sdk/v1/session"):
+            sessionCount += 1
+            let identified = sessionCount > 1
+            return messengerSessionResponse(request, json: """
+            {"requestId":"synthetic","serverTime":"2026-07-21T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"session-\(sessionCount)","chatToken":"opaque-test-token","installationId":"installation-1","generation":\(sessionCount),"proposedCredential":"credential-\(sessionCount)","identityClass":"\(identified ? "identified" : "anonymous")","publicationState":"testing","attestationState":"not_required","configRevision":"revision-1","configSchemaVersion":1,"configEtag":"etag-1"}}
+            """)
+        case ("PUT", "/api/widget/conversations/conversation-1/read"):
+            readCount += 1
+            return OnloHTTPResponse(statusCode: 200, body: Data("""
+            {"conversationId":"conversation-1","readThroughMessageId":"message-1","unread":false,"unreadCount":0}
+            """.utf8))
+        case ("GET", "/api/widget/conversations"):
+            listCount += 1
+            if listCount == 1 {
+                firstListReached = true
+                firstListWaiters.forEach { $0.resume() }
+                firstListWaiters.removeAll()
+                await withCheckedContinuation { firstRelease = $0 }
+                return list(title: "older", unread: 2)
+            }
+            secondListReached = true
+            secondListWaiters.forEach { $0.resume() }
+            secondListWaiters.removeAll()
+            await withCheckedContinuation { secondRelease = $0 }
+            return list(title: "newer", unread: 0)
+        default:
+            return OnloHTTPResponse(statusCode: 503, body: Data("{}".utf8))
+        }
+    }
+
+    func waitForFirstList() async {
+        guard !firstListReached else { return }
+        await withCheckedContinuation { firstListWaiters.append($0) }
+    }
+
+    func waitForSecondList() async {
+        guard !secondListReached else { return }
+        await withCheckedContinuation { secondListWaiters.append($0) }
+    }
+
+    func releaseFirstList() {
+        firstRelease?.resume()
+        firstRelease = nil
+    }
+
+    func releaseSecondList() {
+        secondRelease?.resume()
+        secondRelease = nil
+    }
+
+    func readRequestCount() -> Int { readCount }
+
+    private func list(title: String, unread: Int) -> OnloHTTPResponse {
+        OnloHTTPResponse(statusCode: 200, body: Data("""
+        {"conversations":[{"id":"conversation-1","sessionId":"historical-session","title":"\(title)","unread":\(unread > 0),"unreadCount":\(unread),"status":"open","updatedAt":"2026-07-21T10:00:00.000Z","messageCount":1,"lastMessageRole":"assistant"}],"totalUnreadCount":\(unread)}
+        """.utf8))
+    }
+}
+
+private actor SerializedTranscriptTransport: OnloHTTPTransport {
+    private var transcriptCount = 0
+    private var firstReached = false
+    private var secondReached = false
+    private var firstWaiters: [CheckedContinuation<Void, Never>] = []
+    private var secondWaiters: [CheckedContinuation<Void, Never>] = []
+    private var firstRelease: CheckedContinuation<Void, Never>?
+    private var secondRelease: CheckedContinuation<Void, Never>?
+
+    func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
+        switch request.url?.path {
+        case "/api/sdk/v1/session":
+            return messengerSessionResponse(request, json: """
+            {"requestId":"synthetic","serverTime":"2026-07-21T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"session-current","chatToken":"opaque-test-token","installationId":"installation-1","generation":1,"proposedCredential":"credential-1","identityClass":"anonymous","publicationState":"testing","attestationState":"not_required","configRevision":"revision-1","configSchemaVersion":1,"configEtag":"etag-1"}}
+            """)
+        case "/api/widget/conversations/conversation-1":
+            transcriptCount += 1
+            if transcriptCount == 1 {
+                firstReached = true
+                firstWaiters.forEach { $0.resume() }
+                firstWaiters.removeAll()
+                await withCheckedContinuation { firstRelease = $0 }
+                return transcript(messageId: "older-message", timestamp: 1)
+            }
+            secondReached = true
+            secondWaiters.forEach { $0.resume() }
+            secondWaiters.removeAll()
+            await withCheckedContinuation { secondRelease = $0 }
+            return transcript(messageId: "newer-message", timestamp: 2)
+        default:
+            return OnloHTTPResponse(statusCode: 503, body: Data("{}".utf8))
+        }
+    }
+
+    func waitForFirstTranscript() async {
+        guard !firstReached else { return }
+        await withCheckedContinuation { firstWaiters.append($0) }
+    }
+
+    func waitForSecondTranscript() async {
+        guard !secondReached else { return }
+        await withCheckedContinuation { secondWaiters.append($0) }
+    }
+
+    func releaseFirstTranscript() {
+        firstRelease?.resume()
+        firstRelease = nil
+    }
+
+    func releaseSecondTranscript() {
+        secondRelease?.resume()
+        secondRelease = nil
+    }
+
+    func transcriptRequestCount() -> Int { transcriptCount }
+
+    private func transcript(messageId: String, timestamp: Int) -> OnloHTTPResponse {
+        OnloHTTPResponse(statusCode: 200, body: Data("""
+        {"conversation":{"id":"conversation-1","sessionId":"historical-session","status":"open","isHumanTakeover":false},"messages":[{"id":"\(messageId)","externalId":null,"role":"assistant","senderType":null,"senderName":null,"senderTeam":null,"text":"synthetic","attachments":[],"timestamp":\(timestamp)}],"sync":{"previousCursor":null,"nextCursor":null,"limit":100}}
+        """.utf8))
+    }
 }
 
 private actor HistoricalConversationTransport: OnloHTTPTransport {

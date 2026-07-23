@@ -13,6 +13,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
+import kotlinx.coroutines.CompletableDeferred
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okio.Buffer
 
@@ -21,6 +23,7 @@ class PushRegistryTest {
         val transport = FixtureTransport(listOf(registerResponse()))
         val registry = registry(transport)
         val authority = PushAuthority(OwnerScope.Identified("a"), "bearer-a")
+        registry.activateAuthority(authority)
 
         assertEquals(PushRegistrationOutcome.Registered, registry.register(authority, PushProvider.FCM, "fcm-token"))
         assertEquals(PushRegistrationOutcome.Registered, registry.register(authority, PushProvider.FCM, "fcm-token"))
@@ -45,6 +48,7 @@ class PushRegistryTest {
         val store = MemoryStore(); val registry = registry(transport, store)
         val userA = PushAuthority(OwnerScope.Identified("a"), "bearer-a")
         val userB = PushAuthority(OwnerScope.Identified("b"), "bearer-b")
+        registry.activateAuthority(userA)
         registry.register(userA, PushProvider.FCM, "rotated-token")
         assertEquals(PushRegistrationOutcome.BlockedByRetiringOwner, registry.register(userB, PushProvider.FCM, "user-b-token"))
         assertEquals("identified:a", store.value?.ownerScopeId)
@@ -72,6 +76,7 @@ class PushRegistryTest {
         val transport = FixtureTransport(listOf(failureEnvelope("after_token_refresh")))
         val store = MemoryStore(); val registry = registry(transport, store)
         val authority = PushAuthority(OwnerScope.Anonymous("a"), "bearer")
+        registry.activateAuthority(authority)
         assertEquals(PushRegistrationOutcome.PendingServer(ai.onlo.sdk.protocol.RetryDirective.AFTER_TOKEN_REFRESH), registry.register(authority, PushProvider.FCM, "fcm-token"))
         assertEquals(1, transport.requests.size)
         assertEquals(ai.onlo.sdk.protocol.RetryDirective.AFTER_TOKEN_REFRESH, store.value?.retryDirective)
@@ -84,6 +89,7 @@ class PushRegistryTest {
         val transport = FixtureTransport(listOf(failureEnvelope("after_backoff", 50), registerResponse()))
         val registry = registry(transport, nowMs = { now })
         val authority = PushAuthority(OwnerScope.Anonymous("a"), "bearer")
+        registry.activateAuthority(authority)
         assertEquals(PushRegistrationOutcome.PendingServer(ai.onlo.sdk.protocol.RetryDirective.AFTER_BACKOFF), registry.register(authority, PushProvider.FCM, "fcm-token", NotificationPreference.MUTED, "en-IN"))
         assertEquals(PushRegistrationOutcome.PendingServer(ai.onlo.sdk.protocol.RetryDirective.AFTER_BACKOFF), registry.reconcileEligible(authority))
         assertEquals(1, transport.requests.size)
@@ -97,10 +103,14 @@ class PushRegistryTest {
         var now = 0L; val store = MemoryStore()
         val first = FixtureTransport(emptyList())
         val authority = PushAuthority(OwnerScope.Anonymous("a"), "bearer")
-        assertEquals(PushRegistrationOutcome.QueuedForReconciliation, registry(first, store, { now }).register(authority, PushProvider.FCM, "fcm-token", NotificationPreference.ENABLED, "en-US"))
+        val firstRegistry = registry(first, store, { now })
+        firstRegistry.activateAuthority(authority)
+        assertEquals(PushRegistrationOutcome.QueuedForReconciliation, firstRegistry.register(authority, PushProvider.FCM, "fcm-token", NotificationPreference.ENABLED, "en-US"))
         now = 1_000L
         val replay = FixtureTransport(listOf(registerResponse()))
-        assertEquals(PushRegistrationOutcome.Registered, registry(replay, store, { now }).reconcileEligible(authority))
+        val replayRegistry = registry(replay, store, { now })
+        replayRegistry.activateAuthority(authority)
+        assertEquals(PushRegistrationOutcome.Registered, replayRegistry.reconcileEligible(authority))
         assertTrue(replay.requests.single().bodyText().contains("\"notificationPreference\":\"enabled\""))
         assertTrue(replay.requests.single().bodyText().contains("\"locale\":\"en-US\""))
     }
@@ -110,6 +120,7 @@ class PushRegistryTest {
         listOf("never", "after_token_refresh", "after_attestation", "after_full_sync").forEach { directive ->
             val transport = FixtureTransport(listOf(failureEnvelope(directive)))
             val registry = registry(transport)
+            registry.activateAuthority(authority)
             registry.register(authority, PushProvider.FCM, "fcm-token")
             registry.reconcileEligible(authority)
             assertEquals(1, transport.requests.size, directive)
@@ -140,6 +151,36 @@ class PushRegistryTest {
         assertEquals("Bearer resumed-bearer", transport.requests.single().headers["Authorization"])
     }
 
+    @Test fun `stale registration callback cannot commit after same owner authority replacement`() = runBlocking {
+        val transport = BarrierTransport(registerResponse())
+        val store = MemoryStore()
+        val registry = PushRegistry(
+            store,
+            OnloPushApi(transport, ProtocolRequestFactory("https://sdk.example.test/".toHttpUrl())),
+            nowMs = { 0L },
+        )
+        val owner = OwnerScope.Identified("a")
+        val old = PushAuthority(owner, "old-bearer", 1, "old-session", 1)
+        val replacement = PushAuthority(owner, "new-bearer", 2, "new-session", 2)
+        registry.activateAuthority(old)
+
+        val stale = async {
+            registry.register(old, PushProvider.FCM, "fcm-token")
+        }
+        transport.requestStarted.await()
+        registry.activateAuthority(replacement)
+        transport.releaseResponse.complete(Unit)
+
+        assertEquals(PushRegistrationOutcome.NoActiveSession, stale.await())
+        assertEquals(false, store.value?.registered)
+        assertEquals(true, store.value?.transportPending)
+
+        val resumed = registry.register(replacement, PushProvider.FCM, "fcm-token")
+        assertEquals(PushRegistrationOutcome.Registered, resumed)
+        assertEquals(true, store.value?.registered)
+        assertEquals(listOf("Bearer old-bearer", "Bearer new-bearer"), transport.requests.map { it.headers["Authorization"] })
+    }
+
     private fun registry(transport: FixtureTransport, store: MemoryStore = MemoryStore(), nowMs: () -> Long = { 0L }) = PushRegistry(store, OnloPushApi(transport, ProtocolRequestFactory("https://sdk.example.test/".toHttpUrl())), nowMs)
     private fun payload() = mapOf("conversationId" to "c", "messageId" to "m", "notificationType" to "message_available")
     private fun registerResponse() = OnloHttpResponse(200, emptyMap(), successEnvelope("{\"state\":\"active\",\"provider\":\"fcm\",\"environment\":\"production\",\"fingerprint\":\"fixture\",\"registeredAt\":\"2026-01-01T00:00:00Z\"}"))
@@ -154,6 +195,21 @@ class PushRegistryTest {
     private class FixtureTransport(private val responses: List<OnloHttpResponse>) : OnloTransport {
         val requests = mutableListOf<OnloHttpRequest>(); private var index = 0
         override suspend fun execute(request: OnloHttpRequest): OnloHttpResponse { requests += request; return responses.getOrNull(index++) ?: throw IOException("fixture") }
+    }
+    private class BarrierTransport(private val response: OnloHttpResponse) : OnloTransport {
+        val requestStarted = CompletableDeferred<Unit>()
+        val releaseResponse = CompletableDeferred<Unit>()
+        val requests = mutableListOf<OnloHttpRequest>()
+        private var requestCount = 0
+        override suspend fun execute(request: OnloHttpRequest): OnloHttpResponse {
+            requests += request
+            requestCount += 1
+            if (requestCount == 1) {
+                requestStarted.complete(Unit)
+                releaseResponse.await()
+            }
+            return response
+        }
     }
     private fun OnloHttpRequest.bodyText(): String = Buffer().use { buffer -> checkNotNull(body).writeTo(buffer); buffer.readUtf8() }
 }

@@ -7,14 +7,20 @@ import ai.onlo.sdk.storage.OutboxEntry
 import ai.onlo.sdk.storage.OutboxEntryFactory
 import ai.onlo.sdk.storage.OwnerScope
 import ai.onlo.sdk.storage.OwnerScopedOutboxStore
+import ai.onlo.sdk.storage.PersistenceAuthority
 import ai.onlo.sdk.transport.OnloSseTransport
 import ai.onlo.sdk.transport.SseStreamResult
 import ai.onlo.sdk.transport.OnloTransport
 import ai.onlo.sdk.transport.ProtocolRequestFactory
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.min
 import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /** Parsed contract events only; neither tokens nor message content are logged by this layer. */
 internal sealed interface ChatEvent {
@@ -109,7 +115,7 @@ internal class WidgetChatApi(
             previousCursor = sync.optString("previousCursor").takeUnless { it.isEmpty() || it == "null" },
             nextCursor = sync.optString("nextCursor").takeUnless { it.isEmpty() || it == "null" },
             limit = sync.getInt("limit"),
-        ).also { if (it.sessionId != expectedSessionId) throw ai.onlo.sdk.protocol.ProtocolViolation("transcript_session") }
+        ).also { if (it.sessionId.isBlank()) throw ai.onlo.sdk.protocol.ProtocolViolation("transcript_session") }
     }
 
     suspend fun conversations(chatToken: String, expectedSessionId: String, limit: Int = 50): ConversationList {
@@ -138,7 +144,7 @@ internal class WidgetChatApi(
                     )
                 } catch (_: Exception) { throw ai.onlo.sdk.protocol.ProtocolViolation("conversation_list") }
                 if (summary.id.isBlank() ||
-                    summary.sessionId != expectedSessionId ||
+                    summary.sessionId.isBlank() ||
                     summary.unreadCount < 0 ||
                     summary.unread != (summary.unreadCount > 0) ||
                     summary.messageCount < 0
@@ -287,59 +293,145 @@ internal class DurableChatOutbox(
     }
 
     /** Returns the persisted retry deadline when the owner FIFO is blocked by its head. */
-    suspend fun flush(owner: OwnerScope, sessionId: String, chatToken: String): Long? {
+    suspend fun flush(
+        owner: OwnerScope,
+        sessionId: String,
+        chatToken: String,
+        persistenceAuthority: PersistenceAuthority? = null,
+        isAuthorised: suspend () -> Boolean = { true },
+    ): Long? {
+        suspend fun requireAuthority() {
+            currentCoroutineContext().ensureActive()
+            if (!isAuthorised()) throw CancellationException("stale_chat_dispatcher")
+            currentCoroutineContext().ensureActive()
+        }
         while (true) {
+            requireAuthority()
             val eligible = store.eligible(owner, nowMs(), 20)
+            requireAuthority()
             if (eligible.isEmpty()) return null
             for (entry in eligible) {
+                requireAuthority()
                 if (entry.nextAttemptAtMs != null && entry.nextAttemptAtMs > nowMs()) {
                     return entry.nextAttemptAtMs
                 }
-                if (!store.markSending(owner, entry.clientMessageId)) continue
+                val markedSending = persistenceAuthority?.let {
+                    store.markSendingIfAuthorised(it, entry.clientMessageId)
+                } ?: store.markSending(owner, entry.clientMessageId)
+                if (!markedSending) continue
+                requireAuthority()
                 var acceptedPersisted = false
                 val outcome = try {
                     api.send(
                         chatToken = chatToken,
                         request = ChatRequest(sessionId, entry.clientMessageId, entry.message, entry.attachments),
                         onAccepted = { accepted ->
+                            requireAuthority()
                             if (accepted.clientMessageId != entry.clientMessageId) {
                                 throw ai.onlo.sdk.protocol.ProtocolViolation("accepted_client_message_id")
                             }
-                            if (!store.markAccepted(owner, entry.clientMessageId, accepted.messageId, accepted.conversationId)) {
+                            val markedAccepted = persistenceAuthority?.let {
+                                store.markAcceptedIfSending(
+                                    it,
+                                    entry.clientMessageId,
+                                    entry.attemptCount + 1,
+                                    accepted.messageId,
+                                    accepted.conversationId,
+                                )
+                            } ?: store.markAccepted(
+                                owner,
+                                entry.clientMessageId,
+                                accepted.messageId,
+                                accepted.conversationId,
+                            )
+                            if (!markedAccepted) {
                                 throw ai.onlo.sdk.protocol.ProtocolViolation("duplicate_accepted_event")
                             }
                             acceptedPersisted = true
-                            if (accepted.duplicate) onDuplicateAccepted(accepted.conversationId)
+                            requireAuthority()
+                            if (accepted.duplicate) {
+                                onDuplicateAccepted(accepted.conversationId)
+                                requireAuthority()
+                            }
                         },
-                        onEvent = { event -> onEvent(entry, event) },
+                        onEvent = { event ->
+                            requireAuthority()
+                            onEvent(entry, event)
+                            requireAuthority()
+                        },
                     )
                 } catch (failure: CancellationException) {
                     throw failure
                 } catch (_: ai.onlo.sdk.protocol.ProtocolViolation) {
                     if (acceptedPersisted) continue
-                    store.markTerminalFailure(owner, entry.clientMessageId, "protocol_violation")
-                    return null
+                    requireAuthority()
+                    if (persistenceAuthority != null) {
+                        store.markTerminalFailureIfSending(
+                            persistenceAuthority,
+                            entry.clientMessageId,
+                            entry.attemptCount + 1,
+                            "protocol_violation",
+                        )
+                    } else {
+                        store.markTerminalFailure(owner, entry.clientMessageId, "protocol_violation")
+                    }
+                    requireAuthority()
+                    continue
                 } catch (_: java.io.IOException) {
                     if (acceptedPersisted) continue
+                    requireAuthority()
                     val retryAtMs = retryAt(entry)
-                    store.markRetryableFailure(owner, entry.clientMessageId, "transport_unavailable", retryAtMs)
+                    if (persistenceAuthority != null) {
+                        store.markRetryableFailureIfSending(
+                            persistenceAuthority,
+                            entry.clientMessageId,
+                            entry.attemptCount + 1,
+                            "transport_unavailable",
+                            retryAtMs,
+                        )
+                    } else {
+                        store.markRetryableFailure(owner, entry.clientMessageId, "transport_unavailable", retryAtMs)
+                    }
+                    requireAuthority()
                     return retryAtMs
                 } catch (failure: Exception) {
                     if (acceptedPersisted) continue
                     throw failure
                 }
+                requireAuthority()
                 if (acceptedPersisted) continue
                 val accepted = outcome.accepted
                 when {
                     accepted != null -> throw IllegalStateException("accepted_callback_missing")
                     outcome.error?.retryable == true -> {
                         val retryAtMs = retryAt(entry)
-                        store.markRetryableFailure(owner, entry.clientMessageId, "widget_retryable", retryAtMs)
+                        if (persistenceAuthority != null) {
+                            store.markRetryableFailureIfSending(
+                                persistenceAuthority,
+                                entry.clientMessageId,
+                                entry.attemptCount + 1,
+                                "widget_retryable",
+                                retryAtMs,
+                            )
+                        } else {
+                            store.markRetryableFailure(owner, entry.clientMessageId, "widget_retryable", retryAtMs)
+                        }
+                        requireAuthority()
                         return retryAtMs
                     }
                     else -> {
-                        store.markTerminalFailure(owner, entry.clientMessageId, "widget_rejected")
-                        return null
+                        if (persistenceAuthority != null) {
+                            store.markTerminalFailureIfSending(
+                                persistenceAuthority,
+                                entry.clientMessageId,
+                                entry.attemptCount + 1,
+                                "widget_rejected",
+                            )
+                        } else {
+                            store.markTerminalFailure(owner, entry.clientMessageId, "widget_rejected")
+                        }
+                        requireAuthority()
+                        continue
                     }
                 }
             }
@@ -356,21 +448,56 @@ internal class DurableChatOutbox(
 
 /** A stale transcript cursor is discarded before one bounded dependent sync retry. */
 internal class TranscriptConvergence(private val api: WidgetChatApi, private val store: OwnerScopedOutboxStore) {
-    suspend fun cached(owner: OwnerScope, conversationId: String, expectedSessionId: String): ConversationDetail? =
-        store.transcript(owner, conversationId)?.let(::decodeTranscript)?.also {
-            if (it.sessionId != expectedSessionId) throw ai.onlo.sdk.protocol.ProtocolViolation("transcript_session")
-        }
+    private data class ObservationKey(val owner: OwnerScope, val conversationId: String)
 
-    suspend fun fetchAfterFullSync(owner: OwnerScope, chatToken: String, conversationId: String, staleCursor: String?, expectedSessionId: String): ConversationDetail {
-        val persisted = cached(owner, conversationId, expectedSessionId)
-        val baseline = if (staleCursor != null) api.transcript(chatToken, conversationId, ConversationPageQuery.Latest(limit = 100), expectedSessionId) else persisted
-        val retried = api.transcript(chatToken, conversationId, ConversationPageQuery.Latest(limit = 100), expectedSessionId)
-        val merged = retried.copy(messages = ((persisted?.messages.orEmpty() + baseline?.messages.orEmpty() + retried.messages).associateBy(TranscriptMessage::id).values.sortedBy(TranscriptMessage::timestamp)))
-        store.replaceTranscript(owner, conversationId, encodeTranscript(merged))
-        return merged
+    private companion object {
+        val observationLocks = ConcurrentHashMap<ObservationKey, Mutex>()
     }
 
-    private fun encodeTranscript(value: ConversationDetail): String = org.json.JSONObject().apply {
+    suspend fun cached(owner: OwnerScope, conversationId: String, expectedSessionId: String): ConversationDetail? =
+        store.transcript(owner, conversationId)?.let(::decodeTranscript)?.also {
+            if (it.sessionId.isBlank()) throw ai.onlo.sdk.protocol.ProtocolViolation("transcript_session")
+        }
+
+    suspend fun fetchAfterFullSync(
+        owner: OwnerScope,
+        chatToken: String,
+        conversationId: String,
+        staleCursor: String?,
+        expectedSessionId: String,
+        isAuthorised: suspend () -> Boolean = { true },
+        commit: (suspend (ConversationDetail) -> Boolean)? = null,
+    ): ConversationDetail = observationLocks
+        .computeIfAbsent(ObservationKey(owner, conversationId)) { Mutex() }
+        .withLock {
+        suspend fun requireAuthority() {
+            currentCoroutineContext().ensureActive()
+            if (!isAuthorised()) throw CancellationException("stale_transcript_authority")
+            currentCoroutineContext().ensureActive()
+        }
+        requireAuthority()
+        val persisted = cached(owner, conversationId, expectedSessionId)
+        requireAuthority()
+        val baseline = if (staleCursor != null) {
+            api.transcript(chatToken, conversationId, ConversationPageQuery.Latest(limit = 100), expectedSessionId).also { requireAuthority() }
+        } else persisted
+        requireAuthority()
+        val retried = api.transcript(chatToken, conversationId, ConversationPageQuery.Latest(limit = 100), expectedSessionId)
+        requireAuthority()
+        val merged = retried.copy(messages = ((persisted?.messages.orEmpty() + baseline?.messages.orEmpty() + retried.messages).associateBy(TranscriptMessage::id).values.sortedBy(TranscriptMessage::timestamp)))
+        requireAuthority()
+        val committed = if (commit == null) {
+            store.replaceTranscript(owner, conversationId, encodeTranscript(merged))
+            true
+        } else {
+            commit(merged)
+        }
+        if (!committed) throw CancellationException("stale_transcript_commit")
+        requireAuthority()
+        merged
+    }
+
+    internal fun encodeTranscript(value: ConversationDetail): String = org.json.JSONObject().apply {
         put("id", value.id); put("sessionId", value.sessionId); put("status", value.status); put("isHumanTakeover", value.isHumanTakeover); put("previousCursor", value.previousCursor); put("nextCursor", value.nextCursor); put("limit", value.limit)
         put("messages", org.json.JSONArray().apply { value.messages.forEach { message -> put(org.json.JSONObject().apply { put("id", message.id); put("externalId", message.externalId); put("role", message.role); put("senderType", message.senderType); put("senderName", message.senderName); put("senderTeam", message.senderTeam); put("text", message.text); put("attachments", org.json.JSONArray(message.attachments)); put("timestamp", message.timestamp) }) } })
     }.toString()

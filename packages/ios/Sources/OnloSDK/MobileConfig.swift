@@ -136,15 +136,25 @@ protocol MobileConfigStoring: Sendable {
     func saveConfigState(_ state: ProtectedMobileConfigState) async throws
 }
 
+protocol AuthorityFencedConfigStoring: Sendable {
+    func activateAuthority(_ authority: PersistenceAuthority) async
+    func revokeAuthority(for scope: OwnerScope) async
+    func saveConfigState(
+        _ state: ProtectedMobileConfigState,
+        authority: PersistenceAuthority
+    ) async throws -> Bool
+}
+
 /// A single Keychain record makes config and ETag updates atomic and prevents a
 /// process observing a new ETag beside an older configuration. Keychain is the
 /// protected/encrypted persistence boundary; no configuration is stored in
 /// UserDefaults or an ordinary file.
-final class KeychainMobileConfigStore: MobileConfigStoring, @unchecked Sendable {
+actor KeychainMobileConfigStore: MobileConfigStoring, AuthorityFencedConfigStoring {
     private let service = "ai.onlo.sdk.mobile-config"
     private let account = "v1"
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private var activeAuthority: PersistenceAuthority?
 
     func loadConfigState() async throws -> ProtectedMobileConfigState {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account, kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
@@ -157,6 +167,10 @@ final class KeychainMobileConfigStore: MobileConfigStoring, @unchecked Sendable 
     }
 
     func saveConfigState(_ state: ProtectedMobileConfigState) async throws {
+        try saveConfigStateSynchronously(state)
+    }
+
+    private func saveConfigStateSynchronously(_ state: ProtectedMobileConfigState) throws {
         _ = try state.validated()
         let data: Data
         do { data = try encoder.encode(state) } catch { throw OnloError.credentialStore(code: "config_keychain_encode_failed") }
@@ -167,5 +181,22 @@ final class KeychainMobileConfigStore: MobileConfigStoring, @unchecked Sendable 
         guard update == errSecItemNotFound else { throw OnloError.credentialStore(code: "config_keychain_write_failed") }
         var add = query; add.merge(attributes) { _, new in new }
         guard SecItemAdd(add as CFDictionary, nil) == errSecSuccess else { throw OnloError.credentialStore(code: "config_keychain_write_failed") }
+    }
+
+    func activateAuthority(_ authority: PersistenceAuthority) {
+        activeAuthority = authority
+    }
+
+    func revokeAuthority(for scope: OwnerScope) {
+        if activeAuthority?.ownerScope == scope { activeAuthority = nil }
+    }
+
+    func saveConfigState(
+        _ state: ProtectedMobileConfigState,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        guard activeAuthority == authority else { return false }
+        try saveConfigStateSynchronously(state)
+        return true
     }
 }

@@ -537,6 +537,118 @@ final class OnloSDKTests: XCTestCase {
         XCTAssertEqual(replacementEntries, [])
     }
 
+    func testPersistenceAuthorityAndSendingClaimRejectStaleFailureAfterAcceptanceOrReplacement() async throws {
+        let store = InMemoryOwnerScopedStore()
+        let scope = OwnerScope(kind: .anonymous)
+        try await store.prepare(scope: scope)
+        let old = PersistenceAuthority(
+            ownerScope: scope,
+            sessionGeneration: 1,
+            sessionId: "session-1",
+            bearerContext: UUID()
+        )
+        let replacement = PersistenceAuthority(
+            ownerScope: scope,
+            sessionGeneration: 2,
+            sessionId: "session-2",
+            bearerContext: UUID()
+        )
+        await store.activateAuthority(old)
+
+        let first = OutboxEntry(
+            ownerScope: scope,
+            message: "first",
+            orderingKey: 1,
+            state: .sending,
+            attemptCount: 1
+        )
+        try await store.enqueue(first)
+        var accepted = first
+        accepted.state = .accepted
+        accepted.serverMessageId = "server-message"
+        let acceptanceCommitted = try await store.update(
+            accepted,
+            expectedState: .sending,
+            expectedAttemptCount: 1,
+            authority: old
+        )
+        XCTAssertTrue(acceptanceCommitted)
+        var staleFailure = first
+        staleFailure.state = .failedRetryable
+        let staleFailureCommitted = try await store.update(
+            staleFailure,
+            expectedState: .sending,
+            expectedAttemptCount: 1,
+            authority: old
+        )
+        XCTAssertFalse(staleFailureCommitted)
+
+        let second = OutboxEntry(
+            ownerScope: scope,
+            message: "second",
+            orderingKey: 2,
+            state: .sending,
+            attemptCount: 1
+        )
+        try await store.enqueue(second)
+        await store.revokeAuthority(for: scope)
+        await store.activateAuthority(replacement)
+        var replacementFailure = second
+        replacementFailure.state = .failedTerminal
+        let replacementFailureCommitted = try await store.update(
+            replacementFailure,
+            expectedState: .sending,
+            expectedAttemptCount: 1,
+            authority: old
+        )
+        XCTAssertFalse(replacementFailureCommitted)
+        let states = try await store.outboxEntries(for: scope).map(\.state)
+        XCTAssertEqual(states, [.accepted, .sending])
+    }
+
+    func testPushCompletionCannotCommitAfterAuthorityReplacement() async throws {
+        let store = InMemoryPushIntentStore()
+        let scope = OwnerScope(kind: .identified)
+        let old = PersistenceAuthority(
+            ownerScope: scope,
+            sessionGeneration: 1,
+            sessionId: "session-1",
+            bearerContext: UUID()
+        )
+        let replacement = PersistenceAuthority(
+            ownerScope: scope,
+            sessionGeneration: 2,
+            sessionId: "session-2",
+            bearerContext: UUID()
+        )
+        await store.activateAuthority(old)
+        let pending = ProtectedPushIntent(
+            ownerScope: scope,
+            action: .register,
+            token: String(repeating: "01", count: 32)
+        )
+        let pendingSaved = try await store.save(pending, authority: old)
+        XCTAssertTrue(pendingSaved)
+
+        await store.revokeAuthority(for: scope)
+        await store.activateAuthority(replacement)
+        let staleCompletion = ProtectedPushIntent(
+            ownerScope: scope,
+            action: .register,
+            token: pending.token,
+            isRegistered: true,
+            automaticallyRetryable: false
+        )
+        let staleSaved = try await store.save(staleCompletion, authority: old)
+        XCTAssertFalse(staleSaved)
+        let afterStale = try await store.load()
+        XCTAssertEqual(afterStale?.isRegistered, false)
+        let replacementSaved = try await store.save(staleCompletion, authority: replacement)
+        XCTAssertTrue(replacementSaved)
+        let afterReplacement = try await store.load()
+        XCTAssertEqual(afterReplacement?.isRegistered, true)
+    }
+
     func testSSEMockDeliversEventsIncrementallyAndSupportsCancellation() async throws {
         let transport = StreamingMockTransport(events: [.text(content: "one"), .text(content: "two")])
         let stream = transport.chatEvents(for: URLRequest(url: URL(string: "https://sdk.example.test/api/widget/chat")!))
@@ -1171,6 +1283,120 @@ final class OnloSDKTests: XCTestCase {
         XCTAssertEqual(failed.lastErrorCode, "media_unavailable")
     }
 
+    func testDurableDispatcherConsumesExpiredAttachmentHeadAndDispatchesQueuedTextWithoutDuplicateDispatcher() async throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let transport = TerminalHeadAcceptedTransport()
+        let credentials = InMemoryCredentialStore()
+        let store = InMemoryOwnerScopedStore()
+        let sdk = OnloSDK(
+            credentialStore: credentials,
+            configStore: InMemoryConfigStore(),
+            pushIntentStore: InMemoryPushIntentStore(),
+            ownerStore: store,
+            transport: transport,
+            hostAppIdentifier: "com.example.host",
+            now: { now },
+            lifecycleBindingEnabled: false
+        )
+        _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        let scope = try await activeOwnerScope(credentials)
+        let expired = try await store.enqueueAssigningOrder(
+            OutboxEntry(ownerScope: scope, message: "", attachments: [expiredAttachment()], orderingKey: 0)
+        )
+
+        _ = try await sdk.sendMessage(message: "synthetic queued text")
+        guard await waitUntil(condition: { transport.chatEventRequestCount() == 1 }) else {
+            return XCTFail("timed out waiting for the queued text request")
+        }
+        let entries = try await store.outboxEntries(for: scope)
+        let queuedText = try XCTUnwrap(entries.last)
+
+        XCTAssertEqual(entries.first?.clientMessageId, expired.clientMessageId)
+        XCTAssertEqual(entries.first?.state, .failedTerminal)
+        XCTAssertEqual(entries.first?.lastErrorCode, APIErrorCode.mediaUnavailable.rawValue)
+        XCTAssertEqual(transport.chatClientMessageIDs(), [queuedText.clientMessageId.uuidString])
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(transport.chatEventRequestCount(), 1)
+    }
+
+    func testDurableDispatcherConsumesMultipleConsecutiveExpiredHeadsBeforeQueuedText() async throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let (sdk, credentials, store) = try await readyDurableDispatcher(now: { now })
+        let scope = try await activeOwnerScope(credentials)
+        let firstExpired = try await store.enqueueAssigningOrder(
+            OutboxEntry(ownerScope: scope, message: "", attachments: [expiredAttachment()], orderingKey: 0)
+        )
+        let secondExpired = try await store.enqueueAssigningOrder(
+            OutboxEntry(ownerScope: scope, message: "", attachments: [expiredAttachment()], orderingKey: 0)
+        )
+        let text = try await store.enqueueAssigningOrder(
+            OutboxEntry(ownerScope: scope, message: "synthetic queued text", orderingKey: 0)
+        )
+
+        let selectedCandidate = try await sdk.nextDurableTextDispatch()
+        let selected = try XCTUnwrap(selectedCandidate)
+        let entries = try await store.outboxEntries(for: scope)
+
+        XCTAssertEqual(selected.clientMessageId, text.clientMessageId)
+        XCTAssertEqual(entries.map(\.clientMessageId), [firstExpired.clientMessageId, secondExpired.clientMessageId, text.clientMessageId])
+        XCTAssertEqual(entries.map(\.state), [.failedTerminal, .failedTerminal, .sending])
+    }
+
+    func testDurableDispatcherConsumesExpiredHeadThenSelectsDueRetryableHead() async throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let (sdk, credentials, store) = try await readyDurableDispatcher(now: { now })
+        let scope = try await activeOwnerScope(credentials)
+        let expired = try await store.enqueueAssigningOrder(
+            OutboxEntry(ownerScope: scope, message: "", attachments: [expiredAttachment()], orderingKey: 0)
+        )
+        let retryable = try await store.enqueueAssigningOrder(
+            OutboxEntry(ownerScope: scope, message: "synthetic retryable", orderingKey: 0, state: .failedRetryable, nextAttemptAt: now)
+        )
+
+        let selectedCandidate = try await sdk.nextDurableTextDispatch()
+        let selected = try XCTUnwrap(selectedCandidate)
+        let entries = try await store.outboxEntries(for: scope)
+
+        XCTAssertEqual(selected.clientMessageId, retryable.clientMessageId)
+        XCTAssertEqual(selected.attemptCount, 1)
+        XCTAssertEqual(entries.first?.clientMessageId, expired.clientMessageId)
+        XCTAssertEqual(entries.first?.state, .failedTerminal)
+        XCTAssertEqual(entries.last?.state, .sending)
+    }
+
+    func testLogoutWhileTerminalHeadIsConsumedPreventsDispatchUnderReplacedAuthority() async throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let transport = TerminalHeadAcceptedTransport()
+        let credentials = InMemoryCredentialStore()
+        let store = PausingTerminalOwnerStore()
+        let sdk = OnloSDK(
+            credentialStore: credentials,
+            configStore: InMemoryConfigStore(),
+            pushIntentStore: InMemoryPushIntentStore(),
+            ownerStore: store,
+            transport: transport,
+            hostAppIdentifier: "com.example.host",
+            now: { now },
+            lifecycleBindingEnabled: false
+        )
+        _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        let scope = try await activeOwnerScope(credentials)
+        _ = try await store.enqueueAssigningOrder(
+            OutboxEntry(ownerScope: scope, message: "", attachments: [expiredAttachment()], orderingKey: 0)
+        )
+        await store.pauseNextTerminalUpdate()
+        _ = try await sdk.sendMessage(message: "synthetic must not cross logout")
+        await store.waitForTerminalUpdate()
+
+        let logout = Task { try await sdk.logout() }
+        await store.waitForLogoutBoundary()
+        await store.resumeTerminalUpdate()
+        let logoutState = try await logout.value
+        XCTAssertEqual(logoutState, .anonymousReady)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(transport.chatEventRequestCount(), 0)
+    }
+
     func testDurableDispatcherRejectsOldOwnerAfterAccountSwitch() async throws {
         let transport = MockTransport(responses: [
             sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "anonymous-session", credential: "credential-1"),
@@ -1504,6 +1730,19 @@ final class OnloSDKTests: XCTestCase {
         )
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
         return (sdk, credentials, store)
+    }
+
+    private func expiredAttachment() -> OutboxAttachment {
+        OutboxAttachment(
+            attachment: ChatAttachment(
+                id: "attachment-\(UUID().uuidString)",
+                url: "https://synthetic.invalid/image.jpg",
+                type: "image/jpeg",
+                name: "image.jpg",
+                size: 1
+            ),
+            receiptExpiresAt: "1970-01-01T00:00:00.000Z"
+        )
     }
 
     private func sessionResponse(identityClass: String, generation: Int, sessionId: String, credential: String) -> OnloHTTPResponse {
@@ -1902,11 +2141,24 @@ private actor InMemoryOutboxKeyStore: OutboxEncryptionKeyStoring {
     func loadOrCreate() async throws -> SymmetricKey { key }
 }
 
-private actor InMemoryConfigStore: MobileConfigStoring {
+private actor InMemoryConfigStore: MobileConfigStoring, AuthorityFencedConfigStoring {
     private var stored = ProtectedMobileConfigState(config: nil, etag: nil, retry: nil)
+    private var activeAuthority: PersistenceAuthority?
     func loadConfigState() async throws -> ProtectedMobileConfigState { stored }
     func saveConfigState(_ state: ProtectedMobileConfigState) async throws { stored = state }
     func state() -> ProtectedMobileConfigState { stored }
+    func activateAuthority(_ authority: PersistenceAuthority) { activeAuthority = authority }
+    func revokeAuthority(for scope: OwnerScope) {
+        if activeAuthority?.ownerScope == scope { activeAuthority = nil }
+    }
+    func saveConfigState(
+        _ state: ProtectedMobileConfigState,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        guard activeAuthority == authority else { return false }
+        stored = state
+        return true
+    }
 }
 
 private actor RecordingSDKLogger: SDKLogging {
@@ -1919,7 +2171,7 @@ private actor RecordingSDKLogger: SDKLogging {
     func events() -> [SDKLogEvent] { recordedEvents }
 }
 
-private actor CorruptOnceConfigStore: MobileConfigStoring {
+private actor CorruptOnceConfigStore: MobileConfigStoring, AuthorityFencedConfigStoring {
     private var failsNextLoad = true
     private var stored = ProtectedMobileConfigState(
         config: nil,
@@ -1927,6 +2179,7 @@ private actor CorruptOnceConfigStore: MobileConfigStoring {
         retry: nil
     )
     private var resetCount = 0
+    private var activeAuthority: PersistenceAuthority?
 
     func loadConfigState() async throws -> ProtectedMobileConfigState {
         if failsNextLoad {
@@ -1944,6 +2197,21 @@ private actor CorruptOnceConfigStore: MobileConfigStoring {
     }
 
     func emptyResetCount() -> Int { resetCount }
+    func activateAuthority(_ authority: PersistenceAuthority) { activeAuthority = authority }
+    func revokeAuthority(for scope: OwnerScope) {
+        if activeAuthority?.ownerScope == scope { activeAuthority = nil }
+    }
+    func saveConfigState(
+        _ state: ProtectedMobileConfigState,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        guard activeAuthority == authority else { return false }
+        if state.config == nil, state.etag == nil, state.retry == nil {
+            resetCount += 1
+        }
+        stored = state
+        return true
+    }
 }
 
 private actor RotatingOutboxKeyStore: OutboxEncryptionKeyStoring {
@@ -1976,6 +2244,185 @@ private final class StreamingMockTransport: OnloChatSSETransport, @unchecked Sen
             continuation.onTermination = { _ in task.cancel() }
         }
     }
+}
+
+private actor TerminalUpdateGate {
+    private var shouldPause = false
+    private var reached = false
+    private var reachWaiter: CheckedContinuation<Void, Never>?
+    private var resumeWaiter: CheckedContinuation<Void, Never>?
+
+    func arm() {
+        shouldPause = true
+    }
+
+    func pauseIfArmed() async {
+        guard shouldPause else { return }
+        shouldPause = false
+        reached = true
+        reachWaiter?.resume()
+        reachWaiter = nil
+        await withCheckedContinuation { resumeWaiter = $0 }
+    }
+
+    func waitUntilReached() async {
+        guard !reached else { return }
+        await withCheckedContinuation { reachWaiter = $0 }
+    }
+
+    func resume() {
+        resumeWaiter?.resume()
+        resumeWaiter = nil
+    }
+}
+
+private actor PausingTerminalOwnerStore: OwnerScopedPersisting, AuthorityFencedPersisting {
+    private let store = InMemoryOwnerScopedStore()
+    private let terminalGate = TerminalUpdateGate()
+    private var logoutBoundaryReached = false
+    private var logoutBoundaryWaiter: CheckedContinuation<Void, Never>?
+
+    func prepare(scope: OwnerScope) async throws { try await store.prepare(scope: scope) }
+    func beginLogout(for scope: OwnerScope) async throws {
+        try await store.beginLogout(for: scope)
+        logoutBoundaryReached = true
+        logoutBoundaryWaiter?.resume()
+        logoutBoundaryWaiter = nil
+    }
+    func finishLogout(for scope: OwnerScope) async throws { try await store.finishLogout(for: scope) }
+    func enqueue(_ entry: OutboxEntry) async throws { try await store.enqueue(entry) }
+    func enqueueAssigningOrder(_ entry: OutboxEntry) async throws -> OutboxEntry {
+        try await store.enqueueAssigningOrder(entry)
+    }
+    func update(_ entry: OutboxEntry) async throws {
+        try await store.update(entry)
+        if entry.state == .failedTerminal {
+            await terminalGate.pauseIfArmed()
+        }
+    }
+    func activateAuthority(_ authority: PersistenceAuthority) async {
+        await store.activateAuthority(authority)
+    }
+    func revokeAuthority(for scope: OwnerScope) async {
+        await store.revokeAuthority(for: scope)
+    }
+    func update(
+        _ entry: OutboxEntry,
+        expectedState: OutboxState,
+        expectedAttemptCount: Int,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        if entry.state == .failedTerminal {
+            await terminalGate.pauseIfArmed()
+        }
+        return try await store.update(
+            entry,
+            expectedState: expectedState,
+            expectedAttemptCount: expectedAttemptCount,
+            authority: authority
+        )
+    }
+    func recoverEligibleEntries(
+        for scope: OwnerScope,
+        now: Date,
+        authority: PersistenceAuthority
+    ) async throws -> [OutboxEntry]? {
+        try await store.recoverEligibleEntries(
+            for: scope,
+            now: now,
+            authority: authority
+        )
+    }
+    func replaceTranscript(
+        _ transcript: ConversationTranscriptResult,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        try await store.replaceTranscript(transcript, authority: authority)
+    }
+    func reconcileAccepted(
+        _ entry: OutboxEntry,
+        transcript: ConversationTranscriptResult,
+        expectedServerMessageId: String,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        try await store.reconcileAccepted(
+            entry,
+            transcript: transcript,
+            expectedServerMessageId: expectedServerMessageId,
+            authority: authority
+        )
+    }
+    func outboxEntries(for scope: OwnerScope) async throws -> [OutboxEntry] {
+        try await store.outboxEntries(for: scope)
+    }
+    func recoverEligibleEntries(for scope: OwnerScope, now: Date) async throws -> [OutboxEntry] {
+        try await store.recoverEligibleEntries(for: scope, now: now)
+    }
+
+    func pauseNextTerminalUpdate() async { await terminalGate.arm() }
+    func waitForTerminalUpdate() async { await terminalGate.waitUntilReached() }
+    func resumeTerminalUpdate() async { await terminalGate.resume() }
+    func waitForLogoutBoundary() async {
+        guard !logoutBoundaryReached else { return }
+        await withCheckedContinuation { logoutBoundaryWaiter = $0 }
+    }
+}
+
+private final class TerminalHeadAcceptedTransport: OnloChatSSETransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var chatIDs: [String] = []
+
+    func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
+        guard request.url?.path == "/api/sdk/v1/session",
+              let body = request.httpBody,
+              let session = try? JSONDecoder().decode(SessionRequest.self, from: body) else {
+            return durableSessionResponse(for: request)
+        }
+        let generation: Int
+        let identityClass: String
+        switch session.operation {
+        case .bootstrap:
+            generation = 1
+            identityClass = "anonymous"
+        case let .resume(_, expectedGeneration, _, _):
+            generation = expectedGeneration + 1
+            identityClass = "anonymous"
+        case let .identify(_, expectedGeneration, _, _, _):
+            generation = expectedGeneration + 1
+            identityClass = "identified"
+        case let .logout(_, expectedGeneration, _, _):
+            generation = expectedGeneration + 1
+            identityClass = "anonymous"
+        }
+        let response = OnloHTTPResponse(
+            statusCode: 200,
+            body: Data("""
+            {"requestId":"request-1","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"session-\(generation)","chatToken":"opaque-access-token","installationId":"installation-1","generation":\(generation),"proposedCredential":"credential-\(generation)","identityClass":"\(identityClass)","publicationState":"testing","attestationState":"not_required","configRevision":"revision-1","configSchemaVersion":1,"configEtag":"etag-1"}}
+            """.utf8)
+        )
+        return sessionResponseMatchingRequest(response, request: request)
+    }
+
+    func chatEvents(for request: URLRequest) -> AsyncThrowingStream<ChatEvent, Error> {
+        let clientMessageID = request.httpBody
+            .flatMap { try? JSONDecoder().decode(ChatRequest.self, from: $0) }?
+            .clientMessageId ?? "invalid"
+        lock.withLock { chatIDs.append(clientMessageID) }
+        return AsyncThrowingStream { continuation in
+            continuation.yield(.accepted(
+                clientMessageId: clientMessageID,
+                messageId: "message-1",
+                conversationId: "conversation-1",
+                acceptedAt: "2026-01-01T00:00:00Z",
+                duplicate: false,
+                processingStatus: "accepted"
+            ))
+            continuation.finish()
+        }
+    }
+
+    func chatEventRequestCount() -> Int { lock.withLock { chatIDs.count } }
+    func chatClientMessageIDs() -> [String] { lock.withLock { chatIDs } }
 }
 
 private final class ImmediateAcceptedTransport: OnloChatSSETransport, @unchecked Sendable {
