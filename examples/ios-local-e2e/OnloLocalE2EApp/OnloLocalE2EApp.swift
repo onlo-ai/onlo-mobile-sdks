@@ -71,8 +71,13 @@ private struct LocalE2ERootView: View {
             Text("Image attachments use the native picker and camera controls.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-            Button("Log out") { Task { await model.logout() } }
-                .buttonStyle(.bordered)
+            if model.isAnonymous {
+                Button("Back") { model.leaveAnonymousSupport() }
+                    .buttonStyle(.bordered)
+            } else {
+                Button("Log out") { Task { await model.logout() } }
+                    .buttonStyle(.bordered)
+            }
             Text(model.status)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
@@ -88,13 +93,23 @@ private final class LocalE2EModel: ObservableObject {
     @Published private(set) var isSupportLoading = false
     @Published private(set) var status = "Enter a local test account"
 
+    private enum SessionMode {
+        case anonymous
+        case identified
+    }
+
     private let backend = LocalMerchantBackend()
     private let sdk = LocalSDKEnvironment.sdk
     private var presenter: OnloMessengerPresenter?
     private var supportConfiguration: LocalSupportConfiguration?
+    private var sessionMode: SessionMode?
 
     var canLogIn: Bool {
         !loginCode.isEmpty
+    }
+
+    var isAnonymous: Bool {
+        sessionMode == .anonymous
     }
 
     func continueAnonymously() async {
@@ -103,10 +118,19 @@ private final class LocalE2EModel: ObservableObject {
             return
         }
         supportConfiguration = configuration
+        sessionMode = .anonymous
         isSignedIn = true
+        await prepareAnonymousSupport(configuration)
+    }
+
+    private func prepareAnonymousSupport(_ configuration: LocalSupportConfiguration) async {
         isSupportLoading = true
+        isSupportReady = false
         do {
-            try await initialize(configuration)
+            let state = try await initialize(configuration)
+            if state == .logoutPending {
+                _ = try await sdk.logout()
+            }
             _ = try await sdk.loginUnidentifiedUser()
             presenter = OnloMessengerPresenter(sdk: sdk)
             isSupportReady = true
@@ -132,6 +156,7 @@ private final class LocalE2EModel: ObservableObject {
             loginCode = ""
             isSignedIn = true
             isSupportReady = false
+            sessionMode = .identified
             supportConfiguration = LocalSupportConfiguration(
                 sdkKey: result.sdkKey,
                 onloDevelopmentOrigin: result.onloDevelopmentOrigin
@@ -151,6 +176,10 @@ private final class LocalE2EModel: ObservableObject {
 
     func retrySupport() async {
         guard let supportConfiguration else { return }
+        if sessionMode == .anonymous {
+            await prepareAnonymousSupport(supportConfiguration)
+            return
+        }
         do {
             let userJwt = try await backend.refreshUserJwt()
             await prepareSupport(userJwt: userJwt, configuration: supportConfiguration)
@@ -184,14 +213,14 @@ private final class LocalE2EModel: ObservableObject {
         isSupportLoading = false
     }
 
-    private func initialize(_ configuration: LocalSupportConfiguration) async throws {
+    private func initialize(_ configuration: LocalSupportConfiguration) async throws -> SDKState {
         #if DEBUG
-        _ = try await sdk.initializeDevelopment(
+        return try await sdk.initializeDevelopment(
             apiKey: configuration.sdkKey,
             onloDevelopmentOrigin: configuration.onloDevelopmentOrigin
         )
         #else
-        _ = try await sdk.initialize(apiKey: configuration.sdkKey)
+        return try await sdk.initialize(apiKey: configuration.sdkKey)
         #endif
     }
 
@@ -223,16 +252,27 @@ private final class LocalE2EModel: ObservableObject {
         do {
             _ = try await sdk.logout()
             await backend.clearSession()
-            isSignedIn = false
-            isSupportReady = false
-            supportConfiguration = nil
-            presenter = nil
-            status = "Logged out"
+            resetHostSession(status: "Logged out")
             E2ESafeDiagnostics.record(operation: "merchant_logout", code: "complete")
         } catch {
             status = "Support logout is pending"
             E2ESafeDiagnostics.record(operation: "merchant_logout", code: safeDiagnosticCode(for: error))
         }
+    }
+
+    func leaveAnonymousSupport() {
+        resetHostSession(status: "Anonymous support closed")
+        E2ESafeDiagnostics.record(operation: "anonymous_support", code: "closed")
+    }
+
+    private func resetHostSession(status: String) {
+        isSignedIn = false
+        isSupportReady = false
+        isSupportLoading = false
+        supportConfiguration = nil
+        presenter = nil
+        sessionMode = nil
+        self.status = status
     }
 
     private func safeDiagnosticCode(for error: Error) -> String {

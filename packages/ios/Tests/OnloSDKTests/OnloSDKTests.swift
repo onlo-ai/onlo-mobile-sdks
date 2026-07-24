@@ -532,6 +532,31 @@ final class OnloSDKTests: XCTestCase {
         )
     }
 
+    func testSSEByteFramingSurvivesChunkBoundariesAndCRLF() throws {
+        let chunks = [
+            Data("data: {\"type\":\"text\",\"con".utf8),
+            Data("tent\":\"one\"}\r\n\r".utf8),
+            Data("\n: ping\r\ndata: {\"type\":\"done\",\"conversationId\":\"conversation-1\"}\r\n\r\n".utf8),
+        ]
+
+        let payloads = try URLSessionOnloTransport.decodeSSEPayloadsForTesting(chunks)
+
+        XCTAssertEqual(payloads.count, 2)
+        XCTAssertEqual(
+            try payloads.map(URLSessionOnloTransport.decodeChatEvent),
+            [
+                .text(content: "one"),
+                .done(
+                    conversationId: "conversation-1",
+                    duplicate: nil,
+                    processingStatus: nil,
+                    gated: nil,
+                    reason: nil
+                ),
+            ]
+        )
+    }
+
     func testMalformedRawChatFrameReportsOnlySafeEventStage() {
         let malformed = Data(#"{"type":"accepted","clientMessageId":false}"#.utf8)
 

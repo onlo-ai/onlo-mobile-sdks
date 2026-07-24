@@ -40,6 +40,55 @@ public final class URLSessionOnloTransport: OnloChatSSETransport, OnloForeground
         let type: String
     }
 
+    private struct SSEAccumulator {
+        private static let maximumFrameBytes = 65_536
+        private var line: [UInt8] = []
+        private var dataLines: [Data] = []
+        private var frameBytes = 0
+
+        mutating func append(_ byte: UInt8) throws -> Data? {
+            if byte == 0x0A {
+                return try finishLine()
+            }
+            guard line.count < Self.maximumFrameBytes else { throw OnloError.invalidResponse }
+            line.append(byte)
+            return nil
+        }
+
+        mutating func finish() throws -> Data? {
+            if !line.isEmpty {
+                if let payload = try finishLine() { return payload }
+            }
+            return takePayload()
+        }
+
+        private mutating func finishLine() throws -> Data? {
+            if line.last == 0x0D { line.removeLast() }
+            defer { line.removeAll(keepingCapacity: true) }
+            if line.isEmpty { return takePayload() }
+            guard line.starts(with: [0x64, 0x61, 0x74, 0x61, 0x3A]) else { return nil }
+            var start = 5
+            if line.count > start, line[start] == 0x20 { start += 1 }
+            let data = Data(line[start...])
+            frameBytes += data.count
+            guard frameBytes <= Self.maximumFrameBytes else { throw OnloError.invalidResponse }
+            dataLines.append(data)
+            return nil
+        }
+
+        private mutating func takePayload() -> Data? {
+            guard !dataLines.isEmpty else { return nil }
+            var payload = Data()
+            for (index, data) in dataLines.enumerated() {
+                if index > 0 { payload.append(0x0A) }
+                payload.append(data)
+            }
+            dataLines.removeAll(keepingCapacity: true)
+            frameBytes = 0
+            return payload
+        }
+    }
+
     private let session: URLSession
     private let chatCorrelationLock = NSLock()
     private var chatRequestIds: [String: String] = [:]
@@ -106,23 +155,14 @@ public final class URLSessionOnloTransport: OnloChatSSETransport, OnloForeground
                         }
                         throw OnloError.transport(code: safeCode)
                     }
-                    var dataLines: [String] = []
-                    for try await line in bytes.lines {
-                        if line.isEmpty {
-                            if !dataLines.isEmpty {
-                                let payload = dataLines.joined(separator: "\n")
-                                guard let data = payload.data(using: .utf8) else { throw OnloError.invalidResponse }
-                                continuation.yield(try Self.decodeChatEvent(data))
-                                dataLines.removeAll(keepingCapacity: true)
-                            }
-                        } else if line.hasPrefix("data:") {
-                            dataLines.append(String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces))
+                    var accumulator = SSEAccumulator()
+                    for try await byte in bytes {
+                        if let payload = try accumulator.append(byte) {
+                            continuation.yield(try Self.decodeChatEvent(payload))
                         }
                     }
-                    if !dataLines.isEmpty {
-                        let payload = dataLines.joined(separator: "\n")
-                        guard let data = payload.data(using: .utf8) else { throw OnloError.invalidResponse }
-                        continuation.yield(try Self.decodeChatEvent(data))
+                    if let payload = try accumulator.finish() {
+                        continuation.yield(try Self.decodeChatEvent(payload))
                     }
                     continuation.finish()
                 } catch is CancellationError {
@@ -186,6 +226,22 @@ public final class URLSessionOnloTransport: OnloChatSSETransport, OnloForeground
         }
     }
 
+    static func decodeSSEPayloadsForTesting(_ chunks: [Data]) throws -> [Data] {
+        var accumulator = SSEAccumulator()
+        var payloads: [Data] = []
+        for chunk in chunks {
+            for byte in chunk {
+                if let payload = try accumulator.append(byte) {
+                    payloads.append(payload)
+                }
+            }
+        }
+        if let payload = try accumulator.finish() {
+            payloads.append(payload)
+        }
+        return payloads
+    }
+
     func chatRequestId(for clientMessageId: String) -> String? {
         chatCorrelationLock.lock()
         defer { chatCorrelationLock.unlock() }
@@ -218,19 +274,14 @@ public final class URLSessionOnloTransport: OnloChatSSETransport, OnloForeground
                         }
                         throw OnloError.transport(code: "stream_unavailable")
                     }
-                    var lines: [String] = []
-                    for try await line in bytes.lines {
-                        if line.isEmpty, !lines.isEmpty {
-                            let payload = lines.joined(separator: "\n")
-                            guard let data = payload.data(using: .utf8) else { throw OnloError.invalidResponse }
-                            continuation.yield(try JSONDecoder().decode(StreamEvent.self, from: data))
-                            lines.removeAll(keepingCapacity: true)
-                        } else if line.hasPrefix("data:") { lines.append(String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)) }
+                    var accumulator = SSEAccumulator()
+                    for try await byte in bytes {
+                        if let payload = try accumulator.append(byte) {
+                            continuation.yield(try JSONDecoder().decode(StreamEvent.self, from: payload))
+                        }
                     }
-                    if !lines.isEmpty {
-                        let payload = lines.joined(separator: "\n")
-                        guard let data = payload.data(using: .utf8) else { throw OnloError.invalidResponse }
-                        continuation.yield(try JSONDecoder().decode(StreamEvent.self, from: data))
+                    if let payload = try accumulator.finish() {
+                        continuation.yield(try JSONDecoder().decode(StreamEvent.self, from: payload))
                     }
                     continuation.finish()
                 } catch is CancellationError { continuation.finish() }
