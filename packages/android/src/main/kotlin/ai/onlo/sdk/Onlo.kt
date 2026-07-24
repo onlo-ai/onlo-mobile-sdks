@@ -14,10 +14,19 @@ import ai.onlo.sdk.push.KeystorePushTokenStore
 import ai.onlo.sdk.push.PushRegistry
 import ai.onlo.sdk.transport.OnloPushApi
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+
+@RequiresOptIn(
+    message = "Development origins are available only to debuggable merchant hosts.",
+    level = RequiresOptIn.Level.ERROR,
+)
+@Retention(AnnotationRetention.BINARY)
+@Target(AnnotationTarget.FUNCTION)
+public annotation class OnloDevelopmentSupport
 
 /** Application-scoped Onlo SDK entry point. It declares no manifest components. */
 public object Onlo {
@@ -40,6 +49,26 @@ public object Onlo {
         context: Context,
         sdkKey: String,
     ): OnloClient = initializeInternal(context, sdkKey, PRODUCTION_ORIGIN, ai.onlo.sdk.protocol.SdkFamily.ANDROID)
+
+    /** SDK-team and merchant-QA seam. Release hosts cannot select another service origin. */
+    @OnloDevelopmentSupport
+    @JvmStatic
+    @JvmSynthetic
+    public fun initializeDevelopment(
+        context: Context,
+        sdkKey: String,
+        serviceOrigin: String,
+    ): OnloClient {
+        require(context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+            "development_origin"
+        }
+        return initializeInternal(
+            context,
+            sdkKey,
+            serviceOrigin,
+            ai.onlo.sdk.protocol.SdkFamily.ANDROID,
+        )
+    }
 
     /** Used only by the public, fixed-family bridge facades below. */
     internal fun initializeForReactNative(context: Context, sdkKey: String): OnloClient =

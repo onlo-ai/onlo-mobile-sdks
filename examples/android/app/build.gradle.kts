@@ -15,6 +15,9 @@ val onloSdkKey = localProperties.getProperty("ONLO_SDK_KEY", "")
 val operatorBackendUrl = localProperties.getProperty("ONLO_OPERATOR_BACKEND_URL", "")
     .replace("\\", "\\\\")
     .replace("\"", "\\\"")
+val onloDevelopmentOrigin = localProperties.getProperty("ONLO_DEVELOPMENT_ORIGIN", "")
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
 
 android {
     namespace = "ai.onlo.example"
@@ -29,6 +32,7 @@ android {
             .getOrElse("0.0.0-local")
         buildConfigField("String", "ONLO_SDK_KEY", "\"$onloSdkKey\"")
         buildConfigField("String", "ONLO_OPERATOR_BACKEND_URL", "\"$operatorBackendUrl\"")
+        buildConfigField("String", "ONLO_DEVELOPMENT_ORIGIN", "\"$onloDevelopmentOrigin\"")
     }
 
     buildFeatures { buildConfig = true }

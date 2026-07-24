@@ -41,12 +41,24 @@ createServer(
     key: readFileSync(configuration.tlsKeyPath),
     minVersion: 'TLSv1.2',
   },
-  proxyToLocalOnlo,
+  routePublicTestBridge,
 ).listen(configuration.onloProxyPort, '127.0.0.1', () => {
   console.log(`Local Onlo HTTPS proxy listening on https://127.0.0.1:${configuration.onloProxyPort}`);
   console.log(`Safe diagnostics: ${configuration.safeLogPath}`);
   safeLog('onlo_proxy_started', 'ready');
 });
+
+function routePublicTestBridge(request, response) {
+  if (request.url?.startsWith('/v1/')) {
+    handle(request, response).catch(() => {
+      safeLog('merchant_request', 'unexpected_error');
+      if (!response.headersSent) respond(response, 500, { error: 'local_merchant_backend_error' });
+      else response.destroy();
+    });
+    return;
+  }
+  proxyToLocalOnlo(request, response);
+}
 
 async function handle(request, response) {
   if (request.method !== 'POST') return respond(response, 405, { error: 'method_not_allowed' });

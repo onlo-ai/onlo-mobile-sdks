@@ -176,7 +176,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Onlo E2E";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Take a photo to attach to a support message.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Use your microphone to dictate a support message.";
@@ -203,7 +204,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Onlo E2E";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Take a photo to attach to a support message.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Use your microphone to dictate a support message.";

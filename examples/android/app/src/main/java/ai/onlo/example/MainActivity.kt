@@ -1,6 +1,7 @@
 package ai.onlo.example
 
 import ai.onlo.sdk.Onlo
+import ai.onlo.sdk.OnloDevelopmentSupport
 import ai.onlo.sdk.OnloPhase
 import ai.onlo.sdk.messenger.OnloMessenger
 import ai.onlo.sdk.protocol.PushProvider
@@ -56,7 +57,7 @@ class MainActivity : AppCompatActivity() {
         // The public key is supplied by ignored local.properties in this example. It is safe to
         // embed in an app, but a real value does not belong in this shared repository.
         val publicSdkKey = BuildConfig.ONLO_SDK_KEY.takeIf(String::isNotBlank) ?: return
-        val client = Onlo.initialize(applicationContext, publicSdkKey)
+        val client = initializeOnlo(publicSdkKey)
         anonymousButton.setOnClickListener {
             lifecycleScope.launch { client.loginUnidentifiedUser() }
         }
@@ -91,6 +92,18 @@ class MainActivity : AppCompatActivity() {
         Onlo.instance().loginIdentifiedUser(userJwt)
     }
 
+    @OptIn(OnloDevelopmentSupport::class)
+    private fun initializeOnlo(publicSdkKey: String) =
+        if (BuildConfig.ONLO_DEVELOPMENT_ORIGIN.isBlank()) {
+            Onlo.initialize(applicationContext, publicSdkKey)
+        } else {
+            Onlo.initializeDevelopment(
+                applicationContext,
+                publicSdkKey,
+                BuildConfig.ONLO_DEVELOPMENT_ORIGIN,
+            )
+        }
+
     /** Call from FirebaseMessagingService; the host never stores the token. */
     suspend fun forwardFcmToken(token: String) {
         Onlo.instance().registerPushToken(PushProvider.FCM, token)
@@ -123,7 +136,7 @@ private class OperatorBackend {
         require(BuildConfig.ONLO_OPERATOR_BACKEND_URL.isNotBlank()) {
             "Configure an authenticated Operator-backend URL."
         }
-        val connection = URL("${BuildConfig.ONLO_OPERATOR_BACKEND_URL}/v1/onlo-user-jwt")
+        val connection = URL("${BuildConfig.ONLO_OPERATOR_BACKEND_URL}/v1/test-login")
             .openConnection() as HttpURLConnection
         try {
             connection.requestMethod = "POST"
