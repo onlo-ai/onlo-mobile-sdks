@@ -2,6 +2,8 @@ pluginManagement {
     plugins {
         id("com.android.library") version "8.6.1"
         kotlin("android") version "2.0.21"
+        id("org.jetbrains.dokka") version "2.2.0"
+        id("org.jetbrains.dokka-javadoc") version "2.2.0"
     }
     repositories {
         google()

@@ -2,6 +2,35 @@
 
 Kotlin native-core foundation for the Onlo mobile v1 contract. It owns protected session state and the owner-scoped SQLite outbox; framework bridges must not duplicate either.
 
+> **Status:** RC ready; publication pending physical-device qualification.
+
+## Install
+
+Requirements:
+
+| Requirement | Minimum |
+| --- | --- |
+| Android | API 24 |
+| Compile SDK | 35 |
+| Java | 17 |
+| Kotlin | 2.0-compatible host |
+
+Use Maven Central and add the native Core once:
+
+```kotlin
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    implementation("ai.onlo:onlo-android-sdk:0.1.0")
+}
+```
+
+The artifact is prepared but not published. The dependency resolves only after
+physical-device qualification and Maven Central release.
+
 ## Public entry points
 
 | API | Behavior |
@@ -153,8 +182,8 @@ The module is standalone and requires JDK 17 plus an Android SDK:
 packages/android/gradlew -p packages/android testDebugUnitTest assembleRelease
 ```
 
-The module can publish to an isolated qualification repository with explicit
-temporary properties:
+The module publishes the release AAR, sources JAR, Dokka Javadoc JAR, and
+Maven Central metadata to an isolated qualification repository:
 
 ```bash
 packages/android/gradlew -p packages/android \
@@ -162,7 +191,6 @@ packages/android/gradlew -p packages/android \
   -Ponlo.maven.repository=/tmp/onlo-maven
 ```
 
-The default qualification coordinate is
-`ai.onlo.unpublished:onlo-android-sdk:0.1.0`. It is deliberately non-public and
-must not appear in customer installation instructions. Final group, artifact,
-repository, and signing ownership remain unapproved.
+The release coordinate is `ai.onlo:onlo-android-sdk:0.1.0`. Maven Central
+namespace ownership, publisher credentials, and artifact signing remain
+external release inputs.

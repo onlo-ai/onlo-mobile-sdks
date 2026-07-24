@@ -1,13 +1,14 @@
 Pod::Spec.new do |s|
   s.name             = 'onlo_flutter'
   s.version          = '0.1.0'
-  s.summary          = 'Local Flutter bridge for the Onlo iOS native core.'
+  s.summary          = 'Flutter bridge for the Onlo native mobile SDKs.'
   s.description      = <<-DESC
-Unpublished local-development bridge. It depends on the checked-in OnloSDK pod;
-it does not download, publish, or substitute a server SDK.
+Typed Flutter bridge that delegates protected state, transport, durable
+delivery, and messenger presentation to the Onlo native SDK for the host OS.
   DESC
-  s.homepage         = 'https://onlo.ai'
-  s.license          = { :type => 'Proprietary' }
+  s.homepage         = 'https://github.com/onlo-ai/onlo-mobile-sdks'
+  s.documentation_url = 'https://github.com/onlo-ai/onlo-mobile-sdks/tree/main/packages/flutter#readme'
+  s.license          = { :type => 'Proprietary', :file => '../LICENSE' }
   s.author           = { 'Onlo' => 'support@onlo.ai' }
   s.source           = { :path => '.' }
   s.platform         = :ios, '15.0'

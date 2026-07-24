@@ -3,7 +3,7 @@
 Add native Onlo support to an iOS 15+ app with one lifecycle:
 **initialize → login → present → logout**.
 
-> v2 development package. It is not published to Swift Package Manager or CocoaPods yet.
+> **Status:** RC ready; publication pending physical-device qualification.
 
 ## What the four calls do
 
@@ -28,22 +28,29 @@ Expected result: `import OnloSDK` builds in the merchant app.
 
 ### Public installation
 
-The repository URL and tag owner are not approved yet. After release engineering
-pushes the approved repository and `0.1.0` tag, select **Add Package
-Dependencies**, enter `<APPROVED_SWIFTPM_REPOSITORY_URL>`, and choose exact
-version `0.1.0`.
+After Onlo publishes the `0.1.0` repository tag, select **Add Package
+Dependencies**, enter `https://github.com/onlo-ai/onlo-mobile-sdks`, and
+choose exact version `0.1.0`.
 
 For a manifest-based host:
 
 ```swift
 .package(
-    url: "<APPROVED_SWIFTPM_REPOSITORY_URL>",
+    url: "https://github.com/onlo-ai/onlo-mobile-sdks.git",
     exact: "0.1.0"
 )
 ```
 
-Add the `OnloSDK` product once. Do not combine it with the local CocoaPod in
-the same target. CocoaPods publication remains unapproved.
+Add the `OnloSDK` product once.
+
+For CocoaPods:
+
+```ruby
+pod 'OnloSDK', '0.1.0'
+```
+
+Run `pod install`, then open the generated workspace. Use SwiftPM or CocoaPods
+for a target, never both.
 
 ## Complete UIKit example
 
@@ -560,10 +567,11 @@ questions are answered in the
 
 ## Local verification
 
-From `packages/ios`:
+From the repository root:
 
 ```bash
-swift build
+swift package resolve
+swift build -c release
 xcodebuild \
   -scheme OnloSDK \
   -destination 'generic/platform=iOS Simulator' \

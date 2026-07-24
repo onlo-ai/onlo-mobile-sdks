@@ -8,7 +8,7 @@ PODS:
 DEPENDENCIES:
   - Flutter (from `Flutter`)
   - onlo_flutter (from `.symlinks/plugins/onlo_flutter/ios`)
-  - OnloSDK (from `../../../packages/ios`)
+  - OnloSDK (from `../../..`)
 
 EXTERNAL SOURCES:
   Flutter:
@@ -16,13 +16,13 @@ EXTERNAL SOURCES:
   onlo_flutter:
     :path: ".symlinks/plugins/onlo_flutter/ios"
   OnloSDK:
-    :path: "../../../packages/ios"
+    :path: "../../.."
 
 SPEC CHECKSUMS:
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
-  onlo_flutter: 7c384da5fb4a58026f5b8dd3e80889a1c0a23a18
-  OnloSDK: 71f14eee724f87e515ffaf5368002bc9a7200676
+  onlo_flutter: a084832bc4747cb52435416daee2092a359ec46b
+  OnloSDK: 2e26a4a79a6175e8e5b3f62b22d742f7a579ccb2
 
-PODFILE CHECKSUM: 7e4e2b37a00b80b2559093a383cab2038c9be9cf
+PODFILE CHECKSUM: d0859211387a3892796ef917a6f56275c21fb611
 
 COCOAPODS: 1.16.2

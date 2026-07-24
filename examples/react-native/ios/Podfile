@@ -16,7 +16,7 @@ end
 
 target 'OnloRnRC' do
   config = use_native_modules!
-  pod 'OnloSDK', :path => '../../../packages/ios'
+  pod 'OnloSDK', :path => '../../..'
 
   use_react_native!(
     :path => config[:reactNativePath],

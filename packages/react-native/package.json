@@ -1,9 +1,29 @@
 {
   "name": "@onlo/react-native",
   "version": "0.1.0",
-  "private": true,
-  "license": "UNLICENSED",
+  "license": "SEE LICENSE IN LICENSE",
   "description": "React Native bridge for the native Onlo mobile SDKs.",
+  "homepage": "https://github.com/onlo-ai/onlo-mobile-sdks/tree/main/packages/react-native#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/onlo-ai/onlo-mobile-sdks.git",
+    "directory": "packages/react-native"
+  },
+  "bugs": {
+    "url": "https://github.com/onlo-ai/onlo-mobile-sdks/issues"
+  },
+  "keywords": [
+    "react-native",
+    "ios",
+    "android",
+    "customer-support",
+    "messenger",
+    "onlo"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "main": "src/index.ts",
   "react-native": "src/index.ts",
   "types": "src/index.ts",
@@ -15,6 +35,9 @@
     }
   },
   "files": [
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md",
     "android/build.gradle",
     "android/consumer-rules.pro",
     "android/src",

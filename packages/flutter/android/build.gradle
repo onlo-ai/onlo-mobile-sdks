@@ -42,14 +42,9 @@ dependencies {
     if (localCore != null) {
         implementation localCore
     } else {
-        def coreGroup = providers.gradleProperty('onlo.android.group').orNull
-        def coreArtifact = providers.gradleProperty('onlo.android.artifact').orNull
-        def coreVersion = providers.gradleProperty('onlo.android.version').orNull
-        if ([coreGroup, coreArtifact, coreVersion].any { it == null || it.trim().isEmpty() }) {
-            throw new GradleException(
-                'Supply approved onlo.android.group/artifact/version properties or include :onlo-android-sdk.'
-            )
-        }
+        def coreGroup = providers.gradleProperty('onlo.android.group').getOrElse('ai.onlo')
+        def coreArtifact = providers.gradleProperty('onlo.android.artifact').getOrElse('onlo-android-sdk')
+        def coreVersion = providers.gradleProperty('onlo.android.version').getOrElse('0.1.0')
         implementation "${coreGroup}:${coreArtifact}:${coreVersion}"
     }
 }

@@ -1833,7 +1833,7 @@ DEPENDENCIES:
   - FBLazyVector (from `../node_modules/react-native/Libraries/FBLazyVector`)
   - hermes-engine (from `../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
   - "OnloReactNative (from `../node_modules/@onlo/react-native`)"
-  - OnloSDK (from `../../../packages/ios`)
+  - OnloSDK (from `../../..`)
   - RCTDeprecation (from `../node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation`)
   - RCTRequired (from `../node_modules/react-native/Libraries/Required`)
   - RCTSwiftUI (from `../node_modules/react-native/ReactApple/RCTSwiftUI`)
@@ -1918,7 +1918,7 @@ EXTERNAL SOURCES:
   OnloReactNative:
     :path: "../node_modules/@onlo/react-native"
   OnloSDK:
-    :path: "../../../packages/ios"
+    :path: "../../.."
   RCTDeprecation:
     :path: "../node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation"
   RCTRequired:
@@ -2069,8 +2069,8 @@ EXTERNAL SOURCES:
 SPEC CHECKSUMS:
   FBLazyVector: b3e7ad108f0d882e30445c5527d774e3fd432f3d
   hermes-engine: f2d9010f637b2ab18528bc89d4d6de3157cbe5ef
-  OnloReactNative: 5e812d01a2dd9b1c9b3917dbbb24905958a38739
-  OnloSDK: 71f14eee724f87e515ffaf5368002bc9a7200676
+  OnloReactNative: cb4e8a8cfeaa216687f174ca8f1e5503a3c43ccc
+  OnloSDK: 2e26a4a79a6175e8e5b3f62b22d742f7a579ccb2
   RCTDeprecation: 2a74a2c57675e64419bd89078efde81f7c1de90b
   RCTRequired: 30451112e6fef4e6f31b4e7eee0845156e35e4b0
   RCTSwiftUI: 5aaf0b07e747ba749dc6acc94d8bd41eea4b570f
@@ -2145,6 +2145,6 @@ SPEC CHECKSUMS:
   ReactNativeDependencies: fa0a54b3f5319ae0e3b9aff32bfee7a424b88e66
   Yoga: fe50ab299e578f397fef753cf309c6703a4db29b
 
-PODFILE CHECKSUM: cb82a655b16798417c38b1e2b55c0e0b7eae94b1
+PODFILE CHECKSUM: 8c165a1b4eb64b5cc03b4b6f39f46310f57425a4
 
 COCOAPODS: 1.16.2

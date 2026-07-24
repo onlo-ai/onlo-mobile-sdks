@@ -2,9 +2,33 @@
 
 Typed Flutter facade over the iOS and Android Onlo native cores. Dart owns no session, credential, transcript, outbox, push registry, transport, or messenger UI state.
 
-> **Status:** Unpublished (`publish_to: none`). Both release-mode example hosts
-> build against exactly one sibling native Core. Publisher and repository
-> approval remain pending.
+> **Status:** RC ready; publication pending native publication and
+> physical-device qualification.
+
+## Install
+
+Requirements:
+
+| Requirement | Minimum |
+| --- | --- |
+| Flutter | 3.27 |
+| Dart | 3.6 |
+| iOS | 15 |
+| Android | API 24 with compile SDK 35 |
+| Android Java | 17 |
+
+```yaml
+dependencies:
+  onlo_flutter: 0.1.0
+```
+
+Run `flutter pub get`, then build the host normally. The plugin resolves
+`OnloSDK` 0.1.0 through CocoaPods on iOS and
+`ai.onlo:onlo-android-sdk:0.1.0` through Maven Central on Android. Do not add a
+second native Core manually.
+
+The package is prepared but not published. Installation succeeds only after
+the native iOS/Android artifacts and then the pub.dev package are released.
 
 ## Typed surface
 
@@ -27,17 +51,14 @@ identified login and re-registers it after an account switch.
 
 The host obtains `userJwt` from its Operator backend. Never generate or persist it in Dart.
 
-## Monorepo-local native linking
+## Repository development
 
-Neither native link is an installable distribution artifact. The plugin is not published.
+Local examples may replace the published dependencies with one sibling native
+Core while developing the monorepo.
 
 | Platform | Local link | Verification gate |
 | --- | --- | --- |
-| Android | Sibling `:onlo-android-sdk` Gradle project from `packages/android` | Android API 35 licence acceptance and a real Flutter Android host build. |
-| iOS | `onlo_flutter` pod plus one sibling `OnloSDK` pod from `packages/ios` | Declare the local `OnloSDK` pod in the host Podfile; do not also add the SwiftPM product. |
-
-For a packaged-source Android consumer, supply the approved
-`onlo.android.group`, `onlo.android.artifact`, and `onlo.android.version`
-Gradle properties. The plugin intentionally has no default public coordinate.
+| Android | Sibling `:onlo-android-sdk` Gradle project from `packages/android` | The local project replaces, rather than supplements, the Maven dependency. |
+| iOS | `onlo_flutter` pod plus one root-level local `OnloSDK` pod | Do not also add the SwiftPM product. |
 
 See the [API contract](../../docs/api-contract.md), [`@onlo/protocol`](../protocol/src/index.ts), and [delivery plan](../../docs/delivery-plan.md).

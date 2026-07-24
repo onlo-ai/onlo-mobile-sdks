@@ -602,7 +602,7 @@ The dashboard snippets, guide, generated API reference, and package examples mus
 6. [ ] Reproducible release builds, SBOM/license review, artifact size/startup measurements.
 7. [ ] Native stable releases.
 8. [ ] Wrapper stable releases.
-9. [ ] Dashboard/guide switches status from planned/beta to available.
+9. [ ] Dashboard/guide switches status to “RC ready; publication pending,” then to released only after publication.
 
 ### 15.2 Versioning
 

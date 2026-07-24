@@ -24,7 +24,7 @@ pilot approval remain pending.
 | Automated validation | Complete | Full native suites, wrapper suites, package builds, package-content checks, and six release-mode example builds pass. |
 | Physical validation | Pending | No physical iOS or Android device was available. |
 | Signing | Pending | Local outputs are unsigned; no distribution identity is approved. |
-| Publication | Pending | Repository URLs, Maven coordinates, npm ownership, and pub.dev publisher are unapproved. |
+| Publication | Pending | Package identities are prepared; registry ownership, credentials, signing, public repository visibility, and release actions remain pending. |
 | QA deployment | Pending | An isolated mobile QA target is not provisioned. |
 | Customer pilot | Blocked | Physical, signing, publication, and isolated-QA gates remain open. |
 
@@ -120,10 +120,10 @@ retry scheduler, or independent chat UI.
 
 | Package | Qualification result | Publication restriction |
 | --- | --- | --- |
-| SwiftPM `OnloSDK` | Manifest description/resolution, release build, full tests, and native host build pass from isolated scratch state. | Approved repository URL and `0.1.0` tag owner pending. |
-| Android Core | Release AAR, sources JAR, POM, isolated Maven publication, and clean Maven-only consumer pass. | `ai.onlo.unpublished` is qualification-only; public group/artifact/repository pending. |
-| `@onlo/react-native` | Tests, exports, peer metadata, 14-file `npm pack`, and clean tarball consumers on iOS/Android pass. | `private: true`; npm owner and native publication coordinates pending. |
-| `onlo_flutter` | Analysis, tests, package dry-run, and clean packaged-source consumers on iOS/Android pass. | `publish_to: none`; pub.dev publisher approval pending. |
+| SwiftPM/CocoaPods `OnloSDK` | RC ready; root SwiftPM manifest and public podspec target repository tag `0.1.0`. | Physical-device qualification, public repository visibility, CocoaPods ownership, and tag permission pending. |
+| `ai.onlo:onlo-android-sdk:0.1.0` | RC ready; AAR, sources, Dokka Javadoc, and Maven Central POM metadata are prepared. | Physical-device qualification, Central namespace ownership, credentials, and signing pending. |
+| `@onlo/react-native` | RC ready; public npm metadata and published native dependency coordinates are prepared. | Native artifacts must publish first; npm scope ownership and credentials pending. |
+| `onlo_flutter` | RC ready; pub.dev metadata, package-local example, and published native dependency coordinates are prepared. | Native artifacts must publish first; pub.dev publisher ownership and credentials pending. |
 
 ## Release size, shrinker, and warning qualification
 
@@ -194,10 +194,10 @@ locations are not customer installation coordinates.
 | --- | --- |
 | Apple signing | Development/distribution team, certificate, provisioning profile, bundle entitlement approval |
 | Android signing | QA/release keystore, alias, custody, and signing procedure |
-| SwiftPM | Approved repository URL, tag owner, and permission to push `0.1.0` |
-| Maven | Final group/artifact/repository, publisher identity, credentials, and signing |
-| npm | Approved scope/package owner, access token, provenance policy, and removal of `private` |
-| pub.dev | Approved publisher, account ownership, and removal of `publish_to: none` |
+| SwiftPM/CocoaPods | Permission to make the repository public, create `0.1.0`, and publish `OnloSDK` to CocoaPods |
+| Maven Central | Verified `ai.onlo` namespace, publisher identity, portal token, and GPG/PGP signing material |
+| npm | Verified `@onlo` scope ownership, access token, and provenance policy |
+| pub.dev | Verified publisher ownership and publishing account |
 | Push providers | QA APNs/FCM credentials and provider dashboards |
 | QA service | Isolated mobile target, synthetic SDK key/accounts, release state, and rollback operator |
 
@@ -221,10 +221,10 @@ gate.
 
 ## Push and publication boundary
 
-Push only the existing server `feature/mobile-sdk` branch and mobile `dev`
-branch after review. Create no tag until the repository URL/tag owner is
-approved. Do not publish, deploy, enable a target, or copy installation
-coordinates into customer-facing surfaces from this manifest.
+This preparation commit does not authorize a push, visibility change, tag, or
+publication. Create `0.1.0` and publish native artifacts only after physical
+iOS/Android qualification and the external ownership/signing gates pass. Then
+publish wrappers in dependency order.
 
 Next: run the isolated QA and physical-device qualification after external
 inputs are approved.

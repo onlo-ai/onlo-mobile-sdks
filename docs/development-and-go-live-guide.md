@@ -7,7 +7,7 @@ Use this guide to prepare the Operator account, backend, mobile hosts, and local
 | Environment | What can be done now | What is blocked |
 | --- | --- | --- |
 | Local | Implement and mock-test native/bridge behavior with synthetic fixtures, mock transport, and redacted data. Local host foundations are available under `examples/`. | Android native test execution awaits Android API 35/build-tools licence acceptance; full iOS XCTest/simulator execution awaits full Xcode. React Native/Flutter host-native compilation remains unverified. Local implementation is not server-gated. |
-| Staging | Configure the exact HTTPS origin injected by release configuration. | Public-service E2E alone is server release-gated while the release state remains `internal`. Never guess a hostname. |
+| Staging | Configure the exact HTTPS origin injected by release configuration. | Requires an enabled synthetic testing target. Never guess a hostname. |
 | Production | Use `https://onlo.ai` only after release authorization. | Launch, publishing, deployment, and release actions remain prohibited without explicit approval. |
 
 ## Concepts
@@ -21,7 +21,7 @@ Use this guide to prepare the Operator account, backend, mobile hosts, and local
 | Monorepo-local native link | React Native and Flutter compile sibling iOS/Android core source during local development. These links are unpublished and are not installable release artifacts. | SDK team |
 | WebChat pipeline | The existing Onlo AI/chat pipeline used by web and mobile. Mobile must not create a separate AI path. | Onlo server team |
 | Release origin | Production is `https://onlo.ai`; staging/review uses an exact release-configured HTTPS origin. Local overrides are development-only. | Release configuration |
-| E2E release gate | A public session returns `503 sdk_not_available` while the service release state is `internal`; this is not an identity failure. | Onlo server owner |
+| Global SDK kill switch | A public session returns `503 sdk_not_available` while SuperAdmin has disabled Mobile SDK globally; this is not an identity failure. | Onlo server owner |
 
 ## Prerequisites
 
@@ -175,10 +175,10 @@ The local merchant-backend simulator is **SDK-team-only** integration infrastruc
 
 | Test | Setup | Pass condition | Current availability |
 | --- | --- | --- | --- |
-| Anonymous lifecycle | Redacted session fixtures and a native test transport. | Bootstrap/resume preserve protected credential rotation and never expose a chat token to a framework bridge. | Platform-specific test status; public-service E2E release-gated |
-| Identified lifecycle | Synthetic compact JWT fixture and mock transport. | `loginIdentifiedUser({ userJwt })` exchanges proof without a second customer login or local JWT persistence. | Platform-specific test status; public-service E2E release-gated |
-| Account switch | Two synthetic test accounts; invoke logout before the second login. | Old history, outbox work, credentials, read state, and push association are inaccessible before the next account uses the SDK. | Platform-specific test status; public-service E2E release-gated |
-| Offline outbox | Disable network after creating a synthetic send. | One stable `clientMessageId` survives retry and a duplicate acceptance does not create another turn. | Platform-specific test status; public-service E2E release-gated |
+| Anonymous lifecycle | Redacted session fixtures and a native test transport. | Bootstrap/resume preserve protected credential rotation and never expose a chat token to a framework bridge. | Platform-specific test status; synthetic public-service target required |
+| Identified lifecycle | Synthetic compact JWT fixture and mock transport. | `loginIdentifiedUser({ userJwt })` exchanges proof without a second customer login or local JWT persistence. | Platform-specific test status; synthetic public-service target required |
+| Account switch | Two synthetic test accounts; invoke logout before the second login. | Old history, outbox work, credentials, read state, and push association are inaccessible before the next account uses the SDK. | Platform-specific test status; synthetic public-service target required |
+| Offline outbox | Disable network after creating a synthetic send. | One stable `clientMessageId` survives retry and a duplicate acceptance does not create another turn. | Platform-specific test status; synthetic public-service target required |
 | Transcript/deep link | Synthetic conversation ID and authorised transcript response. | The core fetches the transcript before presentation; push/deep-link data is only a hint. | Native source/mock coverage; device evidence pending |
 | Attachments | Synthetic JPEG, PNG, or WebP up to 8 MiB; no more than five. | Widget upload grant binds owner/session/metadata; first-message and authorised historical sends retain one `clientMessageId`. | Native/contract tests pass; physical picker, camera, expiry, policy-toggle, restart, and account-switch evidence pending |
 | Push | Synthetic APNs/FCM token fixture after explicit host-controlled permission and intent. | Opening a notification re-syncs the authorised transcript before showing content. | Native source/mock coverage; device evidence pending |
@@ -190,7 +190,7 @@ The local merchant-backend simulator is **SDK-team-only** integration infrastruc
 
    Expected result: the host app cannot override the origin, and the legacy prototype endpoint is never reused.
 
-2. Run the manual matrix on real iOS and Android devices using synthetic Operator accounts after the release gate permits public-service E2E.
+2. Run the manual matrix on real iOS and Android devices using synthetic Operator accounts and an enabled testing target.
 
    Expected result: evidence covers anonymous use, identity exchange, logout/account switch, offline recovery, attachments, push, config refresh, and deep-link authorization.
 
@@ -327,7 +327,7 @@ or the
 | Symptom | Cause | Action |
 | --- | --- | --- |
 | `config_unavailable` | The server cannot currently provide configuration. | Retain last-known-good configuration and follow the contract's `after_backoff` directive. |
-| `sdk_not_available` | The server mobile release state is still internal. | Ask the Onlo server owner to complete the controlled release state change. |
+| `sdk_not_available` | The SuperAdmin global Mobile SDK kill switch is disabled. | Ask the Onlo server owner to re-enable the flag after the incident is resolved. |
 | Identified login fails | The backend token violates the contract or server verification rejected it. | Mint a fresh backend token under the documented HS256 claim requirements; do not alter it in the app. |
 | Android tests cannot start | Android platform 35/build tools have not been installed because licences are not accepted. | Accept the required Android SDK licences, then install the requested platform/build tools. |
 | iOS simulator tests cannot start | Full Xcode/simulator tooling is not installed or selected. | Run Swift package tests outside the nested sandbox, or select/install Xcode when simulator evidence is needed. |
@@ -339,7 +339,7 @@ or the
 - An Operator can prepare the same WebChat-backed mobile integration without placing a signing secret in an app.
 - Developers can run local checks and know which tests are fixtures versus real-device evidence.
 - Local implementation and fixture/mock-transport coverage run without public-service access.
-- Public-service E2E begins only when the Onlo server release state is public and an explicit staging/review origin is configured where applicable.
+- Public-service E2E begins only with an enabled synthetic target and an explicit staging/review origin where applicable.
 - Production cannot proceed without explicit approval and complete native/bridge conformance evidence.
 
-Next: run the platform conformance matrix against mock transport, then collect controlled public-service E2E evidence after the release gate opens.
+Next: complete physical-device qualification against an enabled synthetic target before publication.

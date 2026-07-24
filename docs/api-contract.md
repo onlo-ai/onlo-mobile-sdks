@@ -79,7 +79,7 @@ type SessionResult = {
 };
 ```
 
-Bootstrap creates/replays an installation. Resume rotates its credential. Identify exchanges the Operator JWT. Logout returns it to anonymous. Re-send the same `transitionId` after a lost response for the same transition. Current server release state is `internal`, so public session attempts return `503 sdk_not_available`; this is not an identity error.
+Bootstrap creates/replays an installation. Resume rotates its credential. Identify exchanges the Operator JWT. Logout returns it to anonymous. Re-send the same `transitionId` after a lost response for the same transition. `503 sdk_not_available` means the SuperAdmin global Mobile SDK kill switch is disabled; it is not an identity error.
 
 ## Operator user JWT
 

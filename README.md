@@ -7,17 +7,32 @@ This is the client-only workspace for Onlo’s native mobile messenger. It reuse
 | Area | Role | Current state |
 | --- | --- | --- |
 | `packages/protocol` | Versioned client/server types and fixtures | v1 route types, redacted fixtures, and lifecycle scenarios are in place |
-| `packages/ios` | Native Swift SDK | Protected storage, outbox, chat/config, APNs, messenger, account-bound unread observation, and automatic foreground/network recovery source are implemented; full Xcode/XCTest verification remains pending. |
-| `packages/android` | Native Kotlin SDK | Protected storage, outbox, chat/config, FCM, messenger, account-bound unread observation, and automatic activity/network recovery source are implemented; Android API 35 licence acceptance blocks native test execution. |
-| `packages/react-native` | Intended `@onlo/react-native` package | Typed facade plus Android and iOS native adapter source, including native-derived connection/unread events, are implemented; full React Native host-native builds remain unverified. |
-| `packages/flutter` | Intended `onlo_flutter` package | Typed facade plus Android and iOS native adapter source, including native-derived connection/unread snapshots, are implemented; full Flutter host-native builds remain unverified. |
+| `packages/ios` | Native Swift SDK | RC ready; publication pending physical-device qualification and external CocoaPods/SwiftPM release actions. |
+| `packages/android` | Native Kotlin SDK | RC ready; publication pending physical-device qualification and Maven Central ownership/signing. |
+| `packages/react-native` | `@onlo/react-native` package | RC ready; publication pending the native artifacts, physical-device qualification, and npm ownership. |
+| `packages/flutter` | `onlo_flutter` package | RC ready; publication pending the native artifacts, physical-device qualification, and pub.dev ownership. |
 | `sdk/react-native` | Legacy prototype migration reference | Excluded from root workspaces and never a supported runtime fallback. |
 | `conformance` | Cross-client lifecycle and protocol checks | Redacted v1 fixtures and lifecycle scenarios; platform runners pending |
 | `examples` | Host-app integration samples | Merchant-facing Android, iOS, React Native, and Flutter examples, plus a separate SDK-team-only synthetic merchant-backend simulator. |
 
-> The complete v1 contract is [canonical](docs/api-contract.md). Local implementation uses redacted fixtures and mock transport; only public Onlo-service E2E is gated while the server release state is `internal`.
+> The complete v1 contract is [canonical](docs/api-contract.md). Local
+> implementation uses redacted fixtures and synthetic test data.
 
-This status is source and local-fixture/mock-transport progress, not release certification. Public-service E2E remains unavailable until the server release state is public.
+This status is release-candidate evidence, not publication or physical-device
+certification.
+
+## Publication identities
+
+| Surface | Versioned identity | Distribution |
+| --- | --- | --- |
+| iOS | `OnloSDK` `0.1.0` | SwiftPM repository tag and CocoaPods |
+| Android | `ai.onlo:onlo-android-sdk:0.1.0` | Maven Central |
+| React Native | `@onlo/react-native@0.1.0` | npm |
+| Flutter | `onlo_flutter 0.1.0` | pub.dev |
+
+All four are RC ready; publication remains pending physical-device
+qualification and the external ownership/signing actions recorded in the
+[release manifest](docs/release-conformance-0.1.0.md).
 
 ## Prerequisites
 
@@ -59,7 +74,7 @@ examples/ios-local-e2e/ SDK-team-only installable iPhone Simulator E2E host
 1. Read the canonical contract and select the build origin → production uses `https://onlo.ai`; staging/review injects its exact HTTPS origin through release configuration.
 2. Implement and test native behavior with redacted fixtures and mock transport → no live customer data, credentials, or attachment URLs are required.
 3. Verify the implemented React Native and Flutter native adapters in real host builds → JavaScript and Dart remain free of credentials and identified state.
-4. Run shared manifest checks, then platform conformance when native toolchains are available → public-service E2E waits only for the server release state to become public.
+4. Run shared manifest checks, then platform conformance when native toolchains are available → public-service E2E uses an enabled testing target and synthetic data.
 
 The canonical public host API is documented in the [integration guide](docs/integration-guide.md). It includes `initialize({ sdkKey })`, `loginUnidentifiedUser()`, `loginIdentifiedUser({ userJwt })`, host-controlled `present()`, and awaited `logout()`.
 
@@ -69,7 +84,7 @@ The canonical public host API is documented in the [integration guide](docs/inte
 - Store rotating credentials only in native protected storage. Do not use AsyncStorage, plain files, JavaScript/Dart state, or logs for credentials or identified data.
 - Retain one stable `clientMessageId` across every retry. Do not drop queued messages to make room.
 - Revoke and partition User A’s state before User B can access the SDK after logout or account switch.
-- The v1 contract limits images to JPEG, PNG, or WebP, 8 MiB each, and three per message; attachment sending is deliberately unavailable until the documented conversation-ID contract gap is resolved.
+- The v1 contract limits images to JPEG, PNG, or WebP, 8 MiB each, and five per message.
 - Do not commit, push, publish, deploy, release, or modify GitHub settings without explicit approval.
 
 ## Local checks

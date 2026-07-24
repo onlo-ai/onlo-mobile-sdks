@@ -2,11 +2,25 @@
 
 Typed React Native facade over the iOS and Android Onlo native cores. JavaScript owns no session, credential, transcript, outbox, push registry, transport, or messenger UI state.
 
-> **Status:** Unpublished (`private: true`). Both release-mode example hosts
-> build against exactly one sibling native Core. Publication coordinates remain
-> unapproved.
+> **Status:** RC ready; publication pending native publication and
+> physical-device qualification.
 
 The typed native-event API requires React Native 0.79 or newer.
+
+## Install
+
+```bash
+npm install @onlo/react-native@0.1.0
+cd ios && pod install
+```
+
+The npm package resolves `OnloSDK` 0.1.0 through CocoaPods on iOS and
+`ai.onlo:onlo-android-sdk:0.1.0` through Maven Central on Android. Do not add a
+second native Core manually. Expo Go cannot load this native module; use a
+development or release build.
+
+The package is prepared but not published. Installation succeeds only after
+the native iOS/Android artifacts and then the npm package are released.
 
 ## Typed surface
 
@@ -28,20 +42,17 @@ Pass the platform token when APNs/FCM supplies it. Native memory retains a
 pre-login token without contacting Onlo anonymously, then registers it after
 identified login and re-registers it after an account switch.
 
-## Monorepo-local native linking
+## Repository development
 
-Neither native link is an installable distribution artifact. The package is not published.
+Local examples may replace the published dependencies with one sibling native
+Core while developing the monorepo.
 
 | Platform | Local link | Host constraint |
 | --- | --- | --- |
-| Android | Sibling `:onlo-android-sdk` Gradle project from `packages/android` | A local host/example must include the same project dependency until release artifacts exist. |
-| iOS | `OnloReactNative` pod plus one sibling `OnloSDK` pod from `packages/ios` | Declare the local `OnloSDK` pod in the host Podfile; do not also add the SwiftPM product. |
+| Android | Sibling `:onlo-android-sdk` Gradle project from `packages/android` | The local project replaces, rather than supplements, the Maven dependency. |
+| iOS | `OnloReactNative` pod plus one root-level local `OnloSDK` pod | Do not also add the SwiftPM product. |
 
-An installed tarball may resolve Android Core from a Maven repository only
-when the host supplies all three approved Gradle properties:
-`onlo.android.group`, `onlo.android.artifact`, and `onlo.android.version`.
-There are no built-in public coordinates.
-
-The host obtains `userJwt` from its Operator backend. Never generate or persist it in JavaScript. Expo Go cannot load this custom native module; use a development build.
+The host obtains `userJwt` from its Operator backend. Never generate or persist
+it in JavaScript.
 
 See the [API contract](../../docs/api-contract.md), [integration guide](../../docs/integration-guide.md), and [delivery plan](../../docs/delivery-plan.md).
