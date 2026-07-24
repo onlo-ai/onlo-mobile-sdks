@@ -42,7 +42,7 @@ The customer does **not** log in again to Onlo. The Operator’s app login remai
 
 ## Install the SDK
 
-No package is published yet. [`packages/react-native`](../packages/react-native) is the canonical `@onlo/react-native` thin facade and [`packages/flutter`](../packages/flutter) is the `onlo_flutter` plugin. Their iOS and Android adapters are implemented against the native cores, but release artifacts and full host-build evidence are still required before production use.
+No package is published yet. [`packages/react-native`](../packages/react-native) is the canonical `@onlo-ai/react-native` thin facade and [`packages/flutter`](../packages/flutter) is the `onlo_flutter` plugin. Their iOS and Android adapters are implemented against the native cores, but release artifacts and full host-build evidence are still required before production use.
 
 [`sdk/react-native`](../sdk/react-native) records the separately held prototype's migration boundary. Its legacy runtime is not part of the supported workspace, must not be merged into the new bridge, and must not be used by an app.
 

@@ -1,4 +1,4 @@
-# `@onlo/react-native`
+# `@onlo-ai/react-native`
 
 Typed React Native facade over the iOS and Android Onlo native cores. JavaScript owns no session, credential, transcript, outbox, push registry, transport, or messenger UI state.
 
@@ -10,7 +10,7 @@ The typed native-event API requires React Native 0.79 or newer.
 ## Install
 
 ```bash
-npm install @onlo/react-native@0.1.0
+npm install @onlo-ai/react-native@0.1.0
 cd ios && pod install
 ```
 

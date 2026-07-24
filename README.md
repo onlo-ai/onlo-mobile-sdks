@@ -9,7 +9,7 @@ This is the client-only workspace for Onlo’s native mobile messenger. It reuse
 | `packages/protocol` | Versioned client/server types and fixtures | v1 route types, redacted fixtures, and lifecycle scenarios are in place |
 | `packages/ios` | Native Swift SDK | RC ready; publication pending physical-device qualification and external CocoaPods/SwiftPM release actions. |
 | `packages/android` | Native Kotlin SDK | RC ready; publication pending physical-device qualification and Maven Central ownership/signing. |
-| `packages/react-native` | `@onlo/react-native` package | RC ready; publication pending the native artifacts, physical-device qualification, and npm ownership. |
+| `packages/react-native` | `@onlo-ai/react-native` package | RC ready; publication pending the native artifacts, physical-device qualification, and npm ownership. |
 | `packages/flutter` | `onlo_flutter` package | RC ready; publication pending the native artifacts, physical-device qualification, and pub.dev ownership. |
 | `sdk/react-native` | Legacy prototype migration reference | Excluded from root workspaces and never a supported runtime fallback. |
 | `conformance` | Cross-client lifecycle and protocol checks | Redacted v1 fixtures and lifecycle scenarios; platform runners pending |
@@ -27,7 +27,7 @@ certification.
 | --- | --- | --- |
 | iOS | `OnloSDK` `0.1.0` | SwiftPM repository tag and CocoaPods |
 | Android | `ai.onlo:onlo-android-sdk:0.1.0` | Maven Central |
-| React Native | `@onlo/react-native@0.1.0` | npm |
+| React Native | `@onlo-ai/react-native@0.1.0` | npm |
 | Flutter | `onlo_flutter 0.1.0` | pub.dev |
 
 All four are RC ready; publication remains pending physical-device
@@ -60,7 +60,7 @@ contracts/v1/      Language-neutral request and response examples
 packages/protocol/ Shared TypeScript contract types
 packages/ios/      Native iOS core foundation
 packages/android/  Native Android core foundation
-packages/react-native/ Canonical @onlo/react-native facade
+packages/react-native/ Canonical @onlo-ai/react-native facade
 packages/flutter/  Canonical onlo_flutter facade
 sdk/react-native/  Legacy reference only; excluded from root workspaces
 conformance/       Cross-SDK lifecycle and protocol scenarios

@@ -45,7 +45,7 @@ Use this guide to make safe, reviewable changes to the client-only mobile SDK wo
    | SDK area | Command from repository root | Expected result |
    | --- | --- | --- |
    | Flutter | `cd packages/flutter && flutter pub get && cd ../..` | Flutter dependencies are resolved for local facade tests. |
-   | Legacy React Native reference | `npm --prefix sdk/react-native ci` | Reference-only test dependencies are installed. This is not the supported `@onlo/react-native` package. |
+   | Legacy React Native reference | `npm --prefix sdk/react-native ci` | Reference-only test dependencies are installed. This is not the supported `@onlo-ai/react-native` package. |
    | Android | `cd packages/android && ./gradlew --version && cd ../..` | The checked-in Gradle wrapper reports Gradle 8.7 and JDK 17. It downloads build dependencies when the Android SDK is licensed. |
    | iOS | `swift build --package-path packages/ios --target OnloSDK` | The local Swift package core builds; full tests require full Xcode/XCTest. |
 
@@ -185,7 +185,7 @@ This repository is a monorepo, but each SDK has an independent release artifact 
 | --- | --- | --- | --- |
 | iOS | Swift Package and/or CocoaPod | `packages/ios/Package.swift` | Local Swift Package only; distribution packaging and Xcode/device evidence remain required. |
 | Android | Maven/AAR | `packages/android/build.gradle.kts` | Local Gradle library only; Maven publishing configuration and Android test evidence remain required. |
-| React Native | npm `@onlo/react-native` | `packages/react-native/package.json` | `private: true`; local native sibling links must be replaced with distributable dependencies before publication. |
+| React Native | npm `@onlo-ai/react-native` | `packages/react-native/package.json` | Public package metadata is prepared; publish native dependencies before the wrapper. |
 | Flutter | pub.dev `onlo_flutter` | `packages/flutter/pubspec.yaml` | `publish_to: none`; local native sibling links must be replaced with distributable dependencies before publication. |
 
 1. Inspect package versions without changing them.

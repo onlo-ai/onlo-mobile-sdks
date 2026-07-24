@@ -122,7 +122,7 @@ retry scheduler, or independent chat UI.
 | --- | --- | --- |
 | SwiftPM/CocoaPods `OnloSDK` | RC ready; root SwiftPM manifest and public podspec target repository tag `0.1.0`. | Physical-device qualification, public repository visibility, CocoaPods ownership, and tag permission pending. |
 | `ai.onlo:onlo-android-sdk:0.1.0` | RC ready; AAR, sources, Dokka Javadoc, and Maven Central POM metadata are prepared. | Physical-device qualification, Central namespace ownership, credentials, and signing pending. |
-| `@onlo/react-native` | RC ready; public npm metadata and published native dependency coordinates are prepared. | Native artifacts must publish first; npm scope ownership and credentials pending. |
+| `@onlo-ai/react-native` | RC ready; public npm metadata and published native dependency coordinates are prepared. | Native artifacts must publish first; npm publication credentials pending. |
 | `onlo_flutter` | RC ready; pub.dev metadata, package-local example, and published native dependency coordinates are prepared. | Native artifacts must publish first; pub.dev publisher ownership and credentials pending. |
 
 ## Release size, shrinker, and warning qualification
@@ -164,7 +164,7 @@ none is distributable.
 | File | SHA-256 |
 | --- | --- |
 | `onlo-android-sdk-0.1.0.aar` | `b4b0607e440c69d9656ba5a001f328c9583c06f2e7ebeae617e8a107537d8e87` |
-| `onlo-react-native-0.1.0.tgz` | `20638060fdb76f673253596c416c7a148baf2553cdf17b4179db2dacb1894e4a` |
+| `onlo-ai-react-native-0.1.0.tgz` | `d52780834d6f05145a8babf13f67dbe5b890c7781c581573ac59c6c06e4e9b24` |
 | `onlo-native-ios-example-0.1.0-unsigned` | `affa4334d53232e2a62221dc7f5d116841486878c331b414d71be687b14c8353` |
 | `onlo-native-android-example-0.1.0-unsigned.apk` | `bc4907952b73a3135bb6bcea8d917a63ab8df95bb85bec0425ee8e86cf914cbb` |
 | `onlo-rn-ios-example-0.1.0-unsigned` | `792b9a609bfe6c6a09e6b8f4b2fad0632b17f5feab4d77345650fb7ee95a023d` |
@@ -180,7 +180,7 @@ none is distributable.
 | Android publication | `packages/android/gradlew -p packages/android publishReleasePublicationToQualificationRepository -Ponlo.maven.repository=/tmp/onlo-maven` |
 | Android consumer | `ANDROID_HOME=<ANDROID_SDK> packages/android/gradlew -p /tmp/onlo-android-consumer :consumer:assembleRelease` |
 | React Native tarball | `npm_config_cache=/tmp/onlo-npm-cache npm pack --pack-destination /tmp/onlo-packages packages/react-native` |
-| React Native host | `npm install /tmp/onlo-packages/onlo-react-native-0.1.0.tgz --save-exact`, followed by the checked-in host iOS/Android build commands |
+| React Native host | `npm install /tmp/onlo-packages/onlo-ai-react-native-0.1.0.tgz --save-exact`, followed by the checked-in host iOS/Android build commands |
 | Flutter dry-run | `(cd packages/flutter && dart pub publish --dry-run)` |
 | Flutter source consumer | Point the checked-in host dependency at the copied package source, then run `flutter build apk --release` and `flutter build ios --release --no-codesign`. |
 

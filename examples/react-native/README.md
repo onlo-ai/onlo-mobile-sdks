@@ -10,7 +10,7 @@ placeholder configuration.
 
    Expected result: the checked-in iOS and Android shells resolve the local bridge.
 
-2. Follow the monorepo-local native-link instructions in [`@onlo/react-native`](../../packages/react-native/README.md#monorepo-local-native-linking). Use a development build, not Expo Go.
+2. Follow the monorepo-local native-link instructions in [`@onlo-ai/react-native`](../../packages/react-native/README.md#repository-development). Use a development build, not Expo Go.
 
    Expected result: Android and iOS use their fixed-family native bridge source and checked-in native core. Both host-native builds remain separate verification gates; neither link is a published artifact.
 

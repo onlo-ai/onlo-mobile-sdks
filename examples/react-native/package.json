@@ -11,7 +11,7 @@
     "build:ios:release": "xcodebuild -workspace ios/OnloRnRC.xcworkspace -scheme OnloRnRC -configuration Release -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build"
   },
   "dependencies": {
-    "@onlo/react-native": "file:../../packages/react-native",
+    "@onlo-ai/react-native": "file:../../packages/react-native",
     "react": "19.2.3",
     "react-native": "0.86.0"
   },

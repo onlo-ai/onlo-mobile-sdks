@@ -1,5 +1,5 @@
 {
-  "name": "@onlo/react-native",
+  "name": "@onlo-ai/react-native",
   "version": "0.1.0",
   "license": "SEE LICENSE IN LICENSE",
   "description": "React Native bridge for the native Onlo mobile SDKs.",

@@ -4,7 +4,7 @@ import {
   Onlo,
   type OnloPushNotificationPayload,
   type OnloSessionState,
-} from '@onlo/react-native';
+} from '@onlo-ai/react-native';
 import {onloConfig} from './onlo.config';
 
 const readyStates: ReadonlySet<OnloSessionState> =
