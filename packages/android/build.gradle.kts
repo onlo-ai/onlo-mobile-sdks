@@ -8,6 +8,7 @@ plugins {
     kotlin("android")
     id("org.jetbrains.dokka")
     id("org.jetbrains.dokka-javadoc")
+    id("com.vanniktech.maven.publish.base")
     `maven-publish`
 }
 
@@ -115,5 +116,12 @@ afterEvaluate {
                 )
             }
         }
+    }
+}
+
+if (providers.gradleProperty("onlo.maven.central").orNull == "true") {
+    mavenPublishing {
+        publishToMavenCentral(automaticRelease = true)
+        signAllPublications()
     }
 }
