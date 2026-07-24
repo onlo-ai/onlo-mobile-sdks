@@ -2,6 +2,7 @@ name: onlo_flutter
 description: Typed Flutter facade for the Onlo native mobile SDK cores.
 version: 0.1.0
 publish_to: none
+homepage: https://onlo.ai
 
 environment:
   sdk: ^3.6.0

@@ -1,6 +1,7 @@
 # Flutter local host
 
-`lib/main.dart` and `pubspec.yaml` are a local Flutter host foundation with a path dependency on `../../packages/flutter`. It contains no key, JWT, signing secret, customer data, endpoint override, `.dart_tool`, or build output.
+This is the version-controlled Flutter iOS/Android host with a path dependency
+on `../../packages/flutter` and exactly one native Core per platform.
 
 ## Run foundation
 
@@ -12,10 +13,13 @@
 
    Expected result: Flutter resolves the local plugin, initializes native authority in the background, and enables the host-owned Support button only when ready.
 
-3. Implement `_fetchShortLivedOnloUserJwtFromOperatorBackend` with the host's authenticated Operator-backend call and invoke it after the host account login.
+3. Use the example host’s Operator-backend call only after host authentication.
 
    Expected result: host login is not blocked by Onlo; the short-lived JWT is passed directly to `Onlo.loginIdentifiedUser`, and Dart neither signs nor persists it.
 
-4. Use `Onlo.present()` only from the host-owned Support action.
+4. Run `flutter build apk --release` and
+   `flutter build ios --release --no-codesign`.
 
-   Expected result: native Android/iOS owns messenger UI, credentials, outbox, and recovery. Both adapter sources are present, but host-native compile evidence remains a separate gate.
+   Expected result: both hosts demonstrate anonymous and identified login,
+   native presentation/picker/camera, push/deep-link forwarding, logout/account
+   switching, and native-owned lifecycle recovery.

@@ -4,4 +4,5 @@
  */
 export const onloConfig = {
   sdkKey: '',
+  operatorBackendUrl: '',
 } as const;

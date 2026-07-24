@@ -2,10 +2,18 @@
   "name": "@onlo/react-native",
   "version": "0.1.0",
   "private": true,
+  "license": "UNLICENSED",
   "description": "React Native bridge for the native Onlo mobile SDKs.",
   "main": "src/index.ts",
   "react-native": "src/index.ts",
   "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "react-native": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
   "files": [
     "android/build.gradle",
     "android/consumer-rules.pro",
@@ -24,7 +32,11 @@
     }
   },
   "peerDependencies": {
+    "react": ">=19",
     "react-native": ">=0.79"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",

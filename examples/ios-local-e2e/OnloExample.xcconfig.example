@@ -1,0 +1,4 @@
+// Copy these public, non-identity values into a local ignored .xcconfig or
+// supply them as Xcode build settings. Never put a JWT or signing secret here.
+ONLO_SDK_KEY = replace-with-public-mobile-sdk-key
+ONLO_DEVELOPMENT_ORIGIN = https:/$()/127.0.0.1:8443

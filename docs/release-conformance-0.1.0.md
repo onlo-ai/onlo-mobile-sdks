@@ -1,143 +1,113 @@
-# Mobile SDK v0.1.0 conformance report
+# Mobile SDK 0.1.0 release manifest
 
-Status: **not approved for release**
-
-This report records the automated evidence for the v0.1.0 candidate. It does
-not convert simulator, source-adapter, or unit-test evidence into physical
-device evidence. The canonical capability status remains the
-[feature matrix](feature-matrix.md), and the one shared journey definition is
-[`release-scenarios-v1.json`](../conformance/release-scenarios-v1.json).
+Version-controlled engineering and automated qualification are complete.
+Physical devices, external signing, publication, QA deployment, and customer
+pilot approval remain pending.
 
 ## Candidate identity
 
-| Item | Value |
+| Field | Recorded value |
 | --- | --- |
-| Candidate version | `0.1.0` |
-| Core freeze | `f402ddd` |
-| Server protocol | v1, unchanged |
-| Public client APIs | Unchanged; native messenger image capability enabled through internal Widget adapters |
-| Persistence schema | Unchanged |
-| Release decision | Blocked pending the dependencies and approvals below |
+| Server baseline | `50725e7` |
+| Mobile baseline | `6715381` |
+| Release preparation | The commit containing this manifest |
+| Protocol | Mobile SDK v1 |
+| Package version | `0.1.0` |
+| Example revision | The commit containing this manifest |
+| Public API, protocol, persistence | Frozen; unchanged by release preparation |
 
-## Automated conformance
+## Readiness state
 
-| Scenario | iOS native | Android native | React Native | Flutter | Physical device |
-| --- | --- | --- | --- | --- | --- |
-| Anonymous chat | Core/unit pass | Core/unit pass | Native delegation pass; host journey pending | Native delegation pass; host journey pending | Pending |
-| Identified history | Core/unit pass | Core/unit pass | Native delegation pass; host journey pending | Native delegation pass; host journey pending | Pending |
-| A logout then B isolation | Deterministic Core pass | Deterministic Core pass | Native delegation pass; host journey pending | Native delegation pass; host journey pending | Pending |
-| Offline enqueue/restart/reconnect | Deterministic Core pass | Deterministic Core pass | Inherits native; host journey pending | Inherits native; host journey pending | Pending |
-| Stable-ID duplicate suppression | Deterministic Core pass | Deterministic Core pass | Inherits native; host journey pending | Inherits native; host journey pending | Pending |
-| ACCEPTED interruption/reconciliation | Deterministic Core pass | Deterministic Core pass | Inherits native; host journey pending | Inherits native; host journey pending | Pending |
-| SSE disconnect/refetch | Deterministic Core pass | Deterministic Core pass | Lifecycle forwarding pass; host journey pending | Lifecycle forwarding pass; host journey pending | Pending |
-| Unread/read ordering | Deterministic Core pass | Deterministic Core pass | Aggregate mapping pass; host journey pending | Aggregate mapping pass; host journey pending | Pending |
-| Config refresh/LKG | Core/unit pass | Core/unit pass | Inherits native; host journey pending | Inherits native; host journey pending | Pending |
-| FAQ/Help rendering | Native logic/build pass; interaction pending | Native logic/build pass; interaction pending | Native presentation only | Native presentation only | Pending |
-| Image boundaries | Focused Widget grant/dispatcher tests pass | Focused Widget grant/dispatcher tests pass | Inherits native path; host journey pending | Inherits native path; host journey pending | Pending |
-| Push registration/open/logout isolation | Deterministic Core pass | Deterministic Core pass | Typed forwarding pass; provider journey pending | Typed forwarding pass; provider journey pending | Pending |
-| Deep-link authorization | Core/unit pass | Core/unit pass | Identifier forwarding pass; host journey pending | Identifier forwarding pass; host journey pending | Pending |
-| Permission denial | Build pass; interaction pending | Build pass; interaction pending | Native UI only | Native UI only | Pending |
-| Log redaction | Native unit pass | Native unit pass | Safe conversion/source pass | Safe conversion/source pass | Pending review |
-
-An adapter row marked “pass” proves mapping and absence of wrapper-owned
-business state. It is not evidence that a React Native or Flutter host executed
-the native journey.
-
-## Test results
-
-| Boundary | Command | Result |
+| Boundary | State | Evidence |
 | --- | --- | --- |
-| Server mobile suite | `node --import tsx --test src/lib/__tests__/mobile-sdk-*.test.ts` | 138 passed, 0 failed |
-| Android phase boundary | `packages/android/gradlew -p packages/android testDebugUnitTest` | 112 passed, 0 failed |
-| iOS phase boundary | `swift test --package-path packages/ios` | 108 passed, 0 failed |
-| React Native bridge | `npm --prefix packages/react-native test` | 17 passed, 0 failed |
-| Flutter bridge | `(cd packages/flutter && flutter test)` | 8 passed, 0 failed |
-| Shared release scenarios | `npm run test:conformance` | 3 passed, 0 failed |
-| Protocol fixtures | `npm run test:protocol-fixtures` | 8 passed, 0 failed |
-| TypeScript | `npm run typecheck` | Passed |
-| Hygiene | `npm run test:hygiene && npm run check:hygiene` | 4 passed, 0 failed; repository scan passed |
+| Engineering | Complete | Four existing examples are version-controlled release hosts; package metadata and CI qualification are present. |
+| Automated validation | Complete | Full native suites, wrapper suites, package builds, package-content checks, and six release-mode example builds pass. |
+| Physical validation | Pending | No physical iOS or Android device was available. |
+| Signing | Pending | Local outputs are unsigned; no distribution identity is approved. |
+| Publication | Pending | Repository URLs, Maven coordinates, npm ownership, and pub.dev publisher are unapproved. |
+| QA deployment | Pending | An isolated mobile QA target is not provisioned. |
+| Customer pilot | Blocked | Physical, signing, publication, and isolated-QA gates remain open. |
 
-## Physical-device matrix
+## Example hosts
 
-| Surface | iOS | Android | Required evidence |
+| Host | Version-controlled path | Demonstrated boundary | Release build |
 | --- | --- | --- | --- |
-| Native | Pending | Pending | All shared scenarios, APNs/FCM, background recovery, permissions, accessibility |
-| React Native | Pending | Pending | Release-mode host using exactly one linked native Core |
-| Flutter | Pending | Pending | Release-mode host using exactly one linked native Core |
+| Native iOS | `examples/ios-local-e2e` | Anonymous/identified identity, native messenger/media, APNs/notification/deep-link forwarding, logout, native lifecycle | Pass, unsigned |
+| Native Android | `examples/android` | Anonymous/identified identity, native messenger/media, FCM/notification/deep-link forwarding, logout, native lifecycle | Pass, unsigned |
+| React Native | `examples/react-native` | Host-only configuration/token exchange plus typed forwarding to one native Core on iOS and Android | Pass on both, unsigned |
+| Flutter | `examples/flutter` | Host-only configuration/token exchange plus typed forwarding to one native Core on iOS and Android | Pass on both, unsigned |
 
-Existing iPhone simulator evidence is useful development evidence, but it does
-not satisfy any physical-device cell.
+The wrappers contain no Onlo credential store, transport, transcript, outbox,
+retry scheduler, or independent chat UI.
 
-## Artifact status
+## Package qualification
 
-| Artifact | Candidate version | Status |
+| Package | Qualification result | Publication restriction |
 | --- | --- | --- |
-| iOS native | `0.1.0` | Source package only; signed distribution artifact pending |
-| Android native | `0.1.0` candidate | Local release AAR built; Maven coordinates, publication signing, and repository are pending |
-| React Native | `0.1.0` | Private local tarball built; publication and native host builds pending |
-| Flutter | `0.1.0` | `publish_to: none`; publication and native host builds pending |
+| SwiftPM `OnloSDK` | Manifest description/resolution, release build, full tests, and native host build pass from isolated scratch state. | Approved repository URL and `0.1.0` tag owner pending. |
+| Android Core | Release AAR, sources JAR, POM, isolated Maven publication, and clean Maven-only consumer pass. | `ai.onlo.unpublished` is qualification-only; public group/artifact/repository pending. |
+| `@onlo/react-native` | Tests, exports, peer metadata, 14-file `npm pack`, and clean tarball consumers on iOS/Android pass. | `private: true`; npm owner and native publication coordinates pending. |
+| `onlo_flutter` | Analysis, tests, package dry-run, and clean packaged-source consumers on iOS/Android pass. | `publish_to: none`; pub.dev publisher approval pending. |
 
-Do not place unpublished local paths in dashboard installation snippets.
-Canonical install commands can only be finalized after repository coordinates
-and package names are approved:
+## Local qualification artifacts
 
-```text
-iOS: add the approved tagged Swift Package URL and exact 0.1.0 version
-Android: implementation("approved.group:onlo-android:0.1.0")
-React Native: npm install @onlo/react-native@0.1.0
-Flutter: flutter pub add onlo_flutter:^0.1.0
-```
-
-The Android coordinate is deliberately a placeholder description, not an
-invented install command.
-
-Local, unpublished candidate outputs:
+These files are local evidence only. APKs and iOS executables are unsigned;
+none is distributable.
 
 | File | SHA-256 |
 | --- | --- |
-| `/tmp/onlo-release-0.1.0/onlo-android-0.1.0.aar` | `9c6bc06c023cb414ff75ff1c5f48cb15081952fc392c006492594c5aabee369c` |
-| `/tmp/onlo-release-0.1.0/onlo-react-native-0.1.0.tgz` | `a1dd496a1c59db7850d654e149cd8349639741abc6b6cf06083dd3d13380148e` |
+| `onlo-android-sdk-0.1.0.aar` | `b4b0607e440c69d9656ba5a001f328c9583c06f2e7ebeae617e8a107537d8e87` |
+| `onlo-react-native-0.1.0.tgz` | `20638060fdb76f673253596c416c7a148baf2553cdf17b4179db2dacb1894e4a` |
+| `onlo-native-ios-example-0.1.0-unsigned` | `affa4334d53232e2a62221dc7f5d116841486878c331b414d71be687b14c8353` |
+| `onlo-native-android-example-0.1.0-unsigned.apk` | `bc4907952b73a3135bb6bcea8d917a63ab8df95bb85bec0425ee8e86cf914cbb` |
+| `onlo-rn-ios-example-0.1.0-unsigned` | `792b9a609bfe6c6a09e6b8f4b2fad0632b17f5feab4d77345650fb7ee95a023d` |
+| `onlo-rn-android-example-0.1.0-unsigned.apk` | `6aa6e0ff54ff406985cc3ecca880edc7ed042d39a9759a4887e80d0191e0b91a` |
+| `onlo-flutter-ios-example-0.1.0-unsigned` | `533ed1245aa9f6b04db64c77c8b8c249424343fd59c4de3833f41bf65992c15c` |
+| `onlo-flutter-android-example-0.1.0-unsigned.apk` | `d512d621f7b89012252db9a3afbf91757410bfb476bcbbaa8c6dd3f34495ed6c` |
 
-These files are unsigned local candidates, not approved distribution
-artifacts. No iOS or Flutter release archive was manufactured because the
-required signed distribution configuration is absent.
+## Clean-consumer commands
 
-## Remaining blockers by dependency
+| Boundary | Exact command |
+| --- | --- |
+| SwiftPM | `swift package --package-path packages/ios --scratch-path /tmp/onlo-swift-clean resolve && swift build --package-path packages/ios -c release --scratch-path /tmp/onlo-swift-clean` |
+| Android publication | `packages/android/gradlew -p packages/android publishReleasePublicationToQualificationRepository -Ponlo.maven.repository=/tmp/onlo-maven` |
+| Android consumer | `ANDROID_HOME=<ANDROID_SDK> packages/android/gradlew -p /tmp/onlo-android-consumer :consumer:assembleRelease` |
+| React Native tarball | `npm_config_cache=/tmp/onlo-npm-cache npm pack --pack-destination /tmp/onlo-packages packages/react-native` |
+| React Native host | `npm install /tmp/onlo-packages/onlo-react-native-0.1.0.tgz --save-exact`, followed by the checked-in host iOS/Android build commands |
+| Flutter dry-run | `(cd packages/flutter && dart pub publish --dry-run)` |
+| Flutter source consumer | Point the checked-in host dependency at the copied package source, then run `flutter build apk --release` and `flutter build ios --release --no-codesign`. |
 
-1. **Release engineering:** approve package coordinates, public repositories,
-   signing identities, signing custody, and version/tag ownership.
-2. **Host builds:** compile release-mode native, React Native, and Flutter hosts
-   on both platforms with one native Core per app.
-3. **Physical devices:** execute every shared scenario, including attachment
-   picker/camera, expired-grant retry, policy toggles, APNs/FCM,
-   permissions, background recovery, accessibility, and log inspection.
-4. **Controlled service access:** approve a pilot target, public/review release
-   state, synthetic accounts, and rollback owner.
-5. **Publication:** sign, publish, verify clean-host install commands, then copy
-   those exact verified commands into the dashboard.
+Temporary consumers resolve native Core from only the isolated Maven
+repository on Android and one local `OnloSDK` pod on iOS. Those qualification
+locations are not customer installation coordinates.
 
-## Approval and deployment actions
+## Required external inputs
 
-No deployment action is authorized by this report. Release requires all of:
+| Input | Owner/approval still required |
+| --- | --- |
+| Apple signing | Development/distribution team, certificate, provisioning profile, bundle entitlement approval |
+| Android signing | QA/release keystore, alias, custody, and signing procedure |
+| SwiftPM | Approved repository URL, tag owner, and permission to push `0.1.0` |
+| Maven | Final group/artifact/repository, publisher identity, credentials, and signing |
+| npm | Approved scope/package owner, access token, provenance policy, and removal of `private` |
+| pub.dev | Approved publisher, account ownership, and removal of `publish_to: none` |
+| Push providers | QA APNs/FCM credentials and provider dashboards |
+| QA service | Isolated mobile target, synthetic SDK key/accounts, release state, and rollback operator |
 
-1. Server owner approves the image and attestation contract decisions.
-2. Security/release engineering approves Apple and Android signing identities,
-   package repositories, and credential custody.
-3. SDK owner approves the final version, tag, checksums, and clean-host install
-   verification.
-4. QA approves the completed six-cell physical-device matrix.
-5. Product/server operations approve the pilot target and rollback operator.
-6. Package owners approve publication to Swift Package distribution, Maven,
-   npm, and pub.dev.
-7. Dashboard owner replaces draft snippets only with the four verified
-   published install commands.
+## Physical-device gate
 
-## Pilot and rollback controls
+The canonical scenarios remain
+[`release-scenarios-v1.json`](../conformance/release-scenarios-v1.json).
+Native iOS, native Android, RN iOS/Android, and Flutter iOS/Android physical
+cells are pending. Simulator or unsigned build evidence does not satisfy this
+gate.
 
-Enable one synthetic pilot target only after publication and device approval.
-Keep the server mobile release state disabled for every other target. During
-the pilot, monitor only redacted request/error metadata. On any account-boundary
-or accepted-message invariant failure, disable the pilot target, hide native
-messenger entry points through the approved server release control, preserve
-durable data for diagnosis, and roll clients back to the last approved package
-versions. Never fall back to the legacy prototype or a wrapper-owned transport.
+## Push and publication boundary
+
+Push only the existing server `feature/mobile-sdk` branch and mobile `dev`
+branch after review. Create no tag until the repository URL/tag owner is
+approved. Do not publish, deploy, enable a target, or copy installation
+coordinates into customer-facing surfaces from this manifest.
+
+Next: run the isolated QA and physical-device qualification after external
+inputs are approved.

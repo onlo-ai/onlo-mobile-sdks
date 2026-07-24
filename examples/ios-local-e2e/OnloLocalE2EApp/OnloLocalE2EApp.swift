@@ -5,12 +5,18 @@ import OnloSDK
 #endif
 import SwiftUI
 import UIKit
+@preconcurrency import UserNotifications
 import os
 
 @main
 struct OnloLocalE2EApp: App {
+    @UIApplicationDelegateAdaptor(LocalAppDelegate.self) private var appDelegate
+
     var body: some Scene {
-        WindowGroup { LocalE2ERootView() }
+        WindowGroup {
+            LocalE2ERootView()
+                .onOpenURL { appDelegate.forwardDeepLink($0) }
+        }
     }
 }
 
@@ -39,6 +45,8 @@ private struct LocalE2ERootView: View {
             Button("Log in") { Task { await model.login() } }
                 .buttonStyle(.borderedProminent)
                 .disabled(!model.canLogIn)
+            Button("Continue anonymously") { Task { await model.continueAnonymously() } }
+                .buttonStyle(.bordered)
             Text(model.status)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
@@ -60,6 +68,9 @@ private struct LocalE2ERootView: View {
             Button("Support") { model.presentMessenger() }
                 .buttonStyle(.borderedProminent)
                 .disabled(!model.isSupportReady)
+            Text("Image attachments use the native picker and camera controls.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             Button("Log out") { Task { await model.logout() } }
                 .buttonStyle(.bordered)
             Text(model.status)
@@ -78,12 +89,33 @@ private final class LocalE2EModel: ObservableObject {
     @Published private(set) var status = "Enter a local test account"
 
     private let backend = LocalMerchantBackend()
-    private let sdk = OnloSDK(logger: LocalE2ESDKLogger())
+    private let sdk = LocalSDKEnvironment.sdk
     private var presenter: OnloMessengerPresenter?
     private var supportConfiguration: LocalSupportConfiguration?
 
     var canLogIn: Bool {
         !loginCode.isEmpty
+    }
+
+    func continueAnonymously() async {
+        guard let configuration = LocalSupportConfiguration.fromBundle else {
+            status = "Add the safe local SDK configuration"
+            return
+        }
+        supportConfiguration = configuration
+        isSignedIn = true
+        isSupportLoading = true
+        do {
+            try await initialize(configuration)
+            _ = try await sdk.loginUnidentifiedUser()
+            presenter = OnloMessengerPresenter(sdk: sdk)
+            isSupportReady = true
+            status = "Anonymous support is ready"
+        } catch {
+            isSupportReady = false
+            status = "Support is unavailable (\(safeDiagnosticCode(for: error)))"
+        }
+        isSupportLoading = false
     }
 
     func login() async {
@@ -135,14 +167,7 @@ private final class LocalE2EModel: ObservableObject {
         isSupportReady = false
         E2ESafeDiagnostics.record(operation: "sdk_initialize", code: "started")
         do {
-            #if DEBUG
-            _ = try await sdk.initializeDevelopment(
-                apiKey: configuration.sdkKey,
-                onloDevelopmentOrigin: configuration.onloDevelopmentOrigin
-            )
-            #else
-            _ = try await sdk.initialize(apiKey: configuration.sdkKey)
-            #endif
+            try await initialize(configuration)
             E2ESafeDiagnostics.record(operation: "sdk_initialize", code: "complete")
             E2ESafeDiagnostics.record(operation: "sdk_identify", code: "started")
             _ = try await sdk.loginIdentifiedUser(userJwt: userJwt)
@@ -157,6 +182,17 @@ private final class LocalE2EModel: ObservableObject {
             E2ESafeDiagnostics.record(operation: "sdk_support", code: code)
         }
         isSupportLoading = false
+    }
+
+    private func initialize(_ configuration: LocalSupportConfiguration) async throws {
+        #if DEBUG
+        _ = try await sdk.initializeDevelopment(
+            apiKey: configuration.sdkKey,
+            onloDevelopmentOrigin: configuration.onloDevelopmentOrigin
+        )
+        #else
+        _ = try await sdk.initialize(apiKey: configuration.sdkKey)
+        #endif
     }
 
     func presentMessenger() {
@@ -269,9 +305,86 @@ private struct RefreshedUserJWT: Decodable {
 private struct LocalSupportConfiguration {
     let sdkKey: String
     let onloDevelopmentOrigin: URL
+
+    static var fromBundle: Self? {
+        guard let sdkKey = Bundle.main.object(forInfoDictionaryKey: "ONLO_SDK_KEY") as? String,
+              !sdkKey.isEmpty,
+              let originString = Bundle.main.object(forInfoDictionaryKey: "ONLO_DEVELOPMENT_ORIGIN") as? String,
+              let origin = URL(string: originString) else {
+            return nil
+        }
+        return Self(sdkKey: sdkKey, onloDevelopmentOrigin: origin)
+    }
 }
 
 private enum LocalMerchantBackendError: Error { case rejected }
+
+private enum LocalSDKEnvironment {
+    static let sdk = OnloSDK(logger: LocalE2ESDKLogger())
+}
+
+@MainActor
+private final class LocalAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        UNUserNotificationCenter.current().delegate = self
+        return true
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken token: Data) {
+        Task { _ = try? await LocalSDKEnvironment.sdk.setAPNsPushToken(token) }
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let payload = Self.pushPayload(response.notification.request.content.userInfo)
+        completionHandler()
+        Task { @MainActor in
+            guard let payload,
+                  case .handled(.messenger(let conversationId)) =
+                    try? await LocalSDKEnvironment.sdk.handlePushNotification(payload),
+                  let conversationId else { return }
+            await presentAuthorisedConversation(conversationId)
+        }
+    }
+
+    func forwardDeepLink(_ url: URL) {
+        let segments = url.pathComponents.filter { $0 != "/" }
+        guard url.host == "support", segments.count == 2, segments[0] == "conversations" else { return }
+        Task {
+            guard case .messenger(let conversationId) =
+                    try? await LocalSDKEnvironment.sdk.openConversation(segments[1]),
+                  let conversationId else { return }
+            await presentAuthorisedConversation(conversationId)
+        }
+    }
+
+    private func presentAuthorisedConversation(_ conversationId: String) async {
+        guard let host = UIApplication.shared.topOnloViewController else { return }
+        try? await OnloMessengerPresenter(sdk: LocalSDKEnvironment.sdk)
+            .present(from: host, conversationId: conversationId)
+    }
+
+    nonisolated private static func pushPayload(
+        _ userInfo: [AnyHashable: Any]
+    ) -> PushNotificationPayload? {
+        guard let conversationId = userInfo["conversationId"] as? String,
+              let messageId = userInfo["messageId"] as? String,
+              userInfo["notificationType"] as? String == "message_available" else {
+            return nil
+        }
+        return PushNotificationPayload(
+            conversationId: conversationId,
+            messageId: messageId,
+            notificationType: .messageAvailable
+        )
+    }
+}
 
 private actor LocalE2ESDKLogger: SDKLogging {
     func record(_ event: SDKLogEvent) async {

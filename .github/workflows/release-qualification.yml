@@ -1,0 +1,122 @@
+name: SDK release qualification
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shared:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:protocol-fixtures
+      - run: npm run test:conformance
+      - run: npm run test:hygiene
+      - run: npm run check:hygiene
+      - run: npm --prefix packages/react-native test
+      - name: Validate React Native package contents
+        run: npm pack --dry-run --json
+        working-directory: packages/react-native
+
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "platforms;android-36" "build-tools;36.0.0"
+      - run: packages/android/gradlew -p packages/android testDebugUnitTest assembleRelease
+      - name: Publish unpublished qualification Maven package
+        run: packages/android/gradlew -p packages/android publishReleasePublicationToQualificationRepository -Ponlo.maven.repository=${{ runner.temp }}/onlo-maven
+      - run: packages/android/gradlew -p examples/android :app:assembleRelease -Ponlo.release.version=0.1.0
+
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift package resolve --package-path packages/ios
+      - run: swift build --package-path packages/ios -c release
+      - run: swift test --package-path packages/ios
+      - name: Build native example unsigned
+        run: xcodebuild -project examples/ios-local-e2e/OnloLocalE2EApp.xcodeproj -scheme OnloLocalE2EApp -configuration Release -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build
+
+  react-native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        if: runner.os == 'Linux'
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+        if: runner.os == 'Linux'
+      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+        if: runner.os == 'Linux'
+      - run: npm ci
+        working-directory: examples/react-native
+      - run: npm run typecheck
+        working-directory: examples/react-native
+      - run: npm run build:android:release
+        if: runner.os == 'Linux'
+        working-directory: examples/react-native
+      - run: bundle install
+        if: runner.os == 'macOS'
+        working-directory: examples/react-native
+      - run: bundle exec pod install
+        if: runner.os == 'macOS'
+        working-directory: examples/react-native/ios
+      - run: npm run build:ios:release
+        if: runner.os == 'macOS'
+        working-directory: examples/react-native
+
+  flutter:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.44.2"
+          cache: true
+      - run: flutter pub get
+        working-directory: packages/flutter
+      - run: flutter analyze
+        working-directory: packages/flutter
+      - run: flutter test
+        working-directory: packages/flutter
+      - name: Validate unpublished package contents
+        run: dart pub publish --dry-run
+        working-directory: packages/flutter
+      - run: flutter pub get
+        working-directory: examples/flutter
+      - run: flutter build apk --release
+        if: runner.os == 'Linux'
+        working-directory: examples/flutter
+      - run: flutter build ios --release --no-codesign
+        if: runner.os == 'macOS'
+        working-directory: examples/flutter

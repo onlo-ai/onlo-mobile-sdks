@@ -1,0 +1,9 @@
+pluginManagement { includeBuild("../node_modules/@react-native/gradle-plugin") }
+plugins { id("com.facebook.react.settings") }
+extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
+rootProject.name = 'OnloRnRC'
+include ':app'
+include ':onlo-android-sdk'
+project(':onlo-android-sdk').projectDir =
+    file('../../../packages/android')
+includeBuild('../node_modules/@react-native/gradle-plugin')

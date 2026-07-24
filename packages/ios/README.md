@@ -28,9 +28,22 @@ Expected result: `import OnloSDK` builds in the merchant app.
 
 ### Public installation
 
-- Swift Package Manager URL: not published yet.
-- CocoaPods: not published yet.
-- Do not use `https://github.com/onlo-ai/onlo-ios-sdk`; that package does not currently exist.
+The repository URL and tag owner are not approved yet. After release engineering
+pushes the approved repository and `0.1.0` tag, select **Add Package
+Dependencies**, enter `<APPROVED_SWIFTPM_REPOSITORY_URL>`, and choose exact
+version `0.1.0`.
+
+For a manifest-based host:
+
+```swift
+.package(
+    url: "<APPROVED_SWIFTPM_REPOSITORY_URL>",
+    exact: "0.1.0"
+)
+```
+
+Add the `OnloSDK` product once. Do not combine it with the local CocoaPod in
+the same target. CocoaPods publication remains unapproved.
 
 ## Complete UIKit example
 

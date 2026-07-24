@@ -45,8 +45,17 @@ dependencies {
   implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
 
   def localCore = rootProject.findProject(':onlo-android-sdk')
-  if (localCore == null) {
-    throw new GradleException('The unpublished Onlo Android core must be included as :onlo-android-sdk.')
+  if (localCore != null) {
+    implementation localCore
+  } else {
+    def coreGroup = providers.gradleProperty('onlo.android.group').orNull
+    def coreArtifact = providers.gradleProperty('onlo.android.artifact').orNull
+    def coreVersion = providers.gradleProperty('onlo.android.version').orNull
+    if ([coreGroup, coreArtifact, coreVersion].any { it == null || it.trim().isEmpty() }) {
+      throw new GradleException(
+        'Supply approved onlo.android.group/artifact/version properties or include :onlo-android-sdk.'
+      )
+    }
+    implementation "${coreGroup}:${coreArtifact}:${coreVersion}"
   }
-  implementation localCore
 }

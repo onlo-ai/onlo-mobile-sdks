@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:onlo_flutter/onlo_flutter.dart';
@@ -11,8 +13,12 @@ class OnloLocalExample extends StatefulWidget {
   State<OnloLocalExample> createState() => _OnloLocalExampleState();
 }
 
-class _OnloLocalExampleState extends State<OnloLocalExample> {
+class _OnloLocalExampleState extends State<OnloLocalExample>
+    with WidgetsBindingObserver {
   static const String _publicSdkKey = String.fromEnvironment('ONLO_SDK_KEY');
+  static const String operatorBackendUrl = String.fromEnvironment(
+    'ONLO_OPERATOR_BACKEND_URL',
+  );
   StreamSubscription<OnloStateSnapshot>? _stateSubscription;
   OnloSessionState _nativeState = OnloSessionState.uninitialized;
   bool _hostSignedIn = false;
@@ -21,6 +27,7 @@ class _OnloLocalExampleState extends State<OnloLocalExample> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _stateSubscription = Onlo.observeState().listen((snapshot) {
       if (mounted) setState(() => _nativeState = snapshot.session);
     });
@@ -35,6 +42,24 @@ class _OnloLocalExampleState extends State<OnloLocalExample> {
         }),
       );
     }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Native owns foreground/background recovery. Dart retains no scheduler,
+    // credential, outbox, or transcript state.
+  }
+
+  void _continueAnonymously() {
+    unawaited(
+      Onlo.loginUnidentifiedUser().catchError((_) {
+        if (mounted) {
+          setState(
+            () => _supportError = 'Anonymous support is unavailable.',
+          );
+        }
+      }),
+    );
   }
 
   void _completeHostLogin() {
@@ -57,8 +82,19 @@ class _OnloLocalExampleState extends State<OnloLocalExample> {
     await Onlo.loginIdentifiedUser(userJwt: userJwt);
   }
 
+  Future<void> _logoutOrSwitchAccount() async {
+    await Onlo.logout();
+    if (mounted) {
+      setState(() {
+        _hostSignedIn = false;
+        _supportError = null;
+      });
+    }
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     unawaited(_stateSubscription?.cancel());
     super.dispose();
   }
@@ -85,12 +121,22 @@ class _OnloLocalExampleState extends State<OnloLocalExample> {
               if (supportPreparing) const CircularProgressIndicator(),
               if (_supportError case final error?) Text(error),
               FilledButton(
+                onPressed: _continueAnonymously,
+                child: const Text('Continue anonymously'),
+              ),
+              FilledButton(
                 onPressed: _completeHostLogin,
                 child: const Text('Complete host login'),
               ),
               FilledButton(
                 onPressed: supportReady ? () => Onlo.present() : null,
-                child: const Text('Support'),
+                child: const Text(
+                  'Support (attachments use native picker/camera)',
+                ),
+              ),
+              FilledButton(
+                onPressed: _logoutOrSwitchAccount,
+                child: const Text('Log out / switch account'),
               ),
             ],
           ),
@@ -100,7 +146,55 @@ class _OnloLocalExampleState extends State<OnloLocalExample> {
   }
 }
 
-Future<String> _fetchShortLivedOnloUserJwtFromOperatorBackend() async =>
-    throw UnsupportedError(
-      'Implement an authenticated Operator-backend call. Never sign or persist a JWT in Dart.',
+Future<String> _fetchShortLivedOnloUserJwtFromOperatorBackend() async {
+  if (_OnloLocalExampleState.operatorBackendUrl.isEmpty) {
+    throw StateError('Configure the authenticated Operator-backend URL.');
+  }
+  final client = HttpClient();
+  try {
+    final request = await client.postUrl(
+      Uri.parse(
+        '${_OnloLocalExampleState.operatorBackendUrl}/v1/onlo-user-jwt',
+      ),
     );
+    request.headers.contentType = ContentType.json;
+    request.write('{}');
+    final response = await request.close();
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw StateError('Operator backend rejected the host session.');
+    }
+    final value =
+        jsonDecode(await utf8.decodeStream(response)) as Map<String, Object?>;
+    final userJwt = value['userJwt'];
+    if (userJwt is! String) {
+      throw StateError('Operator backend returned an invalid response.');
+    }
+    return userJwt;
+  } finally {
+    client.close();
+  }
+}
+
+/// Call from the host APNs/FCM integration; Dart never stores the token.
+Future<void> forwardPushTokenToOnlo(
+  OnloPushProvider provider,
+  String token,
+) =>
+    Onlo.setPushToken(provider: provider, token: token);
+
+/// Call from the host notification callback; native re-authorises the route.
+Future<OnloPushHandlingResult> forwardOnloNotification(
+  OnloPushNotificationPayload payload,
+) =>
+    Onlo.handlePushNotification(payload);
+
+/// Call from the host deep-link router; native authorises the conversation.
+Future<bool> forwardOnloDeepLink(Uri uri) async {
+  if (uri.pathSegments.length != 3 ||
+      uri.pathSegments[0] != 'support' ||
+      uri.pathSegments[1] != 'conversations') {
+    return false;
+  }
+  await Onlo.openConversation(uri.pathSegments[2]);
+  return true;
+}

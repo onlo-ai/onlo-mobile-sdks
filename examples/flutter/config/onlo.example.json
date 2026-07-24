@@ -1,3 +1,4 @@
 {
-  "ONLO_SDK_KEY": "replace-with-public-mobile-sdk-key"
+  "ONLO_SDK_KEY": "replace-with-public-mobile-sdk-key",
+  "ONLO_OPERATOR_BACKEND_URL": "https://merchant-backend.example"
 }

@@ -150,7 +150,19 @@ unread state.
 The module is standalone and requires JDK 17 plus an Android SDK:
 
 ```bash
-gradle -p packages/android test
+packages/android/gradlew -p packages/android testDebugUnitTest assembleRelease
 ```
 
-This is an unpublished native-core foundation with an Android Views messenger. Compose hosting, media UI, optional FCM adapter integration, release artifacts, and public end-to-end service verification remain unfinished.
+The module can publish to an isolated qualification repository with explicit
+temporary properties:
+
+```bash
+packages/android/gradlew -p packages/android \
+  publishReleasePublicationToQualificationRepository \
+  -Ponlo.maven.repository=/tmp/onlo-maven
+```
+
+The default qualification coordinate is
+`ai.onlo.unpublished:onlo-android-sdk:0.1.0`. It is deliberately non-public and
+must not appear in customer installation instructions. Final group, artifact,
+repository, and signing ownership remain unapproved.

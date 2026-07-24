@@ -68,6 +68,7 @@ Pods/
 *.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
 *.xcconfig
+.xcode.env.local
 
 # Android / Gradle
 .gradle/
@@ -86,6 +87,7 @@ onlo.local.json
 .flutter-plugins-dependencies
 /packages/flutter/pubspec.lock
 ephemeral/
+**/GeneratedPluginRegistrant.java
 
 # React Native
 .expo/

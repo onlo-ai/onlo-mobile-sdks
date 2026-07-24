@@ -1,0 +1,28 @@
+PODS:
+  - Flutter (1.0.0)
+  - onlo_flutter (0.1.0):
+    - Flutter
+    - OnloSDK (= 0.1.0)
+  - OnloSDK (0.1.0)
+
+DEPENDENCIES:
+  - Flutter (from `Flutter`)
+  - onlo_flutter (from `.symlinks/plugins/onlo_flutter/ios`)
+  - OnloSDK (from `../../../packages/ios`)
+
+EXTERNAL SOURCES:
+  Flutter:
+    :path: Flutter
+  onlo_flutter:
+    :path: ".symlinks/plugins/onlo_flutter/ios"
+  OnloSDK:
+    :path: "../../../packages/ios"
+
+SPEC CHECKSUMS:
+  Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
+  onlo_flutter: 7c384da5fb4a58026f5b8dd3e80889a1c0a23a18
+  OnloSDK: 71f14eee724f87e515ffaf5368002bc9a7200676
+
+PODFILE CHECKSUM: 7e4e2b37a00b80b2559093a383cab2038c9be9cf
+
+COCOAPODS: 1.16.2

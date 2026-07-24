@@ -10,14 +10,20 @@
 
 2. If `local.properties` does not exist, copy `local.properties.example` to `local.properties`; otherwise add the `ONLO_SDK_KEY` line from the example without replacing your existing `sdk.dir`.
 
-   Expected result: the ignored file contains the machine-local Android SDK path and public test integration key, with no signing secret.
+   Expected result: the ignored file contains the machine-local Android SDK
+   path, public test integration key, and authenticated Operator-backend URL,
+   with no signing secret or JWT.
 
 3. Open `examples/android` in Android Studio, or run `../../packages/android/gradlew -p . :app:assembleDebug` from this directory.
 
    Expected result: the local host compiles against `../../packages/android`, initializes in the background, and enables Support only in an anonymous or identified ready state.
 
-4. Implement `OperatorBackend.fetchShortLivedOnloUserJwt()` as an authenticated call to the Operator backend, then call it only after the host app login succeeds.
+4. Use **Continue anonymously**, or enter a synthetic host login code and use
+   **Complete host login**.
 
-   Expected result: the backend returns a short-lived JWT for `loginIdentifiedUser`; the app never signs, logs, or stores it.
+   Expected result: identified login obtains a short-lived JWT from the
+   Operator backend and passes it directly to native Core. Support presents the
+   native picker/camera, push/deep-link forwarding re-authorises natively, and
+   logout completes before account switching.
 
 Call `logout()` before a host account switch. If it returns `Pending`, keep the old partition blocked until native recovery completes. Production uses `https://onlo.ai`; staging/review must be injected by release configuration, never guessed by the host.

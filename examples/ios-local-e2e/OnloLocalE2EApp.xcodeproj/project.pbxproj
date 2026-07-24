@@ -181,6 +181,8 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "Take a photo to attach to a support message.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Use your microphone to dictate a support message.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Convert your spoken support message into text.";
+				INFOPLIST_KEY_ONLO_DEVELOPMENT_ORIGIN = "$(ONLO_DEVELOPMENT_ORIGIN)";
+				INFOPLIST_KEY_ONLO_SDK_KEY = "$(ONLO_SDK_KEY)";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				MARKETING_VERSION = 0.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = ai.onlo.locale2e;
@@ -206,6 +208,8 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "Take a photo to attach to a support message.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Use your microphone to dictate a support message.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Convert your spoken support message into text.";
+				INFOPLIST_KEY_ONLO_DEVELOPMENT_ORIGIN = "$(ONLO_DEVELOPMENT_ORIGIN)";
+				INFOPLIST_KEY_ONLO_SDK_KEY = "$(ONLO_SDK_KEY)";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				MARKETING_VERSION = 0.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = ai.onlo.locale2e;

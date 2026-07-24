@@ -4,6 +4,8 @@ Open `OnloLocalE2EApp.xcodeproj`, select an iPhone 17 simulator, and press Run. 
 
 ## Prerequisites
 
+- [ ] Supply `ONLO_SDK_KEY` and `ONLO_DEVELOPMENT_ORIGIN` as local Xcode build
+  settings using `OnloExample.xcconfig.example` as the safe template.
 - [ ] The SDK-team local merchant backend is running at `https://127.0.0.1:8444`. Its `npm start` command creates its ignored local certificate automatically; this Debug project adds it to the selected simulator during build.
 - [ ] Its local Onlo service settings accept bundle ID `ai.onlo.locale2e` and the public SDK key it returns after test login.
 - [ ] The local Onlo server uses the matching mobile identity signing secret. Its HTTP local origin is accepted by the harness, which exposes an HTTPS-only proxy to the SDK.
@@ -26,6 +28,10 @@ Open `OnloLocalE2EApp.xcodeproj`, select an iPhone 17 simulator, and press Run. 
 
    Expected result: the SDK presents its native messenger screen. The app does not render a second chat UI.
 
+   **Continue anonymously** exercises the installation-scoped anonymous path.
+   The messenger’s configuration-controlled attachment actions use the native
+   picker and camera.
+
 5. With **Voice input** enabled in WebChat Behaviour, tap the microphone and grant the two requested permissions.
 
    Expected result: speech recognition fills the normal composer. The message still uses the existing text chat pipeline.
@@ -37,6 +43,12 @@ Open `OnloLocalE2EApp.xcodeproj`, select an iPhone 17 simulator, and press Run. 
 7. Tap **Log out**.
 
    Expected result: SDK logout completes before the Login screen returns; another account cannot access the prior account’s SDK state.
+
+The app delegate forwards APNs tokens and notification taps to the same
+`OnloSDK` instance. `onlo-example://support/conversations/<id>` demonstrates
+host deep-link forwarding; Core re-authorises the conversation before the
+native messenger opens. Native lifecycle binding owns foreground/background
+recovery.
 
 ## Safe diagnostics
 
