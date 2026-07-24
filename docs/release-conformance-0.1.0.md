@@ -69,6 +69,41 @@ physical-device, signing, publication, production-release, or pilot gate.
 | Reopen inbox | `0e803343-3a2b-4c2c-bb9a-3a06381f4b78` |
 | Reopened transcript | `5f1b2dd4-4a54-4504-b44e-e8e9abd69e24` |
 
+### Identified-customer IDV Simulator evidence
+
+This is identity-verification evidence from the same iPhone Simulator and
+synthetic environment described above. It verifies the merchant-backend JWT
+boundary and the identified SDK journey; it is not physical-device or
+production-identity-provider evidence.
+
+| Simulator behavior | Result | Evidence |
+| --- | --- | --- |
+| Merchant identity boundary | Pass | The merchant backend recorded `merchant_login requested` then `issued_jwt`; no signing secret or JWT was written to the client diagnostics |
+| Anonymous-to-identified transition | Pass | Anonymous Support closed before login; SDK initialization and identify completed under the replacement authority |
+| Server identity resolution | Pass | Identified session exchange `41cdb6df-5fea-482d-bdc0-9e5df514cd28` succeeded before Support became ready |
+| Configuration under identified authority | Pass | Configuration returned not-modified after the identified session exchange |
+| Authorized identified history | Pass | Inbox `f3c32a5f-a393-4cd1-b062-bd8736a4a39c` and transcript `ddc3a272-346c-461b-b3ba-873b4e180785` succeeded |
+| Read acknowledgement | Pass | Four identified read acknowledgements succeeded, including the post-message acknowledgement |
+| Identified message acceptance | Pass | One queued send produced `accepted_received` and `accepted` under request `f363d08c-4130-4e26-adf8-866079cd7fe2` |
+| AI streaming and completion | Pass | The same request completed after the foreground stream connected |
+| Durable reconciliation | Pass | Read-only SQLite evidence contains one identified outbox row in `reconciled`, with one attempt and no retry deadline |
+| Reopen continuity | Pass | Closing and reopening Support presented the identified messenger and reused its owner-scoped inbox |
+| Owner isolation | Pass | Persistence metadata contains only the current unblocked identified owner scope; the earlier anonymous scope is not exposed after binding |
+
+| Safe operation | Request ID |
+| --- | --- |
+| Identified session exchange | `41cdb6df-5fea-482d-bdc0-9e5df514cd28` |
+| Identified Help Center | `db4372ef-c390-4f5c-b5a3-2cb14f8395d4` |
+| Identified inbox | `f3c32a5f-a393-4cd1-b062-bd8736a4a39c` |
+| Initial identified transcript | `ddc3a272-346c-461b-b3ba-873b4e180785` |
+| Initial identified read acknowledgement | `69a8aac3-0207-47c7-946d-6738fa277c3a` |
+| Transcript refresh | `8eb3118a-7954-4efa-a8f1-d0f4a42c4f06` |
+| Second read acknowledgement | `28efdfb3-520b-4d6f-b4b3-eebae663f86f` |
+| Final pre-send transcript refresh | `0f9730d2-ea90-4131-ab50-03c90cf8be9e` |
+| Final pre-send read acknowledgement | `ba93a343-40f7-4345-9186-ea97f221d67b` |
+| Identified chat acceptance/completion | `f363d08c-4130-4e26-adf8-866079cd7fe2` |
+| Post-message read acknowledgement | `d0273ba2-140c-4dfa-ac23-2f865d2fdc1b` |
+
 ## Example hosts
 
 | Host | Version-controlled path | Demonstrated boundary | Release build |

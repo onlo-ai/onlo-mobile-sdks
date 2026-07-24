@@ -279,7 +279,7 @@ Flutter.
 | iOS client capability | Status | Evidence boundary |
 | --- | --- | --- |
 | Package integration and local E2E host build | ✅ Verified | iOS simulator build |
-| Identified login, history, send, and receive | ✅ Verified | Local server and synthetic simulator account |
+| Identified login, authorized history, send/receive, read acknowledgement, and reopen | ✅ Simulator verified | iPhone 17 Pro / iOS 26.4 IDV evidence in the [0.1.0 conformance report](release-conformance-0.1.0.md#identified-customer-idv-simulator-evidence) |
 | Anonymous bootstrap, live chat, transcript/list continuity, and reopen | ✅ Simulator verified | iPhone 17 Pro / iOS 26.4 evidence in the [0.1.0 conformance report](release-conformance-0.1.0.md#ios-simulator-e2e-evidence) |
 | FAQ and voice integration | 🟡 Build verified | Manual permissions and interaction pending |
 | Physical-device lifecycle, attachments, offline replay, and push | ⏳ Pending | Client/device responsibility |
