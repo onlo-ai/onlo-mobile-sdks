@@ -28,6 +28,47 @@ pilot approval remain pending.
 | QA deployment | Pending | An isolated mobile QA target is not provisioned. |
 | Customer pilot | Blocked | Physical, signing, publication, and isolated-QA gates remain open. |
 
+## iOS Simulator E2E evidence
+
+This evidence is limited to an iPhone Simulator. It does not satisfy any
+physical-device, signing, publication, production-release, or pilot gate.
+
+| Field | Simulator evidence |
+| --- | --- |
+| Evidence date | 2026-07-24 |
+| Device | iPhone 17 Pro Simulator |
+| OS | iOS 26.4 |
+| Server revision | `57a5acbbf161dbc263148a5852401d4e6d97b72c` |
+| Mobile repository baseline | `e4ee858b48eea47a447b8cab86eb8af9e78bb9cb` |
+| Environment | Local server with synthetic Operator/customer data and Simulator-trusted HTTPS |
+| PII-free screenshot | `/private/tmp/onlo-merchant-test/screenshots/ios-04-fresh-17pro.png` |
+| PII-free SDK log | Simulator app container: `Library/Caches/onlo-e2e-diagnostics.log` |
+| PII-free proxy log | `examples/merchant-backend/.local/merchant-backend.log` |
+
+| Simulator behavior | Result | Evidence |
+| --- | --- | --- |
+| Anonymous bootstrap | Pass | Session success `31c2d5ee-3eaf-4c07-b75f-470b0b8d596e`; later resume `a617a9a9-a04b-4cdb-b405-78b2cb4a1b57` |
+| Installation/device continuity after reopen | Pass | Resume succeeded on the same Simulator installation; configuration returned not-modified |
+| Server connectivity | Pass | Session, configuration, foreground stream, Help Center, inbox, and transcript operations succeeded |
+| Customer message acceptance | Pass | Synthetic message appeared once in the authorised Operator inbox |
+| AI response and streaming delivery | Pass | Simulator UI received the assistant response through the native chat stream |
+| Transcript persistence | Pass | Authoritative transcript refetch `5f1b2dd4-4a54-4504-b44e-e8e9abd69e24` succeeded after reopen |
+| Conversation-list persistence | Pass | Authoritative inbox refetch `0e803343-3a2b-4c2c-bb9a-3a06381f4b78` returned the existing conversation |
+| Reopen existing conversation | Pass | Closing and reopening Support exposed the existing list row and transcript |
+| No duplicate conversation creation | Pass | Reopen retained one conversation for the synthetic anonymous installation |
+| Anonymous history isolation | Pass | No identified or unrelated-session history appeared in the anonymous list or transcript |
+
+| Safe operation | Request ID |
+| --- | --- |
+| Initial anonymous session | `31c2d5ee-3eaf-4c07-b75f-470b0b8d596e` |
+| Initial configuration | `908d1d9f-54ce-48e2-9e54-909ba59cad70` |
+| Initial Help Center | `6159ab1a-709a-40cb-9a80-5c746fa2bf59` |
+| Initial inbox | `c0be56cb-bac2-41dc-94f5-ee3b6f7fa0b0` |
+| Reopen/resume session | `a617a9a9-a04b-4cdb-b405-78b2cb4a1b57` |
+| Reopen Help Center | `b80f68c9-b02f-4790-ada4-31964fbcff9f` |
+| Reopen inbox | `0e803343-3a2b-4c2c-bb9a-3a06381f4b78` |
+| Reopened transcript | `5f1b2dd4-4a54-4504-b44e-e8e9abd69e24` |
+
 ## Example hosts
 
 | Host | Version-controlled path | Demonstrated boundary | Release build |
@@ -101,6 +142,16 @@ The canonical scenarios remain
 Native iOS, native Android, RN iOS/Android, and Flutter iOS/Android physical
 cells are pending. Simulator or unsigned build evidence does not satisfy this
 gate.
+
+| Remaining gate | State |
+| --- | --- |
+| Physical camera, media picker, and denial/allow permission journeys | Pending |
+| Physical microphone, speech, interruption, and denial journeys | Pending |
+| Physical APNs/FCM delivery, open, and logout isolation | Pending |
+| Physical background/foreground execution and process-lifecycle recovery | Pending |
+| External iOS/Android signing approvals and signed artifacts | Pending |
+| SwiftPM, Maven, npm, and pub.dev publication approvals | Pending |
+| Customer pilot approval and target enablement | Blocked |
 
 ## Push and publication boundary
 
