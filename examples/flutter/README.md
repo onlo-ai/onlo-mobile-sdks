@@ -22,4 +22,5 @@ on `../../packages/flutter` and exactly one native Core per platform.
 
    Expected result: both hosts demonstrate anonymous and identified login,
    native presentation/picker/camera, push/deep-link forwarding, logout/account
-   switching, and native-owned lifecycle recovery.
+   switching, native-owned lifecycle recovery, and native diagnostics set to
+   `off` because `kReleaseMode` is true.

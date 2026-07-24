@@ -24,6 +24,7 @@ placeholder configuration.
 
    Expected result: the host demonstrates anonymous and identified login,
    native presentation/picker/camera, push/deep-link forwarding, logout/account
-   switching, and native-owned lifecycle recovery.
+   switching, native-owned lifecycle recovery, and native diagnostics set to
+   `off` because `__DEV__` is false.
 
 `Onlo.present()` is called only from the host Support button. The SDK production origin is `https://onlo.ai`; staging/review origin is release-configured only. Do not put an identity signing secret or user JWT in `onlo.config.ts` or an app `.env`.

@@ -21,7 +21,8 @@ export default function App(): React.JSX.Element {
     // host forwards lifecycle by keeping the native bridge installed.
     const lifecycle = AppState.addEventListener('change', () => undefined);
     if (onloConfig.sdkKey) {
-      void Onlo.initialize({sdkKey: onloConfig.sdkKey})
+      void Onlo.setLogLevel(__DEV__ ? 'verbose' : 'off')
+        .then(() => Onlo.initialize({sdkKey: onloConfig.sdkKey}))
         .catch(() => setSupportError('Support is temporarily unavailable.'));
     }
     return () => {

@@ -26,4 +26,39 @@
    native picker/camera, push/deep-link forwarding re-authorises natively, and
    logout completes before account switching.
 
+## Enable FCM
+
+1. Register `ai.onlo.example` in the merchant's Firebase project and place its
+   downloaded `google-services.json` in `app/`.
+
+   Expected result: the conditional Google Services plugin configures the
+   example. The file contains project identifiers, belongs to the merchant
+   host, and is not committed by this repository.
+
+2. Upload the corresponding FCM HTTP v1 service-account JSON to the Mobile
+   target in Onlo Dashboard. Never add the service-account JSON to the app.
+
+   Expected result: Onlo server can send for this merchant application while
+   the private provider credential remains server-side.
+
+3. Run on a Google Play-enabled emulator or device and grant notification
+   permission.
+
+   Expected result: `MerchantApplication` initializes Core before an FCM
+   callback; `OnloFirebaseMessagingService` forwards rotated registration
+   tokens and posts contract-shaped `message_available` notifications.
+
+4. Tap an Onlo notification.
+
+   Expected result: `MainActivity` forwards only the three routing fields to
+   Core. Core refetches the transcript and opens the conversation only for the
+   current owner.
+
+The v0.1 example pins Firebase Messaging `24.1.2` because its registration-token
+callback matches the frozen Onlo server protocol. Firebase Messaging 25.x
+introduces FID targeting and requires a coordinated server/protocol release;
+do not upgrade the host independently. An emulator intent injection validates
+payload forwarding and authority fencing, but only configured FCM HTTP v1
+delivery validates the provider path.
+
 Call `logout()` before a host account switch. If it returns `Pending`, keep the old partition blocked until native recovery completes. Production uses `https://onlo.ai`; staging/review must be injected by release configuration, never guessed by the host.

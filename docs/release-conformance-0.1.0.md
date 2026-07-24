@@ -125,6 +125,37 @@ retry scheduler, or independent chat UI.
 | `@onlo/react-native` | Tests, exports, peer metadata, 14-file `npm pack`, and clean tarball consumers on iOS/Android pass. | `private: true`; npm owner and native publication coordinates pending. |
 | `onlo_flutter` | Analysis, tests, package dry-run, and clean packaged-source consumers on iOS/Android pass. | `publish_to: none`; pub.dev publisher approval pending. |
 
+## Release size, shrinker, and warning qualification
+
+Matched temporary hosts were built from mobile revision `c9dd5fb` on
+2026-07-24. Outputs are unsigned local evidence; they do not predict App Store
+or Play download size after signing, compression, or thinning.
+
+| Platform | Baseline | Onlo host | Increment | Result |
+| --- | ---: | ---: | ---: | --- |
+| Android optimized Release APK | 741,259 bytes | 1,096,734 bytes | 355,475 bytes (347.1 KiB) | Accepted for RC `0.1.0` |
+| iOS arm64 Release executable | 87,312 bytes | 3,841,040 bytes | 3,753,728 bytes (3.58 MiB) | Accepted for RC `0.1.0` |
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Android R8 | Pass | `minifyReleaseWithR8` completed with an empty host rules file and the SDK's shipped `consumer-rules.pro`. |
+| Public Android API retention | Pass | R8 seeds and APK analysis retain `ai.onlo.sdk.Onlo` and `ai.onlo.sdk.OnloClient`. |
+| Android dependency/class conflicts | Pass | `releaseRuntimeClasspath`, duplicate-class checking, lint-vital, and optimized packaging completed. |
+| iOS package/link conflict | Pass | Matched generic-device Release builds completed with and without the local Swift package. |
+| Android warnings | Reviewed | Nine existing deprecated platform-Fragment API warnings; no dependency, R8, linkage, or duplicate-class failure. |
+| iOS warnings | Reviewed | One SDK-host unused-result warning; two orientation/launch-screen host warnings also occurred in the baseline. |
+
+| Local evidence | SHA-256 |
+| --- | --- |
+| Android baseline APK | `f1effb939ee833b9974da96a9607daf9d3ababbe8c2bb014cf9645e574e87670` |
+| Android Onlo APK | `3a0a0a4b60dc8805abffe094ab2c06d65f66b6aec92f10e955301f56e6403f65` |
+| iOS baseline executable | `689bf9eb2532aec57aee978cadf3d947f81eb0d5cf7909d20e1fbb71830b81aa` |
+| iOS Onlo executable | `21d0eabc48b64bd4ee6954e6127e655c45a51c7a687aabd6140692a766e5f480` |
+
+The temporary qualification tree is
+`/private/tmp/onlo-release-qualification`. No generated build output is
+version-controlled.
+
 ## Local qualification artifacts
 
 These files are local evidence only. APKs and iOS executables are unsigned;

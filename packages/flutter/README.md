@@ -15,7 +15,7 @@ Typed Flutter facade over the iOS and Android Onlo native cores. Dart owns no se
 | Push | `setPushToken(provider:token:notificationPreference:locale:)`, `handlePushNotification(payload)` | Android accepts FCM and iOS accepts APNs; both delegate protected registration/reconciliation and authorised opening to the core. |
 | Observation | `observeState()`, `observeIdentityState()`, `observeConnectionState()`, `observeUnreadCount()` | The event channel exposes native-derived lifecycle and identified-customer aggregate unread state; no inbox or credential state is retained in Dart. |
 | Types | Session, identity, connection, push-result, error-code, and retry-directive types | Typed boundary values and native-safe error mapping. |
-| Diagnostics | `Onlo.setLogLevel(OnloLogLevel.verbose)` | Controls native structured logging without moving diagnostic data into Dart. |
+| Diagnostics | `Onlo.setLogLevel(kReleaseMode ? OnloLogLevel.off : OnloLogLevel.verbose)` | Controls native structured logging without moving diagnostic data into Dart; release hosts select `off`. |
 
 `observeUnreadCount()` emits the server's exact aggregate for identified
 users. It emits `null` for anonymous sessions and immediately at

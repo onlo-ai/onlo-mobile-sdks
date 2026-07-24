@@ -29,6 +29,15 @@ final class OnloSDKTests: XCTestCase {
         )
     }
 
+    func testMessengerDefaultsToDashboardDarkModePolicy() {
+        switch OnloMessengerOptions().colorMode {
+        case .dark:
+            break
+        case .system, .light:
+            XCTFail("Default messenger appearance must follow the dashboard dark-mode policy")
+        }
+    }
+
     func testRuntimeLogLevelsFilterAndSanitiseStructuredFields() {
         let logger = OnloConsoleLogger.shared
         let event = SDKLogEvent(

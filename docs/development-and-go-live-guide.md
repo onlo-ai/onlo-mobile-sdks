@@ -263,15 +263,43 @@ Flutter.
 
 #### Release quality
 
-- [ ] Privacy disclosures match the data the merchant app actually sends,
-      including optional profile fields, attachments, voice, and push identifiers.
+The merchant owns its final store declarations because they must describe the
+entire app, including every SDK and the merchant's actual optional features.
+The minimum Onlo disclosure for identified customer support is:
+
+| Store | Onlo data to include | Purpose |
+| --- | --- | --- |
+| App Store Connect | Customer support inquiries (Other User Content), email address, and name | App Functionality — customer support |
+| Google Play Console | Customer support inquiries (Other User-Generated Content), email address, and name | App functionality — customer support |
+
+Name and email are linked to the customer's identified support account when the
+merchant supplies them. Attachment, voice, and push-token disclosures must also
+be included when those optional features are enabled. The merchant must reconcile
+this SDK guidance with the app's complete behavior before submitting
+[Apple App Privacy Details](https://developer.apple.com/app-store/app-privacy-details/)
+or the
+[Google Play Data safety form](https://support.google.com/googleplay/android-developer/answer/10787469).
+
+- [ ] App Store Connect and Play Console declarations include “Customer support
+      chat — support inquiries, email, name” and match the merchant app's complete
+      data handling.
 - [ ] Required platform permission descriptions are present and accurate.
-- [ ] Release logging is `off` and never emits credentials, content, or raw PII.
+- [x] Native SDK logging defaults to `off`; native release integration snippets
+      explicitly select `OFF`/`.off`. Logs at every level exclude credentials,
+      content, and raw PII.
 - [ ] Time to first customer-visible response token is measured on a
       production-like network.
-- [ ] Binary-size increase and dependency/build warnings are accepted.
-- [ ] Android consumer R8/ProGuard rules and a minified release build are
-      verified for Android-based clients.
+- [x] Representative unsigned Release hosts measured an incremental 347.1 KiB
+      Android APK and 3.58 MiB arm64 iOS executable. These RC `0.1.0` increases
+      are accepted; store compression and thinning may produce different
+      download sizes.
+- [x] Matched native Release hosts and the Android runtime dependency report
+      found no dependency or duplicate-class conflict. Existing framework
+      deprecations and host-project warnings are recorded in the
+      [versioned conformance report](release-conformance-0.1.0.md#release-size-shrinker-and-warning-qualification).
+- [x] Android consumer R8/ProGuard rules were consumed by a minified Release
+      host; R8 completed and retained the public `Onlo` and `OnloClient` entry
+      points.
 - [ ] Publishing or release creation has explicit user approval.
 
 ### Current iOS client evidence

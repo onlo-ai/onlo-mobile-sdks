@@ -140,7 +140,13 @@ Success means every applicable item passes, every physical-device item is comple
 - [ ] Expire the Onlo session or force Support retry; confirm bounded recovery succeeds without logging the merchant out.
   - Evidence: 2026-07-23 — config request `cebb17f4…` expired with `401 session_expired`; session resume `2fab5ef7…` returned `200`, a new foreground stream connected, and Support later opened normally. An overlapping presentation recorded `present_messenger invalid_state` after 30,720 ms rather than a process crash. The presenter now rejects an overlapping presentation immediately and relaxes only the transient keyboard-bottom constraint; source changes are not built or manually retested.
 
-## 9. Push and deep links — physical device only
+## 9. Push and deep links
+
+- [x] **iPhone 17 Pro Simulator / iOS 26.4:** Inject a contract-shaped
+      `message_available` notification while the app is terminated.
+  - Evidence: Simulator displayed the generic notification;
+    `/private/tmp/onlo-merchant-test/screenshots/ios-push-terminated.png`.
+    This validates Simulator notification reception, not APNs provider delivery.
 
 - [ ] Forward the APNs token with `try await Onlo.setAPNsPushToken(deviceToken)` and confirm registration succeeds.
   - Evidence: device/OS, APNs environment, safe registration state: ___
@@ -159,8 +165,8 @@ Success means every applicable item passes, every physical-device item is comple
   - Evidence: before/after log timestamps: ___
 - [ ] **iPhone 17 simulator:** Record first-open/presentation, send-to-`first_token`, and send-to-`complete` durations under named network conditions.
   - Evidence: device/runtime, network profile, durations in ms: ___
-- [ ] **Release build:** Record build warnings and compare the final app/archive size with the same host app built without `OnloSDK`.
-  - Evidence: warning count, baseline bytes, Onlo build bytes, delta: ___
+- [x] **Unsigned Release build:** Compare the arm64 host executable with a matched host built without `OnloSDK`.
+  - Evidence: baseline 87,312 bytes; Onlo host 3,841,040 bytes; delta 3,753,728 bytes (3.58 MiB). The SDK host emitted one unused-result example warning; two host-project warnings also occurred in the baseline. This is build evidence, not a signed archive or App Store download-size claim.
 
 ## If a step fails
 

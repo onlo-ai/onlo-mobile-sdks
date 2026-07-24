@@ -17,7 +17,7 @@ The typed native-event API requires React Native 0.79 or newer.
 | Push | `setPushToken({ provider, token, notificationPreference?, locale? })`, `handlePushNotification(payload)` | Android supports FCM; iOS supports APNs. Both use durable reconciliation and re-authorise payloads before opening a native messenger. |
 | Observation | `addListener(listener)`, `observeState(listener)`, `observeIdentityState(listener)`, `observeConnectionState(listener)`, `observeUnreadCount(listener)` | Both adapters emit native-derived lifecycle and identified-customer aggregate unread state; no inbox or credential state is retained in JavaScript. |
 | Types | Session, identity, connection, push-result, error-code, and retry-directive types | Typed facade validation plus native-safe error mapping. |
-| Diagnostics | `setLogLevel('off' \| 'error' \| 'info' \| 'verbose')` | Controls native structured logging without moving diagnostic data into JavaScript. |
+| Diagnostics | `setLogLevel('off' \| 'error' \| 'info' \| 'verbose')` | Controls native structured logging without moving diagnostic data into JavaScript; release hosts select `off`. |
 
 `observeUnreadCount` emits the server's exact aggregate for identified users.
 It emits `null` for anonymous sessions and immediately at logout/account

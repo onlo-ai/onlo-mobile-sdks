@@ -500,7 +500,7 @@ release-configured. Never place a signing secret or user JWT in build settings.
 #if DEBUG
 Onlo.setLogLevel(.verbose)
 #else
-Onlo.setLogLevel(.error)
+Onlo.setLogLevel(.off)
 #endif
 ```
 

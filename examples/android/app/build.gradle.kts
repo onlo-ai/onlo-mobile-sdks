@@ -5,6 +5,10 @@ plugins {
     kotlin("android")
 }
 
+if (file("google-services.json").isFile) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
 val localProperties = Properties().apply {
     val source = rootProject.file("local.properties")
     if (source.isFile) source.inputStream().use(::load)
@@ -45,6 +49,7 @@ android {
 
 dependencies {
     implementation(project(":onlo-android-sdk"))
+    implementation("com.google.firebase:firebase-messaging:24.1.2")
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")

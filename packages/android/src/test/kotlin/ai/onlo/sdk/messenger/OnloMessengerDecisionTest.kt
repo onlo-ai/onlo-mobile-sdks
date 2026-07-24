@@ -67,4 +67,10 @@ class OnloMessengerDecisionTest {
             ),
         )
     }
+
+    @Test
+    fun `dashboard dark mode selects the native dark palette independent of OS mode`() {
+        assertTrue(messengerUsesDarkPalette(serverDarkEnabled = true))
+        assertFalse(messengerUsesDarkPalette(serverDarkEnabled = false))
+    }
 }

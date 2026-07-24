@@ -1,12 +1,13 @@
 package ai.onlo.example
 
 import ai.onlo.sdk.Onlo
-import ai.onlo.sdk.OnloDevelopmentSupport
 import ai.onlo.sdk.OnloPhase
 import ai.onlo.sdk.messenger.OnloMessenger
-import ai.onlo.sdk.protocol.PushProvider
 import ai.onlo.sdk.push.PushPayloadOutcome
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.widget.Button
@@ -14,6 +15,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.Dispatchers
@@ -57,8 +59,8 @@ class MainActivity : AppCompatActivity() {
 
         // The public key is supplied by ignored local.properties in this example. It is safe to
         // embed in an app, but a real value does not belong in this shared repository.
-        val publicSdkKey = BuildConfig.ONLO_SDK_KEY.takeIf(String::isNotBlank) ?: return
-        val client = initializeOnlo(publicSdkKey)
+        val client = (application as MerchantApplication).onloClient ?: return
+        requestNotificationPermissionIfNeeded()
         anonymousButton.setOnClickListener {
             lifecycleScope.launch {
                 hostOperationError = null
@@ -115,21 +117,17 @@ class MainActivity : AppCompatActivity() {
         Onlo.instance().loginIdentifiedUser(userJwt)
     }
 
-    @OptIn(OnloDevelopmentSupport::class)
-    private fun initializeOnlo(publicSdkKey: String) =
-        if (BuildConfig.ONLO_DEVELOPMENT_ORIGIN.isBlank()) {
-            Onlo.initialize(applicationContext, publicSdkKey)
-        } else {
-            Onlo.initializeDevelopment(
-                applicationContext,
-                publicSdkKey,
-                BuildConfig.ONLO_DEVELOPMENT_ORIGIN,
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                NOTIFICATION_PERMISSION_REQUEST,
             )
         }
-
-    /** Call from FirebaseMessagingService; the host never stores the token. */
-    suspend fun forwardFcmToken(token: String) {
-        Onlo.instance().registerPushToken(PushProvider.FCM, token)
     }
 
     private fun forwardIntent(intent: Intent) {
@@ -151,6 +149,10 @@ class MainActivity : AppCompatActivity() {
                 OnloMessenger.openConversation(this@MainActivity, segments[1])
             }
         }
+    }
+
+    private companion object {
+        const val NOTIFICATION_PERMISSION_REQUEST = 7100
     }
 }
 

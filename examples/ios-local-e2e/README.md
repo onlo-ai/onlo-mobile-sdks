@@ -44,11 +44,36 @@ Open `OnloLocalE2EApp.xcodeproj`, select an iPhone 17 simulator, and press Run. 
 
    Expected result: SDK logout completes before the Login screen returns; another account cannot access the prior account’s SDK state.
 
-The app delegate forwards APNs tokens and notification taps to the same
-`OnloSDK` instance. `onlo-example://support/conversations/<id>` demonstrates
-host deep-link forwarding; Core re-authorises the conversation before the
-native messenger opens. Native lifecycle binding owns foreground/background
-recovery.
+The app delegate requests notification permission, registers with APNs, and
+forwards APNs tokens and notification taps to the same `OnloSDK` instance.
+`onlo-example://support/conversations/<id>` demonstrates host deep-link
+forwarding; Core re-authorises the conversation before the native messenger
+opens. Native lifecycle binding owns foreground/background recovery.
+
+## Inject a Simulator notification
+
+1. Create a local `.apns` file with `aps.alert` plus the exact
+   `conversationId`, `messageId`, and
+   `notificationType: "message_available"` fields.
+
+   Expected result: the file contains only synthetic IDs and no message
+   content beyond a generic notification label.
+
+2. Terminate or background the app, then run:
+
+   ```bash
+   xcrun simctl push booted ai.onlo.locale2e /path/to/payload.apns
+   ```
+
+   Expected result: Simulator displays the notification without an APNs key.
+
+3. Tap the notification while the synthetic identified customer is current.
+
+   Expected result: Core refetches the authoritative transcript and opens only
+   the owner-authorized conversation. Replaying it after logout opens nothing.
+
+Simulator injection validates host parsing, authority checks, and navigation.
+It does not validate the APNs provider credential or production delivery.
 
 ## Safe diagnostics
 

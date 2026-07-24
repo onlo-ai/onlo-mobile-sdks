@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:onlo_flutter/onlo_flutter.dart';
 
@@ -32,15 +33,22 @@ class _OnloLocalExampleState extends State<OnloLocalExample>
       if (mounted) setState(() => _nativeState = snapshot.session);
     });
     if (_publicSdkKey.isNotEmpty) {
-      unawaited(
-        Onlo.initialize(sdkKey: _publicSdkKey).catchError((_) {
-          if (mounted) {
-            setState(
-              () => _supportError = 'Support is temporarily unavailable.',
-            );
-          }
-        }),
+      unawaited(_initializeOnlo());
+    }
+  }
+
+  Future<void> _initializeOnlo() async {
+    try {
+      await Onlo.setLogLevel(
+        kReleaseMode ? OnloLogLevel.off : OnloLogLevel.verbose,
       );
+      await Onlo.initialize(sdkKey: _publicSdkKey);
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => _supportError = 'Support is temporarily unavailable.',
+        );
+      }
     }
   }
 

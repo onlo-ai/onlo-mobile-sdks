@@ -13,7 +13,7 @@ public struct OnloMessengerOptions: Sendable {
     public var allowsImageAttachments: Bool
 
     public init(
-        colorMode: OnloMessengerColorMode = .system,
+        colorMode: OnloMessengerColorMode = .dark,
         allowsImageAttachments: Bool = false
     ) {
         self.colorMode = colorMode
@@ -206,6 +206,8 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
     private let attachmentButton = UIButton(type: .system)
     private let microphoneButton = UIButton(type: .system)
     private let speakerButton = UIBarButtonItem()
+    private let headerNameLabel = UILabel()
+    private let headerSubtitleLabel = UILabel()
     private lazy var closeButton = UIBarButtonItem(
         barButtonSystemItem: .close,
         target: self,
@@ -1114,28 +1116,59 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
             sendButton.isEnabled = !(composer.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) ||
                 !uploadedAttachments.isEmpty
         }
-        composer.placeholder = "Write a message\(suffix)"
+        let placeholder = "Write a message\(suffix)"
+        composer.placeholder = placeholder
+        composer.attributedPlaceholder = NSAttributedString(
+            string: placeholder,
+            attributes: [.foregroundColor: activePalette.incomingText.withAlphaComponent(0.6)]
+        )
     }
 
     private func applyAppearance() {
         let useDark: Bool
+        let interfaceStyle: UIUserInterfaceStyle
         switch options.colorMode {
-        case .light: useDark = false
-        case .dark: useDark = config?.appearance.dark.enabled == true
+        case .light:
+            useDark = false
+            interfaceStyle = .light
+        case .dark:
+            useDark = config?.appearance.dark.enabled == true
+            interfaceStyle = useDark ? .dark : .light
         case .system:
             useDark = traitCollection.userInterfaceStyle == .dark &&
                 config?.appearance.dark.enabled == true
+            interfaceStyle = .unspecified
         }
         let palette = MessengerPalette(config: config, useDark: useDark, color: color)
-        overrideUserInterfaceStyle = useDark ? .dark : .light
+        if overrideUserInterfaceStyle != interfaceStyle {
+            overrideUserInterfaceStyle = interfaceStyle
+        }
+        if navigationController?.overrideUserInterfaceStyle != interfaceStyle {
+            navigationController?.overrideUserInterfaceStyle = interfaceStyle
+        }
         view.backgroundColor = palette.background
         tableView.backgroundColor = palette.background
         statusLabel.textColor = palette.incomingText
+        headerNameLabel.textColor = palette.incomingText
+        headerSubtitleLabel.textColor = palette.incomingText.withAlphaComponent(0.7)
+        composer.textColor = palette.incomingText
+        composer.attributedPlaceholder = NSAttributedString(
+            string: composer.placeholder ?? "Write a message",
+            attributes: [.foregroundColor: palette.incomingText.withAlphaComponent(0.6)]
+        )
         sendButton.tintColor = palette.accent
         attachmentButton.tintColor = palette.accent
         microphoneButton.tintColor = palette.accent
         speakerButton.tintColor = palette.accent
         surfaceControl.selectedSegmentTintColor = palette.accent
+        surfaceControl.setTitleTextAttributes(
+            [.foregroundColor: palette.incomingText],
+            for: .normal
+        )
+        surfaceControl.setTitleTextAttributes(
+            [.foregroundColor: contrastingTextColor(for: palette.accent)],
+            for: .selected
+        )
         navigationController?.navigationBar.tintColor = palette.accent
     }
 
@@ -1169,14 +1202,11 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
         avatar.widthAnchor.constraint(equalToConstant: 32).isActive = true
         avatar.heightAnchor.constraint(equalToConstant: 32).isActive = true
 
-        let name = UILabel()
-        name.text = appearance.botName
-        name.font = .preferredFont(forTextStyle: .headline)
-        let subtitle = UILabel()
-        subtitle.text = appearance.botSubtitle
-        subtitle.font = .preferredFont(forTextStyle: .caption1)
-        subtitle.textColor = .secondaryLabel
-        let labels = UIStackView(arrangedSubviews: [name, subtitle])
+        headerNameLabel.text = appearance.botName
+        headerNameLabel.font = .preferredFont(forTextStyle: .headline)
+        headerSubtitleLabel.text = appearance.botSubtitle
+        headerSubtitleLabel.font = .preferredFont(forTextStyle: .caption1)
+        let labels = UIStackView(arrangedSubviews: [headerNameLabel, headerSubtitleLabel])
         labels.axis = .vertical
         labels.alignment = .leading
         labels.spacing = 0
@@ -1207,6 +1237,17 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
             blue: CGFloat(number & 0xff) / 255,
             alpha: 1
         )
+    }
+
+    private func contrastingTextColor(for background: UIColor) -> UIColor {
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        guard background.getRed(&red, green: &green, blue: &blue, alpha: nil) else {
+            return .label
+        }
+        let luminance = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue)
+        return luminance > 0.55 ? .black : .white
     }
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {

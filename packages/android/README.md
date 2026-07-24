@@ -82,7 +82,7 @@ configuration. Never put a signing secret, user JWT, or customer attributes in
 
 ```kotlin
 Onlo.setLogLevel(
-    if (BuildConfig.DEBUG) OnloLogLevel.VERBOSE else OnloLogLevel.ERROR,
+    if (BuildConfig.DEBUG) OnloLogLevel.VERBOSE else OnloLogLevel.OFF,
 )
 ```
 

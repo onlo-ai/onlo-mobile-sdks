@@ -21,7 +21,6 @@ import android.app.Dialog
 import android.app.Fragment
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -258,6 +257,8 @@ internal fun messengerSurfaceVisibility(
     faq = faqEnabled && validFaqCount > 0,
     helpCenter = helpCenterTopicCount?.let { it > 0 } == true,
 )
+
+internal fun messengerUsesDarkPalette(serverDarkEnabled: Boolean): Boolean = serverDarkEnabled
 
 /** Kept internal so framework bridges cannot gain a headless transcript or composer API. */
 internal class MessengerDialog(
@@ -1118,10 +1119,13 @@ internal class MessengerDialog(
     private fun applyAppearance() {
         if (!::root.isInitialized || !::header.isInitialized) return
         val appearance = client.mobileConfig?.value?.config?.appearance
-        val darkMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
-            Configuration.UI_MODE_NIGHT_YES && appearance?.dark?.enabled == true
+        val darkMode = messengerUsesDarkPalette(appearance?.dark?.enabled == true)
         val background = if (darkMode) appearance?.dark?.background else appearance?.light?.background
         root.setBackgroundColor(parseColor(background, if (darkMode) Color.BLACK else Color.WHITE))
+        val foreground = incomingTextColor()
+        status.setTextColor(foreground)
+        composer.setTextColor(foreground)
+        composer.setHintTextColor(Color.argb(160, Color.red(foreground), Color.green(foreground), Color.blue(foreground)))
         header.background = rounded(parseColor(appearance?.accent, Color.rgb(20, 89, 140)), 0)
         title.text = appearance?.botName?.ifBlank { "Support" } ?: "Support"
         headerSubtitle.text = appearance?.botSubtitle.orEmpty()
@@ -1155,29 +1159,25 @@ internal class MessengerDialog(
 
     private fun outgoingColor(): Int {
         val appearance = client.mobileConfig?.value?.config?.appearance
-        val darkMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
-            Configuration.UI_MODE_NIGHT_YES && appearance?.dark?.enabled == true
+        val darkMode = messengerUsesDarkPalette(appearance?.dark?.enabled == true)
         return parseColor(if (darkMode) appearance?.dark?.outgoing else appearance?.light?.outgoing, Color.rgb(20, 89, 140))
     }
 
     private fun outgoingTextColor(): Int {
         val appearance = client.mobileConfig?.value?.config?.appearance
-        val darkMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
-            Configuration.UI_MODE_NIGHT_YES && appearance?.dark?.enabled == true
+        val darkMode = messengerUsesDarkPalette(appearance?.dark?.enabled == true)
         return parseColor(if (darkMode) appearance?.dark?.outgoingText else appearance?.light?.outgoingText, Color.WHITE)
     }
 
     private fun incomingColor(): Int {
         val appearance = client.mobileConfig?.value?.config?.appearance
-        val darkMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
-            Configuration.UI_MODE_NIGHT_YES && appearance?.dark?.enabled == true
+        val darkMode = messengerUsesDarkPalette(appearance?.dark?.enabled == true)
         return parseColor(if (darkMode) appearance?.dark?.incoming else appearance?.light?.incoming, Color.rgb(239, 241, 243))
     }
 
     private fun incomingTextColor(): Int {
         val appearance = client.mobileConfig?.value?.config?.appearance
-        val darkMode = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
-            Configuration.UI_MODE_NIGHT_YES && appearance?.dark?.enabled == true
+        val darkMode = messengerUsesDarkPalette(appearance?.dark?.enabled == true)
         return parseColor(if (darkMode) appearance?.dark?.incomingText else appearance?.light?.incomingText, Color.rgb(25, 25, 25))
     }
 
