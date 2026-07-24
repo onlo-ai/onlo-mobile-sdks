@@ -1733,7 +1733,17 @@ public class OnloClient internal constructor(
     /** This job waits for any current session mutation before it starts network work. */
     private fun scheduleConfigRefresh(token: String, version: Long) {
         if (configController == null) return
-        scope.launch { refreshConfigWithSessionRecovery(token, version) }
+        scope.launch {
+            refreshConfigWithSessionRecovery(token, version)
+            val refreshed = operationMutex.withLock {
+                val protected = protectedSession
+                val session = inMemorySession
+                if (protected == null || session == null || protected.logoutPending ||
+                    state.value.phase !in setOf(OnloPhase.ANONYMOUS_READY, OnloPhase.IDENTIFIED_READY)
+                ) null else session.chatToken to configSessionVersion
+            } ?: return@launch
+            startForegroundStream(refreshed.first, refreshed.second)
+        }
     }
 
     private suspend fun refreshConfigWithSessionRecovery(token: String, version: Long) {

@@ -15,6 +15,7 @@ import ai.onlo.sdk.protocol.SessionResult
 import ai.onlo.sdk.config.MobileConfig
 import ai.onlo.sdk.config.MobileConfigCodec
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -62,6 +63,10 @@ internal sealed interface SseStreamResult {
 internal class OkHttpOnloTransport(
     private val client: OkHttpClient = OkHttpClient(),
 ) : OnloTransport, OnloSseTransport {
+    private val streamingClient = client.newBuilder()
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .build()
+
     override suspend fun execute(request: OnloHttpRequest): OnloHttpResponse = suspendCancellableCoroutine { continuation ->
         val call = client.newCall(
             Request.Builder()
@@ -92,7 +97,7 @@ internal class OkHttpOnloTransport(
     }
 
     override suspend fun stream(request: OnloHttpRequest, onLine: suspend (String) -> Unit): SseStreamResult = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-        val call = client.newCall(Request.Builder().url(request.url).headers(request.headers.toHeaders()).method(request.method, request.body).build())
+        val call = streamingClient.newCall(Request.Builder().url(request.url).headers(request.headers.toHeaders()).method(request.method, request.body).build())
         kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]?.invokeOnCompletion { if (it is kotlinx.coroutines.CancellationException) call.cancel() }
         call.execute().use { response ->
             if (response.code !in 200..299) {

@@ -12,6 +12,8 @@ import ai.onlo.sdk.OnloClient
 import ai.onlo.sdk.OnloPhase
 import ai.onlo.sdk.OnloException
 import ai.onlo.sdk.OpenConversationOutcome
+import ai.onlo.sdk.chat.HelpCenterTopic
+import ai.onlo.sdk.config.MobileConfig
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
@@ -243,6 +245,20 @@ internal fun conversationOpenDecision(
     )
 }
 
+internal data class MessengerSurfaceVisibility(
+    val faq: Boolean,
+    val helpCenter: Boolean,
+)
+
+internal fun messengerSurfaceVisibility(
+    faqEnabled: Boolean,
+    validFaqCount: Int,
+    helpCenterTopicCount: Int?,
+): MessengerSurfaceVisibility = MessengerSurfaceVisibility(
+    faq = faqEnabled && validFaqCount > 0,
+    helpCenter = helpCenterTopicCount?.let { it > 0 } == true,
+)
+
 /** Kept internal so framework bridges cannot gain a headless transcript or composer API. */
 internal class MessengerDialog(
     internal val activity: Activity,
@@ -273,7 +289,11 @@ internal class MessengerDialog(
     private lateinit var headerInitials: TextView
     private lateinit var headerName: TextView
     private lateinit var headerSubtitle: TextView
+    private lateinit var faqSurfaceButton: Button
+    private lateinit var helpCenterSurfaceButton: Button
     private var activeSurface = Surface.CONVERSATIONS
+    private var helpCenterTopics: List<HelpCenterTopic>? = null
+    private var helpCenterAvailabilityLoading = false
     private val streamedReplies = mutableMapOf<String, TextView>()
     private var showingEmptyState = false
     private var speechRecognizer: SpeechRecognizer? = null
@@ -319,6 +339,8 @@ internal class MessengerDialog(
                     applyAppearance()
                     updateVoiceControls()
                     updateAttachmentControl()
+                    updateSurfaceControls()
+                    refreshHelpCenterAvailability()
                 }
             }
         }
@@ -331,6 +353,8 @@ internal class MessengerDialog(
 
     fun showCurrentTarget() {
         if (!isShowing) show()
+        updateSurfaceControls()
+        refreshHelpCenterAvailability()
         when (val target = client.presentationTarget.value) {
             MessengerPresentationTarget.Inbox -> loadInbox()
             is MessengerPresentationTarget.Conversation -> loadConversation(target.conversationId)
@@ -414,21 +438,12 @@ internal class MessengerDialog(
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(8), dp(8), dp(8), 0)
         }
-        listOf(
-            "Conversations" to Surface.CONVERSATIONS,
-            "FAQ" to Surface.FAQ,
-            "Help Center" to Surface.HELP_CENTER,
-        ).forEach { (label, surface) ->
-            surfaces.addView(
-                Button(context).apply {
-                    text = label
-                    setAllCaps(false)
-                    contentDescription = "$label section"
-                    setOnClickListener { selectSurface(surface) }
-                },
-                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-            )
-        }
+        val conversationsSurfaceButton = surfaceButton("Conversations", Surface.CONVERSATIONS)
+        faqSurfaceButton = surfaceButton("FAQ", Surface.FAQ)
+        helpCenterSurfaceButton = surfaceButton("Help Center", Surface.HELP_CENTER)
+        surfaces.addView(conversationsSurfaceButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        surfaces.addView(faqSurfaceButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        surfaces.addView(helpCenterSurfaceButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(surfaces)
 
         status = TextView(context).apply {
@@ -493,7 +508,15 @@ internal class MessengerDialog(
         applyAppearance()
         updateVoiceControls()
         updateAttachmentControl()
+        updateSurfaceControls()
         return root
+    }
+
+    private fun surfaceButton(label: String, surface: Surface): Button = Button(context).apply {
+        text = label
+        setAllCaps(false)
+        contentDescription = "$label section"
+        setOnClickListener { selectSurface(surface) }
     }
 
     private fun loadInbox() {
@@ -669,6 +692,10 @@ internal class MessengerDialog(
     }
 
     private fun selectSurface(surface: Surface) {
+        val visibility = currentSurfaceVisibility()
+        if ((surface == Surface.FAQ && !visibility.faq) ||
+            (surface == Surface.HELP_CENTER && !visibility.helpCenter)
+        ) return
         if (surface != Surface.CONVERSATIONS) stopVoice()
         activeSurface = surface
         composerRow.visibility = if (surface == Surface.CONVERSATIONS) View.VISIBLE else View.GONE
@@ -684,19 +711,19 @@ internal class MessengerDialog(
         progress.visibility = View.GONE
         body.removeAllViews()
         hideStatus()
-        val config = client.mobileConfig?.value?.config
-        val faqs = if (config?.features?.faqButton?.enabled == true) {
-            config.content.faqs.filter { it.question.isNotBlank() && !it.answer.isNullOrBlank() }
-        } else {
-            emptyList()
-        }
+        val faqs = configuredFaqs()
         if (faqs.isEmpty()) {
-            body.addView(label("No FAQs are available yet."))
+            loadInbox()
             return
         }
         faqs.forEach { faq ->
             body.addView(
-                label("${faq.question}\n\n${faq.answer.orEmpty()}"),
+                Button(context).apply {
+                    text = faq.question
+                    setAllCaps(false)
+                    contentDescription = faq.question
+                    setOnClickListener { renderFaqAnswer(faq) }
+                },
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -705,13 +732,28 @@ internal class MessengerDialog(
         }
     }
 
+    private fun renderFaqAnswer(faq: MobileConfig.Faq) {
+        body.removeAllViews()
+        body.addView(backButton("FAQ") { renderFaqs() })
+        body.addView(label(faq.question))
+        body.addView(label(faq.answer.orEmpty()))
+    }
+
     private fun loadHelpCenter() {
+        helpCenterTopics?.let {
+            if (it.isEmpty()) loadInbox() else renderHelpTopics(it)
+            return
+        }
         renderLoading("Loading Help Center")
         uiScope.launch {
             val result = client.loadMessengerHelpCenter()
             if (activeSurface != Surface.HELP_CENTER) return@launch
             when (result) {
-                is MessengerHelpCenterResult.Ready -> renderHelpTopics(result.topics)
+                is MessengerHelpCenterResult.Ready -> {
+                    helpCenterTopics = result.topics
+                    updateSurfaceControls()
+                    if (result.topics.isEmpty()) loadInbox() else renderHelpTopics(result.topics)
+                }
                 MessengerHelpCenterResult.NoActiveSession -> renderUnavailable("Session changed. Reopen support to continue.")
                 MessengerHelpCenterResult.Unavailable -> renderUnavailable("Help Center is temporarily unavailable.")
             }
@@ -739,6 +781,48 @@ internal class MessengerDialog(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                 ).apply { bottomMargin = dp(8) },
             )
+        }
+    }
+
+    private fun configuredFaqs(): List<MobileConfig.Faq> {
+        val config = client.mobileConfig?.value?.config ?: return emptyList()
+        if (!config.features.faqButton.enabled) return emptyList()
+        return config.content.faqs.filter { it.question.isNotBlank() && !it.answer.isNullOrBlank() }
+    }
+
+    private fun currentSurfaceVisibility(): MessengerSurfaceVisibility {
+        val config = client.mobileConfig?.value?.config
+        return messengerSurfaceVisibility(
+            faqEnabled = config?.features?.faqButton?.enabled == true,
+            validFaqCount = configuredFaqs().size,
+            helpCenterTopicCount = helpCenterTopics?.size,
+        )
+    }
+
+    private fun updateSurfaceControls() {
+        if (!::faqSurfaceButton.isInitialized || !::helpCenterSurfaceButton.isInitialized) return
+        val visibility = currentSurfaceVisibility()
+        faqSurfaceButton.visibility = if (visibility.faq) View.VISIBLE else View.GONE
+        helpCenterSurfaceButton.visibility = if (visibility.helpCenter) View.VISIBLE else View.GONE
+        if ((activeSurface == Surface.FAQ && !visibility.faq) ||
+            (activeSurface == Surface.HELP_CENTER && helpCenterTopics != null && !visibility.helpCenter)
+        ) {
+            loadInbox()
+        }
+    }
+
+    private fun refreshHelpCenterAvailability() {
+        if (helpCenterAvailabilityLoading) return
+        helpCenterAvailabilityLoading = true
+        uiScope.launch {
+            when (val result = client.loadMessengerHelpCenter()) {
+                is MessengerHelpCenterResult.Ready -> helpCenterTopics = result.topics
+                MessengerHelpCenterResult.NoActiveSession,
+                MessengerHelpCenterResult.Unavailable,
+                -> Unit
+            }
+            helpCenterAvailabilityLoading = false
+            updateSurfaceControls()
         }
     }
 

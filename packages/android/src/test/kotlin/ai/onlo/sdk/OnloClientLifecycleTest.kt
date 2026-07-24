@@ -370,8 +370,32 @@ class OnloClientLifecycleTest {
             logger = SafeLogger { _: SafeLogEvent -> }, scope = CoroutineScope(Dispatchers.Unconfined),
         )
         client.loginUnidentifiedUser()
-        client.onAppForeground()
         assertEquals(listOf("Bearer synthetic-chat-token-2"), transport.streamAuthorizations)
+    }
+
+    @Test
+    fun `identification starts replacement foreground stream without lifecycle wake`() = runBlocking {
+        val transport = IdentityForegroundTransport()
+        val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
+        val controller = MobileConfigController(OnloConfigApi(transport, requests), ConfigMemoryStore())
+        val client = OnloClient(
+            configuration = OnloConfiguration("public-sdk-key", "ai.onlo.fixture"),
+            credentialStore = FakeCredentials(),
+            outboxStore = FakeOutbox(),
+            sessionApi = OnloSessionApi(transport, requests),
+            configController = controller,
+            foregroundStream = ForegroundStream(transport, requests),
+            logger = SafeLogger { _: SafeLogEvent -> },
+            scope = CoroutineScope(Dispatchers.Unconfined),
+        )
+
+        client.loginUnidentifiedUser()
+        client.loginIdentifiedUser("header.synthetic.signature")
+
+        assertEquals(
+            listOf("Bearer synthetic-chat-token-1", "Bearer synthetic-chat-token-2"),
+            transport.streamAuthorizations,
+        )
     }
 
     @Test
@@ -1164,6 +1188,39 @@ class OnloClientLifecycleTest {
         }
 
         override suspend fun stream(request: OnloHttpRequest, onLine: suspend (String) -> Unit): SseStreamResult {
+            streamAuthorizations += checkNotNull(request.headers["Authorization"])
+            return SseStreamResult.Success(200)
+        }
+    }
+
+    private class IdentityForegroundTransport : OnloTransport, OnloSseTransport {
+        var sessionCalls = 0
+        val streamAuthorizations = mutableListOf<String>()
+
+        override suspend fun execute(request: OnloHttpRequest): OnloHttpResponse {
+            if (request.url.encodedPath.endsWith("/config")) {
+                return OnloHttpResponse(
+                    503,
+                    emptyMap(),
+                    """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":false,"error":{"code":"config_unavailable","message":"synthetic","retry":{"directive":"never"}}}""",
+                )
+            }
+            sessionCalls += 1
+            val body = request.body?.let { Buffer().also(it::writeTo).readUtf8() }.orEmpty()
+            val operation = org.json.JSONObject(body).getJSONObject("operation")
+            val proposed = operation.getString("proposedCredential")
+            val identity = if (operation.getString("type") == "identify") "identified" else "anonymous"
+            return OnloHttpResponse(
+                200,
+                emptyMap(),
+                """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"synthetic-session-$sessionCalls","chatToken":"synthetic-chat-token-$sessionCalls","installationId":"00000000-0000-0000-0000-000000000001","generation":$sessionCalls,"proposedCredential":"$proposed","identityClass":"$identity","publicationState":"testing","attestationState":"not_required","configRevision":"fixture","configSchemaVersion":1,"configEtag":"fixture"}}""",
+            )
+        }
+
+        override suspend fun stream(
+            request: OnloHttpRequest,
+            onLine: suspend (String) -> Unit,
+        ): SseStreamResult {
             streamAuthorizations += checkNotNull(request.headers["Authorization"])
             return SseStreamResult.Success(200)
         }

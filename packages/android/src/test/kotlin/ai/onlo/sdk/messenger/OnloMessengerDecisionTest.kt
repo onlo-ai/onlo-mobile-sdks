@@ -39,4 +39,32 @@ class OnloMessengerDecisionTest {
         assertFalse(decision.attachMessenger)
         assertTrue(decision.clearPendingPresentation)
     }
+
+    @Test
+    fun `empty or unknown optional surfaces stay hidden`() {
+        assertEquals(
+            MessengerSurfaceVisibility(faq = false, helpCenter = false),
+            messengerSurfaceVisibility(
+                faqEnabled = true,
+                validFaqCount = 0,
+                helpCenterTopicCount = null,
+            ),
+        )
+        assertEquals(
+            MessengerSurfaceVisibility(faq = true, helpCenter = false),
+            messengerSurfaceVisibility(
+                faqEnabled = true,
+                validFaqCount = 1,
+                helpCenterTopicCount = 0,
+            ),
+        )
+        assertEquals(
+            MessengerSurfaceVisibility(faq = true, helpCenter = true),
+            messengerSurfaceVisibility(
+                faqEnabled = true,
+                validFaqCount = 1,
+                helpCenterTopicCount = 1,
+            ),
+        )
+    }
 }
