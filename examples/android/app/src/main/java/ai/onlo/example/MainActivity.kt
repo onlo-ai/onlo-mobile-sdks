@@ -32,6 +32,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var supportButton: Button
     private lateinit var status: TextView
     private lateinit var loginCode: EditText
+    private var hostOperationError: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,22 +60,44 @@ class MainActivity : AppCompatActivity() {
         val publicSdkKey = BuildConfig.ONLO_SDK_KEY.takeIf(String::isNotBlank) ?: return
         val client = initializeOnlo(publicSdkKey)
         anonymousButton.setOnClickListener {
-            lifecycleScope.launch { client.loginUnidentifiedUser() }
+            lifecycleScope.launch {
+                hostOperationError = null
+                try {
+                    client.loginUnidentifiedUser()
+                } catch (_: Exception) {
+                    hostOperationError = "Anonymous support is unavailable"
+                    status.text = hostOperationError
+                }
+            }
         }
         identifiedButton.setOnClickListener {
-            lifecycleScope.launch { identifyFromOperatorBackend(loginCode.text.toString()) }
+            lifecycleScope.launch {
+                hostOperationError = null
+                try {
+                    identifyFromOperatorBackend(loginCode.text.toString())
+                } catch (_: Exception) {
+                    hostOperationError = "Identified support is unavailable"
+                    status.text = hostOperationError
+                }
+            }
         }
         logoutButton.setOnClickListener {
             lifecycleScope.launch {
-                client.logout()
-                loginCode.text.clear()
+                hostOperationError = null
+                try {
+                    client.logout()
+                    loginCode.text.clear()
+                } catch (_: Exception) {
+                    hostOperationError = "Support logout is pending"
+                    status.text = hostOperationError
+                }
             }
         }
         lifecycleScope.launch {
             client.state.collectLatest { state ->
                 supportButton.isEnabled = state.phase == OnloPhase.ANONYMOUS_READY ||
                     state.phase == OnloPhase.IDENTIFIED_READY
-                status.text = "Native state: ${state.phase.name.lowercase()}"
+                status.text = hostOperationError ?: "Native state: ${state.phase.name.lowercase()}"
             }
         }
         forwardIntent(intent)
