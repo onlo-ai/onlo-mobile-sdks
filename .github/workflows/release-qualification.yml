@@ -20,6 +20,7 @@ jobs:
       - run: npm run test:conformance
       - run: npm run test:hygiene
       - run: npm run check:hygiene
+      - run: npm run check:versions
       - run: npm --prefix packages/react-native test
       - name: Validate React Native package contents
         run: npm pack --dry-run --json
@@ -39,7 +40,7 @@ jobs:
       - run: packages/android/gradlew -p packages/android testDebugUnitTest assembleRelease
       - name: Validate Maven Central publication bundle locally
         run: packages/android/gradlew -p packages/android publishReleasePublicationToQualificationRepository -Ponlo.maven.repository=${{ runner.temp }}/onlo-maven
-      - run: packages/android/gradlew -p examples/android :app:assembleRelease -Ponlo.release.version=0.1.0
+      - run: packages/android/gradlew -p examples/android :app:assembleRelease
 
   ios:
     runs-on: macos-15

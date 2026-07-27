@@ -3,7 +3,8 @@
 Add native Onlo support to an iOS 15+ app with one lifecycle:
 **initialize → login → present → logout**.
 
-> **Status:** RC ready; publication pending physical-device qualification.
+> **Status:** Public SDK. Run the complete release qualification before each
+> version is published.
 
 ## What the four calls do
 
@@ -28,16 +29,16 @@ Expected result: `import OnloSDK` builds in the merchant app.
 
 ### Public installation
 
-After Onlo publishes the `0.1.0` repository tag, select **Add Package
+After Onlo publishes the `0.2.0` repository tag, select **Add Package
 Dependencies**, enter `https://github.com/onlo-ai/onlo-mobile-sdks`, and
-choose exact version `0.1.0`.
+choose exact version `0.2.0`.
 
 For a manifest-based host:
 
 ```swift
 .package(
     url: "https://github.com/onlo-ai/onlo-mobile-sdks.git",
-    exact: "0.1.0"
+    exact: "0.2.0"
 )
 ```
 
@@ -46,7 +47,7 @@ Add the `OnloSDK` product once.
 For CocoaPods:
 
 ```ruby
-pod 'OnloSDK', '0.1.0'
+pod 'OnloSDK', '0.2.0'
 ```
 
 Run `pod install`, then open the generated workspace. Use SwiftPM or CocoaPods

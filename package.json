@@ -1,6 +1,6 @@
 {
   "name": "onlo-mobile-sdks",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Onlo native mobile SDK workspace and protocol conformance contracts.",
   "packageManager": "npm@10.9.2",
@@ -9,6 +9,8 @@
   ],
   "scripts": {
     "start": "npm --prefix examples/merchant-backend start",
+    "generate:version": "node scripts/generate-sdk-version.mjs",
+    "check:versions": "node scripts/generate-sdk-version.mjs --check && node scripts/check-versions.mjs",
     "check:hygiene": "node scripts/check-hygiene.mjs",
     "test:conformance": "node --test conformance/test/manifest.test.mjs",
     "test:hygiene": "node --test scripts/check-hygiene.test.mjs",

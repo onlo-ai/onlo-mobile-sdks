@@ -13,7 +13,17 @@ plugins {
 }
 
 group = providers.gradleProperty("onlo.maven.group").getOrElse("ai.onlo")
-version = providers.gradleProperty("onlo.release.version").getOrElse("0.1.0")
+val canonicalVersionFile = project.file("../../VERSION")
+require(canonicalVersionFile.isFile) { "Missing canonical VERSION file" }
+val canonicalVersion = canonicalVersionFile.readText().trim()
+val onloReleaseVersion = providers.gradleProperty("onlo.release.version").getOrElse(canonicalVersion)
+require(Regex("[0-9]+\\.[0-9]+\\.[0-9]+").matches(onloReleaseVersion)) {
+    "onlo.release.version must be a semantic version"
+}
+require(onloReleaseVersion == canonicalVersion) {
+    "onlo.release.version must match the canonical VERSION file"
+}
+version = onloReleaseVersion
 
 extensions.configure<LibraryExtension> {
     namespace = "ai.onlo.sdk"
@@ -24,10 +34,11 @@ extensions.configure<LibraryExtension> {
         minSdk = 24
         consumerProguardFiles("consumer-rules.pro")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "ONLO_SDK_VERSION", "\"$onloReleaseVersion\"")
     }
 
     buildFeatures {
-        buildConfig = false
+        buildConfig = true
     }
 
     compileOptions {

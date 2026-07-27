@@ -1,5 +1,11 @@
+def packageVersionMatch = file('../pubspec.yaml').getText('UTF-8') =~ /(?m)^version:\s*([0-9]+\.[0-9]+\.[0-9]+)\s*$/
+if (!packageVersionMatch.find()) {
+    throw new GradleException('pubspec.yaml version must be semantic')
+}
+def packageVersion = packageVersionMatch.group(1)
+
 group 'ai.onlo.flutter'
-version '0.1.0'
+version packageVersion
 
 buildscript {
     repositories {
@@ -44,7 +50,10 @@ dependencies {
     } else {
         def coreGroup = providers.gradleProperty('onlo.android.group').getOrElse('ai.onlo')
         def coreArtifact = providers.gradleProperty('onlo.android.artifact').getOrElse('onlo-android-sdk')
-        def coreVersion = providers.gradleProperty('onlo.android.version').getOrElse('0.1.0')
+        def coreVersion = providers.gradleProperty('onlo.android.version').getOrElse(packageVersion)
+        if (coreVersion != packageVersion) {
+            throw new GradleException('onlo.android.version must match pubspec.yaml')
+        }
         implementation "${coreGroup}:${coreArtifact}:${coreVersion}"
     }
 }

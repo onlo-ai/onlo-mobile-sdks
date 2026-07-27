@@ -179,24 +179,28 @@ Use this guide to make safe, reviewable changes to the client-only mobile SDK wo
 
 ## Publishing and deployment
 
-This repository is a monorepo, but each SDK has an independent release artifact and version. Publishing and deployment are intentionally disabled today: no publish script, registry credentials, release tag, deployment command, or GitHub automation may be run without explicit approval.
+This repository is a monorepo with independently published artifacts that use
+one coordinated semantic version. `VERSION` is authoritative; Gradle generates
+Android runtime metadata and `npm run generate:version` generates the checked
+Swift runtime constant. Registry manifests are checked against the same version
+before qualification or publication. No publish, tag, or deployment command
+may be run without explicit approval.
 
 | SDK | Intended artifact | Version location | Current release state |
 | --- | --- | --- | --- |
-| iOS | Swift Package and/or CocoaPod | `packages/ios/Package.swift` | Local Swift Package only; distribution packaging and Xcode/device evidence remain required. |
-| Android | Maven/AAR | `packages/android/build.gradle.kts` | Local Gradle library only; Maven publishing configuration and Android test evidence remain required. |
-| React Native | npm `@onlo-ai/react-native` | `packages/react-native/package.json` | Public package metadata is prepared; publish native dependencies before the wrapper. |
-| Flutter | pub.dev `onlo_flutter` | `packages/flutter/pubspec.yaml` | `publish_to: none`; local native sibling links must be replaced with distributable dependencies before publication. |
+| iOS | Swift Package and CocoaPod | `VERSION`, generated into `SDKVersion.swift` | Distribution packaging and Xcode/device evidence remain required. |
+| Android | Maven/AAR | `VERSION`, injected as `BuildConfig.ONLO_SDK_VERSION` by Gradle | Maven and Android evidence remain required. |
+| React Native | npm `@onlo-ai/react-native` | `packages/react-native/package.json`, checked against `VERSION` | Publish compatible native dependencies before the wrapper. |
+| Flutter | pub.dev `onlo_flutter` | `packages/flutter/pubspec.yaml`, checked against `VERSION` | Publish compatible native dependencies before the wrapper. |
 
 1. Inspect package versions without changing them.
 
    ```bash
-   node -p "require('./packages/react-native/package.json').version"
-   rg -n '^version:' packages/flutter/pubspec.yaml
-   rg -n 'version|publishing' packages/android/build.gradle.kts packages/ios/Package.swift
+   cat VERSION
+   npm run check:versions
    ```
 
-   Expected result: the intended version source and any missing release configuration are visible before a release plan is proposed.
+   Expected result: every artifact manifest and generated native runtime version agrees with `VERSION`.
 
 2. Complete package-specific release prerequisites before requesting approval.
 

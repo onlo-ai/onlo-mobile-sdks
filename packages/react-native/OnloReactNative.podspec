@@ -1,6 +1,12 @@
+require 'json'
+
+package = JSON.parse(File.read(File.join(__dir__, 'package.json')))
+package_version = package.fetch('version')
+raise 'package.json version must be semantic' unless package_version.match?(/\A[0-9]+\.[0-9]+\.[0-9]+\z/)
+
 Pod::Spec.new do |s|
   s.name             = 'OnloReactNative'
-  s.version          = '0.1.0'
+  s.version          = package_version
   s.summary          = 'React Native bridge for the Onlo native mobile SDKs.'
   s.description      = <<-DESC
 Typed React Native bridge that delegates protected state, transport, durable
@@ -20,5 +26,5 @@ delivery, and messenger presentation to the Onlo native SDK for the host OS.
 
   s.source_files = 'ios/Sources/**/*.{h,m,mm,swift}'
   s.dependency 'React-Core'
-  s.dependency 'OnloSDK', '0.1.0'
+  s.dependency 'OnloSDK', package_version
 end

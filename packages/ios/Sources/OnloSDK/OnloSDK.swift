@@ -78,7 +78,7 @@ public actor OnloSDK {
             sdkKey: String,
             appIdentifier: String,
             apiBaseURL: URL,
-            sdkVersion: String = "0.1.0",
+            sdkVersion: String = OnloSDKVersion.current,
             appVersion: String? = nil,
             appBuild: String? = nil,
             capabilities: [String] = [],

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const podspec = await readFile(new URL('../OnloReactNative.podspec', import.meta.url), 'utf8');
+const packageManifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 const swift = await readFile(new URL('../ios/Sources/OnloReactNativeIOSBridge.swift', import.meta.url), 'utf8');
 const module = await readFile(new URL('../ios/Sources/OnloSDKModule.mm', import.meta.url), 'utf8');
 const config = await readFile(new URL('../react-native.config.js', import.meta.url), 'utf8');
@@ -27,7 +28,10 @@ test('iOS adapter delegates the public RN surface to one native OnloSDK core', (
 
 test('iOS adapter is a local autolinked pod with no parallel persistence, network, or content state', () => {
   assert.match(config, /ios: \{\}/);
-  assert.match(podspec, /s\.dependency 'OnloSDK', '0\.1\.0'/);
+  assert.match(podspec, /package_version = package\.fetch\('version'\)/);
+  assert.match(podspec, /s\.version\s*= package_version/);
+  assert.match(podspec, /s\.dependency 'OnloSDK', package_version/);
+  assert.match(packageManifest.version, /^[0-9]+\.[0-9]+\.[0-9]+$/);
   assert.match(swift, /import OnloSDK/);
   assert.doesNotMatch(podspec, /Sources\/OnloSDK\/\*\*/);
   assert.doesNotMatch(swift, /UserDefaults|AsyncStorage|URLSession|SQLite|chatToken|clientMessageId|message\.text|print\(|NSLog/);

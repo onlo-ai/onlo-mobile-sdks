@@ -1,6 +1,10 @@
+pubspec = File.read(File.join(__dir__, '..', 'pubspec.yaml'))
+package_version = pubspec[/^version:\s*([0-9]+\.[0-9]+\.[0-9]+)\s*$/, 1]
+raise 'pubspec.yaml version must be semantic' unless package_version
+
 Pod::Spec.new do |s|
   s.name             = 'onlo_flutter'
-  s.version          = '0.1.0'
+  s.version          = package_version
   s.summary          = 'Flutter bridge for the Onlo native mobile SDKs.'
   s.description      = <<-DESC
 Typed Flutter bridge that delegates protected state, transport, durable
@@ -17,5 +21,5 @@ delivery, and messenger presentation to the Onlo native SDK for the host OS.
 
   s.source_files = 'Classes/**/*.{swift,h,m}'
   s.dependency 'Flutter'
-  s.dependency 'OnloSDK', '0.1.0'
+  s.dependency 'OnloSDK', package_version
 end

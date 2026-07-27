@@ -2,8 +2,8 @@
 
 Typed Flutter facade over the iOS and Android Onlo native cores. Dart owns no session, credential, transcript, outbox, push registry, transport, or messenger UI state.
 
-> **Status:** RC ready; publication pending native publication and
-> physical-device qualification.
+> **Status:** Public SDK. Run the complete release qualification before each
+> version is published.
 
 ## Install
 
@@ -19,16 +19,15 @@ Requirements:
 
 ```yaml
 dependencies:
-  onlo_flutter: 0.1.0
+  onlo_flutter: 0.2.0
 ```
 
 Run `flutter pub get`, then build the host normally. The plugin resolves
-`OnloSDK` 0.1.0 through CocoaPods on iOS and
-`ai.onlo:onlo-android-sdk:0.1.0` through Maven Central on Android. Do not add a
+`OnloSDK` 0.2.0 through CocoaPods on iOS and
+`ai.onlo:onlo-android-sdk:0.2.0` through Maven Central on Android. Do not add a
 second native Core manually.
 
-The package is prepared but not published. Installation succeeds only after
-the native iOS/Android artifacts and then the pub.dev package are released.
+The native iOS and Android artifacts are published before the pub.dev wrapper.
 
 ## Typed surface
 

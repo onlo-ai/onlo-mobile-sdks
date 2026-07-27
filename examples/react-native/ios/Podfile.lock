@@ -3,10 +3,10 @@ PODS:
   - hermes-engine (250829098.0.14):
     - hermes-engine/Pre-built (= 250829098.0.14)
   - hermes-engine/Pre-built (250829098.0.14)
-  - OnloReactNative (0.1.0):
-    - OnloSDK (= 0.1.0)
+  - OnloReactNative (0.2.0):
+    - OnloSDK (= 0.2.0)
     - React-Core
-  - OnloSDK (0.1.0)
+  - OnloSDK (0.2.0)
   - RCTDeprecation (0.86.0)
   - RCTRequired (0.86.0)
   - RCTSwiftUI (0.86.0)
@@ -2069,8 +2069,8 @@ EXTERNAL SOURCES:
 SPEC CHECKSUMS:
   FBLazyVector: b3e7ad108f0d882e30445c5527d774e3fd432f3d
   hermes-engine: f2d9010f637b2ab18528bc89d4d6de3157cbe5ef
-  OnloReactNative: cb4e8a8cfeaa216687f174ca8f1e5503a3c43ccc
-  OnloSDK: 2e26a4a79a6175e8e5b3f62b22d742f7a579ccb2
+  OnloReactNative: 8cebcfcf576a9431766b869c1b132b9606d5bf2b
+  OnloSDK: 7929f611aae2bbee0c36af2fa9cbae80c82f13e0
   RCTDeprecation: 2a74a2c57675e64419bd89078efde81f7c1de90b
   RCTRequired: 30451112e6fef4e6f31b4e7eee0845156e35e4b0
   RCTSwiftUI: 5aaf0b07e747ba749dc6acc94d8bd41eea4b570f

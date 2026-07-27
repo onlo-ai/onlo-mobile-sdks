@@ -74,7 +74,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
-internal const val SDK_VERSION: String = "0.1.0"
+internal val SDK_VERSION: String = BuildConfig.ONLO_SDK_VERSION
 
 internal data class OnloConfiguration(
     val sdkKey: String,

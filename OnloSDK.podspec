@@ -1,6 +1,9 @@
+onlo_sdk_version = File.read(File.join(__dir__, 'VERSION')).strip
+raise 'VERSION must contain one semantic version' unless onlo_sdk_version.match?(/\A[0-9]+\.[0-9]+\.[0-9]+\z/)
+
 Pod::Spec.new do |s|
   s.name             = 'OnloSDK'
-  s.version          = '0.1.0'
+  s.version          = onlo_sdk_version
   s.summary          = 'Native Onlo support messenger for iOS.'
   s.description      = <<-DESC
 The single native iOS Core used by native, React Native, and Flutter hosts.

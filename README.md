@@ -7,10 +7,10 @@ This is the client-only workspace for Onlo’s native mobile messenger. It reuse
 | Area | Role | Current state |
 | --- | --- | --- |
 | `packages/protocol` | Versioned client/server types and fixtures | v1 route types, redacted fixtures, and lifecycle scenarios are in place |
-| `packages/ios` | Native Swift SDK | RC ready; publication pending physical-device qualification and external CocoaPods/SwiftPM release actions. |
-| `packages/android` | Native Kotlin SDK | RC ready; publication pending physical-device qualification and Maven Central ownership/signing. |
-| `packages/react-native` | `@onlo-ai/react-native` package | RC ready; publication pending the native artifacts, physical-device qualification, and npm ownership. |
-| `packages/flutter` | `onlo_flutter` package | RC ready; publication pending the native artifacts, physical-device qualification, and pub.dev ownership. |
+| `packages/ios` | Native Swift SDK | Public SwiftPM/CocoaPods package; current source version is `0.2.0`. |
+| `packages/android` | Native Kotlin SDK | Public Maven Central package; current source version is `0.2.0`. |
+| `packages/react-native` | `@onlo-ai/react-native` package | Public npm package over the native cores; current source version is `0.2.0`. |
+| `packages/flutter` | `onlo_flutter` package | Public pub.dev package over the native cores; current source version is `0.2.0`. |
 | `sdk/react-native` | Legacy prototype migration reference | Excluded from root workspaces and never a supported runtime fallback. |
 | `conformance` | Cross-client lifecycle and protocol checks | Redacted v1 fixtures and lifecycle scenarios; platform runners pending |
 | `examples` | Host-app integration samples | Merchant-facing Android, iOS, React Native, and Flutter examples, plus a separate SDK-team-only synthetic merchant-backend simulator. |
@@ -18,21 +18,27 @@ This is the client-only workspace for Onlo’s native mobile messenger. It reuse
 > The complete v1 contract is [canonical](docs/api-contract.md). Local
 > implementation uses redacted fixtures and synthetic test data.
 
-This status is release-candidate evidence, not publication or physical-device
-certification.
+Public distribution does not replace the platform qualification and device
+evidence required for each release.
 
 ## Publication identities
 
 | Surface | Versioned identity | Distribution |
 | --- | --- | --- |
-| iOS | `OnloSDK` `0.1.0` | SwiftPM repository tag and CocoaPods |
-| Android | `ai.onlo:onlo-android-sdk:0.1.0` | Maven Central |
-| React Native | `@onlo-ai/react-native@0.1.0` | npm |
-| Flutter | `onlo_flutter 0.1.0` | pub.dev |
+| iOS | `OnloSDK` `0.2.0` | SwiftPM repository tag and CocoaPods |
+| Android | `ai.onlo:onlo-android-sdk:0.2.0` | Maven Central |
+| React Native | `@onlo-ai/react-native@0.2.0` | npm |
+| Flutter | `onlo_flutter 0.2.0` | pub.dev |
 
-All four are RC ready; publication remains pending physical-device
-qualification and the external ownership/signing actions recorded in the
+All four use the same coordinated release version. Historical `0.1.0`
+qualification evidence remains in the
 [release manifest](docs/release-conformance-0.1.0.md).
+
+[`VERSION`](VERSION) is the canonical release version. Gradle generates the
+Android runtime value from it; `npm run generate:version` generates the Swift
+runtime constant because SwiftPM does not expose the package tag to source.
+CocoaPods and registry manifests read or are checked against the same version;
+`npm run check:versions` rejects drift.
 
 ## Prerequisites
 

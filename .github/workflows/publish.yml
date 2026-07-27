@@ -3,17 +3,17 @@ name: Publish mobile SDKs
 on:
   push:
     tags:
-      - "sdk-v*"
+      - "[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
     inputs:
       release_ref:
         description: Existing tag or commit to publish
         required: true
-        default: react-native-v0.1.0
+        default: 0.2.0
       version:
         description: Exact package version at release_ref
         required: true
-        default: 0.1.0
+        default: 0.2.0
       publish_flutter:
         description: Publish Flutter (first pub.dev release must be manual)
         required: true
@@ -46,7 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$EVENT_NAME" == "push" ]]; then
-            version="${TAG_NAME#sdk-v}"
+            version="$TAG_NAME"
             release_ref="$TAG_NAME"
             publish_flutter="true"
           else
@@ -73,26 +73,7 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-          node <<'NODE'
-          const fs = require("fs");
-          const expected = process.env.VERSION;
-          const rn = JSON.parse(fs.readFileSync("packages/react-native/package.json", "utf8"));
-          if (rn.name !== "@onlo-ai/react-native" || rn.version !== expected) {
-            throw new Error(`React Native identity mismatch: ${rn.name}@${rn.version}`);
-          }
-          const flutter = fs.readFileSync("packages/flutter/pubspec.yaml", "utf8");
-          if (!new RegExp(`^version: ${expected.replaceAll(".", "\\.")}$`, "m").test(flutter)) {
-            throw new Error(`Flutter version does not match ${expected}`);
-          }
-          const podspec = fs.readFileSync("OnloSDK.podspec", "utf8");
-          if (!new RegExp(`s\\.version\\s*=\\s*['"]${expected.replaceAll(".", "\\.")}['"]`).test(podspec)) {
-            throw new Error(`CocoaPods version does not match ${expected}`);
-          }
-          const android = fs.readFileSync("packages/android/build.gradle.kts", "utf8");
-          if (!android.includes(`getOrElse("${expected}")`)) {
-            throw new Error(`Android version does not match ${expected}`);
-          }
-          NODE
+          npm run check:versions -- --expected "$VERSION"
           git ls-remote --exit-code origin "refs/tags/$VERSION"
 
   publish-ios:
@@ -320,14 +301,27 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.release_ref }}
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.preflight.outputs.release_ref }}
           VERSION: ${{ needs.preflight.outputs.version }}
         run: |
+          set -euo pipefail
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          awk -v heading="## $VERSION" '
+            $0 == heading { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > "$notes_file"
+          test -s "$notes_file"
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --title "Onlo Mobile SDKs $VERSION" \
-              --generate-notes
+              --notes-file "$notes_file"

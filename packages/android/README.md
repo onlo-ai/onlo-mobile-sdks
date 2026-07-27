@@ -2,7 +2,8 @@
 
 Kotlin native-core foundation for the Onlo mobile v1 contract. It owns protected session state and the owner-scoped SQLite outbox; framework bridges must not duplicate either.
 
-> **Status:** RC ready; publication pending physical-device qualification.
+> **Status:** Public SDK. Run the complete release qualification before each
+> version is published.
 
 ## Install
 
@@ -24,12 +25,11 @@ repositories {
 }
 
 dependencies {
-    implementation("ai.onlo:onlo-android-sdk:0.1.0")
+    implementation("ai.onlo:onlo-android-sdk:0.2.0")
 }
 ```
 
-The artifact is prepared but not published. The dependency resolves only after
-physical-device qualification and Maven Central release.
+The dependency resolves from Maven Central.
 
 ## Public entry points
 
@@ -231,6 +231,5 @@ packages/android/gradlew -p packages/android \
   -Ponlo.maven.repository=/tmp/onlo-maven
 ```
 
-The release coordinate is `ai.onlo:onlo-android-sdk:0.1.0`. Maven Central
-namespace ownership, publisher credentials, and artifact signing remain
-external release inputs.
+The release coordinate is `ai.onlo:onlo-android-sdk:0.2.0`. Maven Central
+publisher credentials and artifact signing remain protected release inputs.

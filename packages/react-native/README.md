@@ -2,25 +2,24 @@
 
 Typed React Native facade over the iOS and Android Onlo native cores. JavaScript owns no session, credential, transcript, outbox, push registry, transport, or messenger UI state.
 
-> **Status:** RC ready; publication pending native publication and
-> physical-device qualification.
+> **Status:** Public SDK. Run the complete release qualification before each
+> version is published.
 
 The typed native-event API requires React Native 0.79 or newer.
 
 ## Install
 
 ```bash
-npm install @onlo-ai/react-native@0.1.0
+npm install @onlo-ai/react-native@0.2.0
 cd ios && pod install
 ```
 
-The npm package resolves `OnloSDK` 0.1.0 through CocoaPods on iOS and
-`ai.onlo:onlo-android-sdk:0.1.0` through Maven Central on Android. Do not add a
+The npm package resolves `OnloSDK` 0.2.0 through CocoaPods on iOS and
+`ai.onlo:onlo-android-sdk:0.2.0` through Maven Central on Android. Do not add a
 second native Core manually. Expo Go cannot load this native module; use a
 development or release build.
 
-The package is prepared but not published. Installation succeeds only after
-the native iOS/Android artifacts and then the npm package are released.
+The native iOS and Android artifacts are published before the npm wrapper.
 
 ## Typed surface
 

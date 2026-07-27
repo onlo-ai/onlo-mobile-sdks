@@ -1,7 +1,14 @@
 # Changelog
 
+## 0.2.0
+
+- Added contained and full-screen Messenger presentation options and native
+  back navigation.
+- Fixed Messenger layout, safe areas, branding, typing indicators, cached
+  conversations, loading states, and message alignment.
+
 ## 0.1.0
 
-- Initial release candidate of `ai.onlo:onlo-android-sdk`.
+- Initial public release of `ai.onlo:onlo-android-sdk`.
 - Includes the native messenger, protected identity/session state, durable
   outbox, configuration, media, push, and lifecycle recovery.

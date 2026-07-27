@@ -60,7 +60,7 @@ packages:
       path: "../../packages/flutter"
       relative: true
     source: path
-    version: "0.1.0"
+    version: "0.2.0"
   plugin_platform_interface:
     dependency: transitive
     description:
