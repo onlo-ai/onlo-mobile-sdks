@@ -159,7 +159,9 @@ private final class LocalE2EModel: ObservableObject {
             sessionMode = .identified
             supportConfiguration = LocalSupportConfiguration(
                 sdkKey: result.sdkKey,
-                onloDevelopmentOrigin: result.onloDevelopmentOrigin
+                onloDevelopmentOrigin: LocalSupportConfiguration.usesDevelopmentOrigin
+                    ? result.onloDevelopmentOrigin
+                    : nil
             )
             status = "Signed in. Preparing Support"
             await prepareSupport(userJwt: result.userJwt)
@@ -196,7 +198,7 @@ private final class LocalE2EModel: ObservableObject {
         isSupportReady = false
         E2ESafeDiagnostics.record(operation: "sdk_initialize", code: "started")
         do {
-            try await initialize(configuration)
+            _ = try await initialize(configuration)
             E2ESafeDiagnostics.record(operation: "sdk_initialize", code: "complete")
             E2ESafeDiagnostics.record(operation: "sdk_identify", code: "started")
             _ = try await sdk.loginIdentifiedUser(userJwt: userJwt)
@@ -215,13 +217,14 @@ private final class LocalE2EModel: ObservableObject {
 
     private func initialize(_ configuration: LocalSupportConfiguration) async throws -> SDKState {
         #if DEBUG
-        return try await sdk.initializeDevelopment(
-            apiKey: configuration.sdkKey,
-            onloDevelopmentOrigin: configuration.onloDevelopmentOrigin
-        )
-        #else
-        return try await sdk.initialize(apiKey: configuration.sdkKey)
+        if let origin = configuration.onloDevelopmentOrigin {
+            return try await sdk.initializeDevelopment(
+                apiKey: configuration.sdkKey,
+                onloDevelopmentOrigin: origin
+            )
+        }
         #endif
+        return try await sdk.initialize(apiKey: configuration.sdkKey)
     }
 
     func presentMessenger() {
@@ -344,15 +347,28 @@ private struct RefreshedUserJWT: Decodable {
 
 private struct LocalSupportConfiguration {
     let sdkKey: String
-    let onloDevelopmentOrigin: URL
+    let onloDevelopmentOrigin: URL?
+
+    static var usesDevelopmentOrigin: Bool {
+        let value = Bundle.main.object(forInfoDictionaryKey: "ONLO_USE_DEVELOPMENT_ORIGIN")
+        if let enabled = value as? Bool { return enabled }
+        guard let raw = value as? String else { return false }
+        return ["1", "true", "yes"].contains(raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
 
     static var fromBundle: Self? {
         guard let sdkKey = Bundle.main.object(forInfoDictionaryKey: "ONLO_SDK_KEY") as? String,
-              !sdkKey.isEmpty,
-              let originString = Bundle.main.object(forInfoDictionaryKey: "ONLO_DEVELOPMENT_ORIGIN") as? String,
-              let origin = URL(string: originString) else {
+              !sdkKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              sdkKey != "paste-your-public-ios-sdk-key-here" else {
             return nil
         }
+        guard usesDevelopmentOrigin else {
+            return Self(sdkKey: sdkKey, onloDevelopmentOrigin: nil)
+        }
+        guard let originString = Bundle.main.object(forInfoDictionaryKey: "ONLO_DEVELOPMENT_ORIGIN") as? String,
+              let origin = URL(string: originString),
+              origin.scheme?.lowercased() == "https",
+              origin.host != nil else { return nil }
         return Self(sdkKey: sdkKey, onloDevelopmentOrigin: origin)
     }
 }

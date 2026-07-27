@@ -30,5 +30,9 @@
 	<string>$(ONLO_DEVELOPMENT_ORIGIN)</string>
 	<key>ONLO_SDK_KEY</key>
 	<string>$(ONLO_SDK_KEY)</string>
+	<key>ONLO_USE_DEVELOPMENT_ORIGIN</key>
+	<string>$(ONLO_USE_DEVELOPMENT_ORIGIN)</string>
+	<key>UILaunchScreen</key>
+	<dict/>
 </dict>
 </plist>

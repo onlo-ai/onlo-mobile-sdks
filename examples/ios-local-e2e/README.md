@@ -4,9 +4,14 @@ Open `OnloLocalE2EApp.xcodeproj`, select an iPhone 17 simulator, and press Run. 
 
 ## Prerequisites
 
-- [ ] Supply `ONLO_SDK_KEY` and `ONLO_DEVELOPMENT_ORIGIN` as local Xcode build
-  settings using `OnloExample.xcconfig.example` as the safe template.
-- [ ] The SDK-team local merchant backend is running at `https://127.0.0.1:8444`. Its `npm start` command creates its ignored local certificate automatically; this Debug project adds it to the selected simulator during build.
+- [ ] Open the ignored `Onlo.local.xcconfig` beside this README and replace
+  `paste-your-public-ios-sdk-key-here` with the public iOS SDK key. The Debug
+  target already includes this file through `OnloExample.xcconfig.example`.
+  `ONLO_USE_DEVELOPMENT_ORIGIN = NO` uses production `https://onlo.ai`.
+- [ ] Only for local SDK-team testing, set `ONLO_USE_DEVELOPMENT_ORIGIN = YES`.
+  The app then uses `ONLO_DEVELOPMENT_ORIGIN`; Release builds always use the
+  SDK's fixed production origin.
+- [ ] For identified local E2E, the SDK-team local merchant backend is running at `https://127.0.0.1:8444`. Its `npm start` command creates its ignored local certificate automatically; this Debug project adds it to the selected simulator during build.
 - [ ] Its local Onlo service settings accept bundle ID `ai.onlo.locale2e` and the public SDK key it returns after test login.
 - [ ] The local Onlo server uses the matching mobile identity signing secret. Its HTTP local origin is accepted by the harness, which exposes an HTTPS-only proxy to the SDK.
 
@@ -20,9 +25,13 @@ Open `OnloLocalE2EApp.xcodeproj`, select an iPhone 17 simulator, and press Run. 
 
    Expected result: Xcode installs the debug app in the simulator and opens its Login screen.
 
-3. Enter the local test login code, then tap **Log in**.
+3. For production-backed anonymous testing, tap **Continue anonymously**. For
+   local identified E2E, enable the development-origin flag, enter the local
+   test login code, then tap **Log in**.
 
-   Expected result: the app asks the local merchant backend for a temporary merchant session and user JWT, initializes the SDK against the explicit Debug HTTPS origin returned by that backend, and identifies the fixed synthetic test subject.
+   Expected result: the default path initializes against `https://onlo.ai` and
+   loads live Operator data. The explicit development path uses the configured
+   Debug HTTPS origin and synthetic local identity flow.
 
 4. Tap **Support**.
 

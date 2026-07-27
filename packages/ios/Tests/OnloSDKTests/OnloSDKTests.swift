@@ -29,13 +29,51 @@ final class OnloSDKTests: XCTestCase {
         )
     }
 
-    func testMessengerDefaultsToDashboardDarkModePolicy() {
-        switch OnloMessengerOptions().colorMode {
-        case .dark:
+    func testMessengerDefaultsToSystemThemeAndContainedPresentation() {
+        XCTAssertTrue(OnloMessengerOptions().allowsImageAttachments)
+        switch OnloMessengerOptions().presentationMode {
+        case .contained:
             break
-        case .system, .light:
-            XCTFail("Default messenger appearance must follow the dashboard dark-mode policy")
+        case .fullScreen:
+            XCTFail("Default messenger presentation must remain contained in the host app")
         }
+        switch OnloMessengerOptions().colorMode {
+        case .system:
+            break
+        case .dark, .light:
+            XCTFail("Default messenger appearance must follow the system theme")
+        }
+    }
+
+    func testMessengerBackActionReturnsHomeBeforeDismissal() {
+        XCTAssertEqual(messengerBackAction(isHome: true), .dismiss)
+        XCTAssertEqual(messengerBackAction(isHome: false), .returnHome)
+    }
+
+    func testMessengerComposerCreatesWidgetParityCodeAndLinkMarkdown() {
+        XCTAssertEqual(
+            messengerCodeInsertion(selectedText: ""),
+            MessengerComposerInsertion(text: "```\n\n```", cursorOffset: 4)
+        )
+        XCTAssertEqual(
+            messengerCodeInsertion(selectedText: "let value = 1").text,
+            "```\nlet value = 1\n```"
+        )
+        XCTAssertEqual(
+            messengerMarkdownLink(label: " Onlo ", url: " https://onlo.ai/docs "),
+            "[Onlo](https://onlo.ai/docs)"
+        )
+        XCTAssertEqual(
+            messengerMarkdownLink(label: "", url: "https://onlo.ai"),
+            "[https://onlo.ai](https://onlo.ai)"
+        )
+    }
+
+    func testEndUserMessagesAlignTrailingAndSupportMessagesAlignLeading() {
+        XCTAssertEqual(messengerMessageAlignment(role: "user"), .trailing)
+        XCTAssertEqual(messengerMessageAlignment(role: "USER"), .trailing)
+        XCTAssertEqual(messengerMessageAlignment(role: "assistant"), .leading)
+        XCTAssertEqual(messengerMessageAlignment(role: "operator"), .leading)
     }
 
     func testRuntimeLogLevelsFilterAndSanitiseStructuredFields() {
@@ -278,6 +316,122 @@ final class OnloSDKTests: XCTestCase {
         XCTAssertEqual(sessionRequests.count, 2)
         guard sessionRequests.count == 2 else { return }
         try XCTAssertEqualSessionRequestBodies(sessionRequests[0], sessionRequests[1])
+    }
+
+    func testAnonymousLoginReplacesExpiredInstallationAndFencesOldOwner() async throws {
+        let oldScope = OwnerScope(kind: .anonymous)
+        let oldCredential = StoredSessionCredential(
+            installationId: "installation-expired",
+            generation: 7,
+            proposedCredential: "credential-expired",
+            identityClass: .anonymous,
+            ownerScope: oldScope
+        )
+        let credentials = InMemoryCredentialStore(oldCredential)
+        let ownerStore = InMemoryOwnerScopedStore()
+        let transport = ScriptedSessionTransport(steps: [
+            .success(sessionFailure(code: "session_expired", directive: "after_token_refresh")),
+            .success(sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-fresh", credential: "credential-fresh")),
+        ])
+        let sdk = OnloSDK(
+            credentialStore: credentials,
+            configStore: InMemoryConfigStore(),
+            pushIntentStore: InMemoryPushIntentStore(),
+            ownerStore: ownerStore,
+            transport: transport,
+            hostAppIdentifier: "com.example.host"
+        )
+        let configuration = OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        )
+
+        let initializedState = try await sdk.initialize(configuration)
+        XCTAssertEqual(initializedState, .reauthRequired)
+        let loginState = try await sdk.loginUnidentifiedUser()
+        XCTAssertEqual(loginState, .anonymousReady)
+
+        let protectedState = try await credentials.loadState()
+        let recovered = try XCTUnwrap(protectedState.credential)
+        XCTAssertNotEqual(recovered.installationId, oldCredential.installationId)
+        XCTAssertNotEqual(recovered.ownerScope, oldScope)
+        XCTAssertNil(protectedState.pendingTransition)
+        await XCTAssertThrowsErrorAsync {
+            _ = try await ownerStore.outboxEntries(for: oldScope)
+        }
+
+        let operations = await transport.requests().compactMap { request -> String? in
+            guard request.url?.path == "/api/sdk/v1/session",
+                  let body = request.httpBody,
+                  let decoded = try? JSONDecoder().decode(SessionRequest.self, from: body) else { return nil }
+            switch decoded.operation {
+            case .resume: return "resume"
+            case .bootstrap: return "bootstrap"
+            case .identify: return "identify"
+            case .logout: return "logout"
+            }
+        }
+        XCTAssertEqual(operations, ["resume", "bootstrap"])
+    }
+
+    func testIdentifiedLoginReplacesExpiredInstallationBeforeIdentify() async throws {
+        let oldScope = OwnerScope(kind: .identified)
+        let oldCredential = StoredSessionCredential(
+            installationId: "installation-expired",
+            generation: 4,
+            proposedCredential: "credential-expired",
+            identityClass: .identified,
+            ownerScope: oldScope
+        )
+        let credentials = InMemoryCredentialStore(oldCredential)
+        let ownerStore = InMemoryOwnerScopedStore()
+        let transport = ScriptedSessionTransport(steps: [
+            .success(sessionFailure(code: "session_expired", directive: "after_token_refresh")),
+            .success(sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-anonymous", credential: "credential-anonymous")),
+            .success(sessionResponse(identityClass: "identified", generation: 2, sessionId: "session-identified", credential: "credential-identified")),
+        ])
+        let sdk = OnloSDK(
+            credentialStore: credentials,
+            configStore: InMemoryConfigStore(),
+            pushIntentStore: InMemoryPushIntentStore(),
+            ownerStore: ownerStore,
+            transport: transport,
+            hostAppIdentifier: "com.example.host"
+        )
+        let configuration = OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        )
+
+        let initializedState = try await sdk.initialize(configuration)
+        XCTAssertEqual(initializedState, .reauthRequired)
+        let loginState = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
+        XCTAssertEqual(loginState, .identifiedReady)
+
+        let protectedState = try await credentials.loadState()
+        let recovered = try XCTUnwrap(protectedState.credential)
+        XCTAssertEqual(recovered.identityClass, .identified)
+        XCTAssertNotEqual(recovered.installationId, oldCredential.installationId)
+        XCTAssertNotEqual(recovered.ownerScope, oldScope)
+        XCTAssertNil(protectedState.pendingTransition)
+        await XCTAssertThrowsErrorAsync {
+            _ = try await ownerStore.outboxEntries(for: oldScope)
+        }
+
+        let operations = await transport.requests().compactMap { request -> String? in
+            guard request.url?.path == "/api/sdk/v1/session",
+                  let body = request.httpBody,
+                  let decoded = try? JSONDecoder().decode(SessionRequest.self, from: body) else { return nil }
+            switch decoded.operation {
+            case .resume: return "resume"
+            case .bootstrap: return "bootstrap"
+            case .identify: return "identify"
+            case .logout: return "logout"
+            }
+        }
+        XCTAssertEqual(operations, ["resume", "bootstrap", "identify"])
     }
 
     func testLogoutLostResponseReplaysExactProtectedPendingTransition() async throws {
@@ -2416,6 +2570,17 @@ private actor PausingTerminalOwnerStore: OwnerScopedPersisting, AuthorityFencedP
         authority: PersistenceAuthority
     ) async throws -> Bool {
         try await store.replaceTranscript(transcript, authority: authority)
+    }
+    func replaceConversationList(
+        _ conversationList: ConversationListResult,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        try await store.replaceConversationList(conversationList, authority: authority)
+    }
+    func conversationList(
+        authority: PersistenceAuthority
+    ) async throws -> ConversationListResult? {
+        try await store.conversationList(authority: authority)
     }
     func reconcileAccepted(
         _ entry: OutboxEntry,

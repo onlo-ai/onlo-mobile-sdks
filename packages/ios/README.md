@@ -276,6 +276,23 @@ try await Onlo.openConversation(
 `conversationId` is optional for normal chat and required only when routing to
 one existing conversation.
 
+Normal presentation opens on Home, matching Onlo WebChat: greeting, up to three
+recent conversations, up to three quick questions, composer, and Powered by
+Onlo footer. Sending or selecting a conversation enters its thread; Back
+returns Home instead of silently reopening the previous thread.
+
+The composer follows the WebChat control order and dashboard gates: multiline
+message input, optional voice, attachment, code and link controls, then the
+send action. It stays pinned above the footer while the contained sheet adapts
+to safe areas, keyboard changes, rotation, and multitasking size. Full-screen
+presentation remains an explicit host option.
+Every Home row is loaded from the authorised SDK inbox/configuration; the
+shipping messenger contains no sample conversation or FAQ data.
+
+An accepted identified JWT can personalize the greeting for the current SDK
+runtime. The first name is memory-only, is cleared before logout/account
+switch, and falls back to `Hi there 👋` after process restoration.
+
 ## Customization
 
 Dashboard configuration controls the default colors, bot name, subtitle,
@@ -288,7 +305,8 @@ Restrict those defaults before presenting the messenger:
 Onlo.configureMessenger(
     OnloMessengerOptions(
         colorMode: .system,              // Or `.light` / `.dark`
-        allowsImageAttachments: false    // App-level restriction
+        allowsImageAttachments: false,   // App-level restriction
+        presentationMode: .contained     // Or `.fullScreen`
     )
 )
 ```
@@ -299,9 +317,13 @@ behavior but does not change the organisation's dashboard configuration.
 ### FAQ and Help Center
 
 Dashboard **WebChat → Behaviour → FAQ quick actions** remains authoritative.
-The native messenger presents Conversations, FAQ, and Help Center sections.
+Home presents the first three questions. When published Help Center articles
+exist, Browse all opens Help Center just like WebChat.
 Answered FAQs render the Operator-authored answer directly without sending a
 message, creating a conversation, or invoking AI.
+
+Selecting an unanswered quick question sends it through the normal durable
+composer and AI pipeline, matching WebChat.
 
 Published Help Center content loads through the authenticated widget article
 routes and renders directly. Disabling FAQs in the dashboard removes the FAQ

@@ -30,6 +30,18 @@ struct MessengerRealtimeUpdate: Sendable {
     let conversations: [ConversationSummary]
 }
 
+enum MessengerInboxResult: Sendable, Equatable {
+    case ready([ConversationSummary])
+    /// Last authorised encrypted inbox index rendered while refresh is unavailable.
+    case stale([ConversationSummary])
+
+    var conversations: [ConversationSummary] {
+        switch self {
+        case .ready(let conversations), .stale(let conversations): conversations
+        }
+    }
+}
+
 /// An adapter-safe request to present native messenger UI. The core authorizes a
 /// supplied conversation ID before returning it; a UIKit or SwiftUI adapter owns
 /// the actual presentation.
@@ -106,6 +118,10 @@ public actor OnloSDK {
     private var configuration: Configuration?
     private var requestFactory: OnloRequestFactory?
     private var runtimeSession: RuntimeSession?
+    /// Verified only after the server accepts the corresponding identify
+    /// transition. Kept in memory for the native greeting and cleared at every
+    /// account boundary; it is never written to SDK storage.
+    private var identifiedFirstName: String?
     private var stateObservers: [UUID: AsyncStream<SDKState>.Continuation] = [:]
     private var frameworkStateObservers: [UUID: AsyncStream<SDKFrameworkState>.Continuation] = [:]
     private var messengerUpdateObservers: [UUID: AsyncStream<MessengerRealtimeUpdate>.Continuation] = [:]
@@ -411,6 +427,15 @@ public actor OnloSDK {
     @discardableResult
     public func loginUnidentifiedUser() async throws -> SDKState {
         try requireInitialized()
+        if state == .reauthRequired {
+            let protectedState = try await credentialStore.loadState()
+            if let stored = protectedState.credential,
+               !stored.logoutPending,
+               !(protectedState.pendingTransition?.isIdentify ?? false) {
+                try await replaceExpiredInstallation(with: stored, pendingTransition: protectedState.pendingTransition)
+                return state
+            }
+        }
         if state == .offlineReady {
             let protectedState = try await credentialStore.loadState()
             let stored = protectedState.credential
@@ -437,6 +462,7 @@ public actor OnloSDK {
     @discardableResult
     public func loginIdentifiedUser(userJwt: String) async throws -> SDKState {
         guard isCompactJWT(userJwt) else { throw OnloError.invalidUserJWT }
+        let pendingFirstName = Self.firstNameClaim(from: userJwt)
         try requireInitialized()
         // Hosts may repeat their login integration after view/scene recovery.
         // The current identified owner remains authoritative until the host
@@ -473,7 +499,18 @@ public actor OnloSDK {
            let pending = protectedState.pendingTransition,
            pending.isIdentify,
            stored.identityClass == .anonymous {
-            return try await replayPendingIdentify(pending, previous: stored, userJwt: userJwt)
+            let replayed = try await replayPendingIdentify(pending, previous: stored, userJwt: userJwt)
+            if replayed == .identifiedReady { identifiedFirstName = pendingFirstName }
+            return replayed
+        }
+        if state == .reauthRequired,
+           let stored = protectedState.credential,
+           !stored.logoutPending,
+           !(protectedState.pendingTransition?.isIdentify ?? false) {
+            try await replaceExpiredInstallation(
+                with: stored,
+                pendingTransition: protectedState.pendingTransition
+            )
         }
         guard runtimeSession != nil else {
             throw state == .offlineReady ? OnloError.requiresNetwork : OnloError.invalidState
@@ -540,6 +577,7 @@ public actor OnloSDK {
         )
         try await commitProtectedState(credential: credential, pendingTransition: nil)
         runtimeSession = RuntimeSession(sessionId: result.result.sessionId, chatToken: result.result.chatToken, credential: credential)
+        identifiedFirstName = pendingFirstName
         configAuthority = UUID()
         try await activatePersistenceAuthority(for: runtimeSession!)
         state = .identifiedReady
@@ -896,7 +934,8 @@ public actor OnloSDK {
     func messengerPresentationResources() async -> (
         config: MobileConfig?,
         helpTopics: [HelpCenterTopic],
-        faqContentIsCurrent: Bool
+        faqContentIsCurrent: Bool,
+        identifiedFirstName: String?
     ) {
         let ready = state == .anonymousReady || state == .identifiedReady
         var configIsCurrent = configurationValidationAuthority == configAuthority
@@ -918,7 +957,8 @@ public actor OnloSDK {
         return (
             config: config,
             helpTopics: helpTopics,
-            faqContentIsCurrent: ready && configIsCurrent
+            faqContentIsCurrent: ready && configIsCurrent,
+            identifiedFirstName: state == .identifiedReady ? identifiedFirstName : nil
         )
     }
 
@@ -1024,28 +1064,106 @@ public actor OnloSDK {
     /// only when every result belongs to the bearer session captured before
     /// the request. It is not a headless public transcript API.
     func messengerInbox() async throws -> [ConversationSummary] {
+        try await messengerInboxResult().conversations
+    }
+
+    func messengerInboxResult() async throws -> MessengerInboxResult {
+        try await messengerInboxResult(allowTokenRefresh: true)
+    }
+
+    private func messengerInboxResult(allowTokenRefresh: Bool) async throws -> MessengerInboxResult {
         let startedAt = Date()
+        let attemptedSession = (state == .anonymousReady || state == .identifiedReady)
+            ? runtimeSession
+            : nil
         do {
-            guard state == .anonymousReady || state == .identifiedReady,
-                  let session = runtimeSession else {
+            guard let session = attemptedSession else {
                 throw state == .offlineReady ? OnloError.requiresNetwork : OnloError.invalidState
-            }
-            if let cached = messengerInboxCache,
-               cached.authority == configAuthority,
-               cached.ownerScope == session.credential.ownerScope {
-                await record(operation: "inbox", code: "cache_hit", requestId: nil, startedAt: startedAt)
-                return cached.conversations
             }
             let inbox = try await authorisedInbox(for: session)
             await record(operation: "inbox", code: "ok", requestId: inbox.requestId, startedAt: startedAt)
-            return inbox.conversations
+            return .ready(inbox.conversations)
         } catch let error as OnloError {
             await record(operation: "inbox", code: error.safeCode, requestId: error.requestId, startedAt: startedAt)
+            if allowTokenRefresh,
+               isWidgetUnauthorized(error),
+               let rejectedSession = attemptedSession,
+               await refreshMessengerBearer(rejectedSession),
+               state == .anonymousReady || state == .identifiedReady {
+                return try await messengerInboxResult(allowTokenRefresh: false)
+            }
+            if let cached = try? await cachedMessengerInbox() {
+                return .stale(cached)
+            }
             throw error
         } catch {
             await record(operation: "inbox", code: "network_unavailable", requestId: nil, startedAt: startedAt)
+            if let cached = try? await cachedMessengerInbox() {
+                return .stale(cached)
+            }
             throw OnloError.transport(code: "network_unavailable")
         }
+    }
+
+    private func isWidgetUnauthorized(_ error: OnloError) -> Bool {
+        guard let code = error.transportCode else { return false }
+        return code == "widget_http_401" || code.hasPrefix("widget_401_")
+    }
+
+    /// Performs one protected installation-credential rotation. It never asks
+    /// the host for an Operator JWT and never recursively retries the inbox.
+    private func refreshMessengerBearer(_ rejectedSession: RuntimeSession) async -> Bool {
+        guard let active = runtimeSession,
+              active.sessionId == rejectedSession.sessionId,
+              active.chatToken == rejectedSession.chatToken,
+              active.credential.ownerScope == rejectedSession.credential.ownerScope else {
+            return runtimeSession?.credential.ownerScope == rejectedSession.credential.ownerScope &&
+                (state == .anonymousReady || state == .identifiedReady)
+        }
+        do {
+            try await resume(rejectedSession.credential)
+        } catch {
+            return false
+        }
+        guard let refreshed = runtimeSession else { return false }
+        return refreshed.credential.ownerScope == rejectedSession.credential.ownerScope &&
+            refreshed.chatToken != rejectedSession.chatToken &&
+            (state == .anonymousReady || state == .identifiedReady)
+    }
+
+    private func cachedMessengerInbox() async throws -> [ConversationSummary]? {
+        guard (state == .anonymousReady || state == .identifiedReady || state == .offlineReady),
+              let session = runtimeSession,
+              let store = ownerStore as? any AuthorityFencedPersisting else { return nil }
+        let authority = configAuthority
+        let persistence = persistenceAuthority(for: session, bearerContext: authority)
+        let cached: ConversationListResult
+        if let memory = messengerInboxCache,
+           memory.authority == authority,
+           memory.ownerScope == session.credential.ownerScope {
+            cached = ConversationListResult(
+                conversations: memory.conversations,
+                totalUnreadCount: session.credential.identityClass == .identified ? (unreadCount ?? 0) : 0
+            )
+        } else if let persisted = try await store.conversationList(authority: persistence) {
+            cached = persisted
+        } else {
+            return nil
+        }
+        guard configAuthority == authority,
+              runtimeSession?.sessionId == session.sessionId,
+              runtimeSession?.credential.ownerScope == session.credential.ownerScope,
+              let conversations = validatedInboxConversations(
+                cached,
+                identityClass: session.credential.identityClass
+              ) else { return nil }
+        unreadCount = session.credential.identityClass == .identified ? cached.totalUnreadCount : nil
+        messengerInboxCache = MessengerInboxCache(
+            authority: authority,
+            ownerScope: session.credential.ownerScope,
+            conversations: conversations
+        )
+        return conversations
     }
 
     /// The list remains session-authorised. Customer unread state is exposed
@@ -1057,20 +1175,13 @@ public actor OnloSDK {
         let authority = configAuthority
         let response = try await transport.execute(try requestFactory.conversations(chatToken: session.chatToken, limit: 50))
         let inbox = try OnloResponseDecoder.widget(ConversationListResult.self, from: response)
-        var conversationIDs = Set<String>()
-        let summariesAreValid = inbox.conversations.allSatisfy { conversation in
-                !conversation.id.isEmpty &&
-                !conversation.sessionId.isEmpty &&
-                conversation.unreadCount >= 0 &&
-                conversation.unread == (conversation.unreadCount > 0) &&
-                conversation.messageCount >= 0 &&
-                conversationIDs.insert(conversation.id).inserted
-        }
         guard configAuthority == authority,
               runtimeSession?.sessionId == session.sessionId,
               runtimeSession?.credential.ownerScope == session.credential.ownerScope,
-              inbox.totalUnreadCount >= 0,
-              summariesAreValid else {
+              let conversations = validatedInboxConversations(
+                inbox,
+                identityClass: session.credential.identityClass
+              ) else {
             throw OnloError.invalidResponse
         }
         if observationGeneration != conversationObservationGeneration {
@@ -1084,20 +1195,72 @@ public actor OnloSDK {
                 requestId: Self.header("x-onlo-request-id", in: response.headers)
             )
         }
-        if session.credential.identityClass == .identified {
-            unreadCount = inbox.totalUnreadCount
-            messengerInboxCache = MessengerInboxCache(
-                authority: configAuthority,
-                ownerScope: session.credential.ownerScope,
-                conversations: inbox.conversations
+        let totalUnreadCount = session.credential.identityClass == .identified ? inbox.totalUnreadCount : 0
+        let authoritative = ConversationListResult(
+            conversations: conversations,
+            totalUnreadCount: totalUnreadCount
+        )
+        if let store = ownerStore as? any AuthorityFencedPersisting {
+            _ = try? await store.replaceConversationList(
+                authoritative,
+                authority: persistenceAuthority(for: session, bearerContext: authority)
             )
+        }
+        guard configAuthority == authority,
+              runtimeSession?.sessionId == session.sessionId,
+              runtimeSession?.credential.ownerScope == session.credential.ownerScope else {
+            throw OnloError.invalidState
+        }
+        if observationGeneration != conversationObservationGeneration {
+            guard let cached = messengerInboxCache,
+                  cached.authority == authority,
+                  cached.ownerScope == session.credential.ownerScope else {
+                throw OnloError.invalidResponse
+            }
+            if let store = ownerStore as? any AuthorityFencedPersisting {
+                _ = try? await store.replaceConversationList(
+                    ConversationListResult(
+                        conversations: cached.conversations,
+                        totalUnreadCount: session.credential.identityClass == .identified
+                            ? (unreadCount ?? 0)
+                            : 0
+                    ),
+                    authority: persistenceAuthority(for: session, bearerContext: authority)
+                )
+            }
             return (
-                conversations: inbox.conversations,
+                conversations: cached.conversations,
                 requestId: Self.header("x-onlo-request-id", in: response.headers)
             )
         }
-        unreadCount = nil
-        let scrubbedConversations = inbox.conversations.map {
+        unreadCount = session.credential.identityClass == .identified ? totalUnreadCount : nil
+        messengerInboxCache = MessengerInboxCache(
+            authority: configAuthority,
+            ownerScope: session.credential.ownerScope,
+            conversations: conversations
+        )
+        return (
+            conversations: conversations,
+            requestId: Self.header("x-onlo-request-id", in: response.headers)
+        )
+    }
+
+    private func validatedInboxConversations(
+        _ inbox: ConversationListResult,
+        identityClass: IdentityClass
+    ) -> [ConversationSummary]? {
+        var conversationIDs = Set<String>()
+        guard inbox.totalUnreadCount >= 0,
+              inbox.conversations.allSatisfy({ conversation in
+                  !conversation.id.isEmpty &&
+                      !conversation.sessionId.isEmpty &&
+                      conversation.unreadCount >= 0 &&
+                      conversation.unread == (conversation.unreadCount > 0) &&
+                      conversation.messageCount >= 0 &&
+                      conversationIDs.insert(conversation.id).inserted
+              }) else { return nil }
+        guard identityClass == .anonymous else { return inbox.conversations }
+        return inbox.conversations.map {
             ConversationSummary(
                 id: $0.id,
                 sessionId: $0.sessionId,
@@ -1110,15 +1273,6 @@ public actor OnloSDK {
                 lastMessageRole: $0.lastMessageRole
             )
         }
-        messengerInboxCache = MessengerInboxCache(
-            authority: configAuthority,
-            ownerScope: session.credential.ownerScope,
-            conversations: scrubbedConversations
-        )
-        return (
-            conversations: scrubbedConversations,
-            requestId: Self.header("x-onlo-request-id", in: response.headers)
-        )
     }
 
     func messengerHelpCenter() async throws -> [HelpCenterTopic] {
@@ -1967,6 +2121,48 @@ public actor OnloSDK {
         startDurableDispatchIfNeeded()
         startForegroundStreamIfAvailable()
         await reconcilePushAfterSessionSuccess()
+    }
+
+    /// A rejected resume proves the installation credential can no longer be
+    /// rotated. Recovery is deliberately host-triggered through a login API:
+    /// fence and purge the old owner before creating a replacement anonymous
+    /// installation, which identified login can immediately exchange.
+    private func replaceExpiredInstallation(
+        with stored: StoredSessionCredential,
+        pendingTransition: PendingSessionTransition?
+    ) async throws {
+        guard state == .reauthRequired,
+              !stored.logoutPending,
+              pendingTransition?.isIdentify != true,
+              pendingTransition == nil || pendingTransition?.matchesResume(stored) == true else {
+            throw OnloError.invalidState
+        }
+
+        await invalidateMessengerPresentations()
+        identifiedFirstName = nil
+        cancelConfigRetry()
+        pushRetryTask?.cancel()
+        pushRetryTask = nil
+        pushReconciliationID = nil
+        pushReconciliationWakeRequested = false
+        runtimeSession = nil
+        configAuthority = UUID()
+        cancelActiveSends(for: stored.ownerScope)
+        await revokePersistenceAuthority(for: stored.ownerScope)
+
+        // Persist the account fence before removing credentials. A crash can
+        // never make the old owner scope readable by a replacement session.
+        try await ownerStore.beginLogout(for: stored.ownerScope)
+        try await commitProtectedState(credential: nil, pendingTransition: nil)
+        try await pushIntentStore.clear()
+        try await ownerStore.finishLogout(for: stored.ownerScope)
+
+        messengerInboxCache = nil
+        helpCenterCache = nil
+        transcriptValidationAuthorities.removeAll()
+        conversationObservationGeneration &+= 1
+        state = .restoring
+        try await bootstrapAnonymous()
     }
 
     private func registerSend(_ task: Task<Void, Never>, id: UUID, scope: OwnerScope) {
@@ -3029,6 +3225,7 @@ public actor OnloSDK {
         // The actor cannot advance into a new account state until every
         // registered native presenter has redacted/dismissed on MainActor.
         await invalidateMessengerPresentations()
+        identifiedFirstName = nil
         state = .logoutPending
         cancelConfigRetry()
         pushRetryTask?.cancel(); pushRetryTask = nil
@@ -3099,6 +3296,21 @@ public actor OnloSDK {
         startForegroundStreamIfAvailable()
         await reconcilePushAfterSessionSuccess()
         return state
+    }
+
+    private static func firstNameClaim(from jwt: String) -> String? {
+        let segments = jwt.split(separator: ".", omittingEmptySubsequences: false)
+        guard segments.count == 3 else { return nil }
+        var payload = String(segments[1]).replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
+        guard let data = Data(base64Encoded: payload),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let name = object["name"] as? String else { return nil }
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, clean.count <= 200,
+              clean.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else { return nil }
+        return clean.split(whereSeparator: { $0.isWhitespace }).first.map(String.init)
     }
 
     /// Fetches configuration only with the in-memory bearer. The value is

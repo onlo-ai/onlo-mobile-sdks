@@ -412,6 +412,13 @@ protocol AuthorityFencedPersisting: Sendable {
         _ transcript: ConversationTranscriptResult,
         authority: PersistenceAuthority
     ) async throws -> Bool
+    func replaceConversationList(
+        _ conversationList: ConversationListResult,
+        authority: PersistenceAuthority
+    ) async throws -> Bool
+    func conversationList(
+        authority: PersistenceAuthority
+    ) async throws -> ConversationListResult?
     func reconcileAccepted(
         _ entry: OutboxEntry,
         transcript: ConversationTranscriptResult,
@@ -512,6 +519,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         try transaction(db) {
             try execute("DELETE FROM outbox WHERE scope_id = ?", values: [scope.id.uuidString], db: db)
             try execute("DELETE FROM transcripts WHERE scope_id = ?", values: [scope.id.uuidString], db: db)
+            try execute("DELETE FROM inbox_cache WHERE scope_id = ?", values: [scope.id.uuidString], db: db)
             try execute("DELETE FROM owner_scopes WHERE scope_id = ?", values: [scope.id.uuidString], db: db)
         }
     }
@@ -704,6 +712,59 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         return true
     }
 
+    func replaceConversationList(
+        _ conversationList: ConversationListResult,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        let db = try await database()
+        guard activeAuthority == authority else { return false }
+        guard !(try isBlocked(authority.ownerScope, db: db)) else {
+            throw OnloError.invalidState
+        }
+        guard let key = encryptionKey,
+              let payload = try AES.GCM.seal(encoder.encode(conversationList), using: key).combined else {
+            throw OnloError.credentialStore(code: "inbox_encrypt_failed")
+        }
+        try transaction(db) {
+            try execute(
+                "INSERT INTO inbox_cache(scope_id, payload) VALUES(?, ?) ON CONFLICT(scope_id) DO UPDATE SET payload = excluded.payload",
+                values: [authority.ownerScope.id.uuidString, payload],
+                db: db
+            )
+        }
+        return activeAuthority == authority
+    }
+
+    func conversationList(
+        authority: PersistenceAuthority
+    ) async throws -> ConversationListResult? {
+        let db = try await database()
+        guard activeAuthority == authority,
+              !(try isBlocked(authority.ownerScope, db: db)) else { return nil }
+        let statement = try statement(
+            "SELECT payload FROM inbox_cache WHERE scope_id = ?",
+            db: db
+        )
+        defer { sqlite3_finalize(statement) }
+        try bind([authority.ownerScope.id.uuidString], to: statement)
+        let result = sqlite3_step(statement)
+        if result == SQLITE_DONE { return nil }
+        guard result == SQLITE_ROW,
+              let payload = sqliteData(statement, 0),
+              let key = encryptionKey,
+              let box = try? AES.GCM.SealedBox(combined: payload) else {
+            try? purge(authority.ownerScope, db: db)
+            throw OnloError.credentialStore(code: "inbox_decrypt_failed")
+        }
+        do {
+            let decoded = try decoder.decode(ConversationListResult.self, from: AES.GCM.open(box, using: key))
+            return activeAuthority == authority ? decoded : nil
+        } catch {
+            try? purge(authority.ownerScope, db: db)
+            throw OnloError.credentialStore(code: "inbox_decrypt_failed")
+        }
+    }
+
     func reconcileAccepted(
         _ entry: OutboxEntry,
         transcript: ConversationTranscriptResult,
@@ -808,6 +869,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
             try execute("CREATE INDEX IF NOT EXISTS outbox_scope_order ON outbox(scope_id, ordering_key, client_message_id)", values: [], db: db)
             try execute("CREATE TABLE IF NOT EXISTS outbox_metadata (key TEXT PRIMARY KEY NOT NULL, value BLOB NOT NULL)", values: [], db: db)
             try execute("CREATE TABLE IF NOT EXISTS transcripts (scope_id TEXT NOT NULL REFERENCES owner_scopes(scope_id), conversation_id TEXT NOT NULL, payload BLOB NOT NULL, PRIMARY KEY(scope_id, conversation_id))", values: [], db: db)
+            try execute("CREATE TABLE IF NOT EXISTS inbox_cache (scope_id TEXT PRIMARY KEY NOT NULL REFERENCES owner_scopes(scope_id), payload BLOB NOT NULL)", values: [], db: db)
             var values = URLResourceValues()
             values.isExcludedFromBackup = true
             var protectedURL = databaseURL
@@ -859,6 +921,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         try transaction(db) {
             try execute("DELETE FROM outbox WHERE scope_id = ?", values: [scope.id.uuidString], db: db)
             try execute("DELETE FROM transcripts WHERE scope_id = ?", values: [scope.id.uuidString], db: db)
+            try execute("DELETE FROM inbox_cache WHERE scope_id = ?", values: [scope.id.uuidString], db: db)
             try execute("DELETE FROM owner_scopes WHERE scope_id = ?", values: [scope.id.uuidString], db: db)
         }
     }
@@ -867,6 +930,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         try transaction(db) {
             try execute("DELETE FROM outbox", values: [], db: db)
             try execute("DELETE FROM transcripts", values: [], db: db)
+            try execute("DELETE FROM inbox_cache", values: [], db: db)
             try execute("DELETE FROM owner_scopes", values: [], db: db)
         }
     }
@@ -955,6 +1019,7 @@ private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self
 public actor InMemoryOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting, AuthorityFencedPersisting {
     private var entries: [OwnerScope: [UUID: OutboxEntry]] = [:]
     private var transcripts: [OwnerScope: [String: ConversationTranscriptResult]] = [:]
+    private var conversationLists: [OwnerScope: ConversationListResult] = [:]
     private var activeAuthority: PersistenceAuthority?
     private var blockedScopes = Set<OwnerScope>()
 
@@ -972,6 +1037,7 @@ public actor InMemoryOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisti
     public func finishLogout(for scope: OwnerScope) async throws {
         entries[scope] = nil
         transcripts[scope] = nil
+        conversationLists[scope] = nil
     }
 
     public func enqueue(_ entry: OutboxEntry) async throws {
@@ -1081,6 +1147,24 @@ public actor InMemoryOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisti
         guard activeAuthority == authority else { return false }
         try replaceTranscriptSynchronously(transcript, for: authority.ownerScope)
         return true
+    }
+
+    func replaceConversationList(
+        _ conversationList: ConversationListResult,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        guard activeAuthority == authority,
+              !blockedScopes.contains(authority.ownerScope) else { return false }
+        conversationLists[authority.ownerScope] = conversationList
+        return true
+    }
+
+    func conversationList(
+        authority: PersistenceAuthority
+    ) async throws -> ConversationListResult? {
+        guard activeAuthority == authority,
+              !blockedScopes.contains(authority.ownerScope) else { return nil }
+        return conversationLists[authority.ownerScope]
     }
 
     func reconcileAccepted(

@@ -331,8 +331,14 @@ Version outcome:
 
 One behavior specification applies to UIKit/SwiftUI and Compose/Views hosts:
 
+- open on the widget-parity Home surface, never directly in a prior thread;
+- operator-branded header with presence subtitle, refresh, close, and stack-aware back navigation;
+- identified greeting while the accepted JWT name remains in memory, with a generic greeting after process restoration;
+- up to three recent conversations with relative timestamps and an explicit all-conversations view;
+- up to three FAQ quick questions, with Browse all routing to Help Center and retaining its explicit empty state when no articles are published;
 - conversation list/history when enabled;
 - conversation detail with customer/AI/operator/ticket states;
+- end-user (`role=user`) bubbles align right and use `outgoing`/`outgoingText`; every non-end-user bubble aligns left and uses `incoming`/`incomingText`;
 - composer with deterministic queued/sending/failed/accepted status;
 - retry/cancel affordances for terminal/retryable failures;
 - typing/streaming with persisted-message reconciliation;
@@ -341,8 +347,9 @@ One behavior specification applies to UIKit/SwiftUI and Compose/Views hosts:
 - pre-chat surfaces only when supported by mobile policy; no Onlo OTP or second-login surface;
 - media picker/upload progress and recoverable permission denial;
 - accessibility labels, focus order, dynamic text, screen-reader announcements, reduced motion, color contrast, keyboard/insets, RTL, and localization;
-- dark/light/system appearance using projected tokens;
-- operator-branded header, logo, bot identity, and copy;
+- dark/light/system appearance using projected `accent`, `background`, `outgoing`, `outgoingText`, `incoming`, and `incomingText` tokens;
+- composer and Powered by Onlo footer remain anchored below Home, lists, articles, and threads;
+- an answered FAQ renders directly; an unanswered quick question starts the normal durable chat flow;
 - no browser DOM actions or auto-open-on-scroll/exit behavior.
 
 The host can present full-screen or embed the native controller/activity destination using supported platform navigation hooks. First release does not expose raw internal view models as a headless UI kit.

@@ -3,6 +3,73 @@ import XCTest
 @_spi(FrameworkBridge) @testable import OnloSDK
 
 final class MessengerSecurityTests: XCTestCase {
+    func testEncryptedInboxIndexSurvivesSDKRecreationAndOfflineRefresh() async throws {
+        let credentials = InMemoryCredentialStore()
+        let store = InMemoryOwnerScopedStore()
+        let firstSDK = OnloSDK(
+            credentialStore: credentials,
+            ownerStore: store,
+            transport: PersistentInboxTransport(inboxIsAvailable: true),
+            hostAppIdentifier: "com.example.host",
+            lifecycleBindingEnabled: false
+        )
+        let configuration = OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        )
+        _ = try await firstSDK.initialize(configuration)
+        let fresh = try await firstSDK.messengerInboxResult()
+        guard case .ready(let freshConversations) = fresh else {
+            return XCTFail("The first authorised inbox must be fresh")
+        }
+        XCTAssertEqual(freshConversations.map(\.id), ["conversation-cached"])
+
+        let recreatedSDK = OnloSDK(
+            credentialStore: credentials,
+            ownerStore: store,
+            transport: PersistentInboxTransport(inboxIsAvailable: false),
+            hostAppIdentifier: "com.example.host",
+            lifecycleBindingEnabled: false
+        )
+        _ = try await recreatedSDK.initialize(configuration)
+        let offline = try await recreatedSDK.messengerInboxResult()
+        guard case .stale(let cachedConversations) = offline else {
+            return XCTFail("An offline refresh must return the encrypted owner-scoped inbox")
+        }
+        XCTAssertEqual(cachedConversations, freshConversations)
+    }
+
+    func testExpiredInboxBearerRefreshesOnceAndRetriesWithRotatedSession() async throws {
+        let transport = ExpiredInboxBearerTransport()
+        let sdk = OnloSDK(
+            credentialStore: InMemoryCredentialStore(),
+            ownerStore: InMemoryOwnerScopedStore(),
+            transport: transport,
+            hostAppIdentifier: "com.example.host",
+            lifecycleBindingEnabled: false
+        )
+        _ = try await sdk.initialize(OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        ))
+
+        let result = try await sdk.messengerInboxResult()
+        guard case .ready(let conversations) = result else {
+            return XCTFail("The rotated bearer retry must return a fresh inbox")
+        }
+        XCTAssertEqual(conversations.map(\.id), ["conversation-after-refresh"])
+        let counts = await transport.requestCounts()
+        let authorizations = await transport.inboxAuthorizationHeaders()
+        XCTAssertEqual(counts.session, 2)
+        XCTAssertEqual(counts.inbox, 2)
+        XCTAssertEqual(authorizations, [
+            "Bearer token-1",
+            "Bearer token-2",
+        ])
+    }
+
     func testAuthorisedHistoricalInboxAcceptsPriorSessionMetadata() async throws {
         let sdk = OnloSDK(
             credentialStore: InMemoryCredentialStore(),
@@ -359,6 +426,77 @@ final class MessengerSecurityTests: XCTestCase {
         let storedPushIntent = try await push.load()
         let pushIntent = try XCTUnwrap(storedPushIntent)
         XCTAssertFalse(pushIntent.requiresFreshBearer)
+    }
+}
+
+private actor PersistentInboxTransport: OnloHTTPTransport {
+    private let inboxIsAvailable: Bool
+    private var sessionCount = 0
+
+    init(inboxIsAvailable: Bool) {
+        self.inboxIsAvailable = inboxIsAvailable
+    }
+
+    func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
+        switch request.url?.path {
+        case "/api/sdk/v1/session":
+            sessionCount += 1
+            let generation: Int
+            if let body = request.httpBody,
+               let session = try? JSONDecoder().decode(SessionRequest.self, from: body),
+               case let .resume(_, expectedGeneration, _, _) = session.operation {
+                generation = expectedGeneration + 1
+            } else {
+                generation = 1
+            }
+            return messengerSessionResponse(request, json: """
+            {"requestId":"synthetic","serverTime":"2026-07-21T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"session-\(generation)","chatToken":"token-\(generation)","installationId":"installation-1","generation":\(generation),"proposedCredential":"credential-\(generation)","identityClass":"anonymous","publicationState":"testing","attestationState":"not_required","configRevision":"revision-1","configSchemaVersion":1,"configEtag":"etag-1"}}
+            """)
+        case "/api/widget/conversations":
+            guard inboxIsAvailable else {
+                return OnloHTTPResponse(statusCode: 503, body: Data("{}".utf8))
+            }
+            return OnloHTTPResponse(statusCode: 200, body: Data("""
+            {"conversations":[{"id":"conversation-cached","sessionId":"historical-session","title":"synthetic","unread":false,"unreadCount":0,"status":"open","updatedAt":"2026-07-21T10:00:00.000Z","messageCount":1,"lastMessageRole":"assistant"}],"totalUnreadCount":0}
+            """.utf8))
+        default:
+            return OnloHTTPResponse(statusCode: 503, body: Data("{}".utf8))
+        }
+    }
+}
+
+private actor ExpiredInboxBearerTransport: OnloHTTPTransport {
+    private var sessionCount = 0
+    private var inboxCount = 0
+    private var inboxAuthorizations: [String] = []
+
+    func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
+        switch request.url?.path {
+        case "/api/sdk/v1/session":
+            sessionCount += 1
+            return messengerSessionResponse(request, json: """
+            {"requestId":"synthetic","serverTime":"2026-07-21T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"session-\(sessionCount)","chatToken":"token-\(sessionCount)","installationId":"installation-1","generation":\(sessionCount),"proposedCredential":"credential-\(sessionCount)","identityClass":"anonymous","publicationState":"testing","attestationState":"not_required","configRevision":"revision-1","configSchemaVersion":1,"configEtag":"etag-1"}}
+            """)
+        case "/api/widget/conversations":
+            inboxCount += 1
+            inboxAuthorizations.append(request.value(forHTTPHeaderField: "Authorization") ?? "")
+            if inboxCount == 1 {
+                return OnloHTTPResponse(statusCode: 401, body: Data("{\"error\":\"unauthorized\"}".utf8))
+            }
+            return OnloHTTPResponse(statusCode: 200, body: Data("""
+            {"conversations":[{"id":"conversation-after-refresh","sessionId":"historical-session","title":"synthetic","unread":false,"unreadCount":0,"status":"open","updatedAt":"2026-07-21T10:00:00.000Z","messageCount":1,"lastMessageRole":"assistant"}],"totalUnreadCount":0}
+            """.utf8))
+        default:
+            return OnloHTTPResponse(statusCode: 503, body: Data("{}".utf8))
+        }
+    }
+
+    func requestCounts() -> (session: Int, inbox: Int) {
+        (sessionCount, inboxCount)
+    }
+
+    func inboxAuthorizationHeaders() -> [String] {
+        inboxAuthorizations
     }
 }
 
