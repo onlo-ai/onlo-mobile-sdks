@@ -29,6 +29,14 @@ Workspace overview: [README.md](README.md). Product/integration details: [docs/]
 - Keep logs structured and PII-free: safe error code, request ID, SDK/runtime version, duration.
 - Preserve unrelated changes. Fix root causes; do not patch symptoms.
 
+## Release metadata
+
+- Breaking SDK API or behavior → bump **MAJOR**.
+- SDK feature or backward-compatible API/behavior change → bump **MINOR**.
+- SDK bug fix, security, dependency, or packaging change → bump **PATCH**.
+- Docs, tests, examples, CI, formatting, comments, or behavior-preserving cleanup → no version or changelog update.
+- For every bump, update `VERSION`, all lockstep release metadata, and all SDK changelogs; then run `npm run generate:version` and `npm run check:versions`. Never edit runtime version constants directly.
+
 ## Commands
 
 ```bash
