@@ -14,12 +14,6 @@ on:
         description: Exact package version at release_ref
         required: true
         default: 0.2.0
-      publish_flutter:
-        description: Publish Flutter (first pub.dev release must be manual)
-        required: true
-        type: boolean
-        default: false
-
 concurrency:
   group: mobile-sdk-publication
   cancel-in-progress: false
@@ -42,7 +36,6 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
           INPUT_REF: ${{ inputs.release_ref }}
           INPUT_VERSION: ${{ inputs.version }}
-          INPUT_PUBLISH_FLUTTER: ${{ inputs.publish_flutter }}
         run: |
           set -euo pipefail
           if [[ "$EVENT_NAME" == "push" ]]; then
@@ -52,7 +45,7 @@ jobs:
           else
             version="$INPUT_VERSION"
             release_ref="$INPUT_REF"
-            publish_flutter="$INPUT_PUBLISH_FLUTTER"
+            publish_flutter="false"
           fi
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Invalid semantic version: $version" >&2
@@ -264,6 +257,8 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.release_ref }}
 
+      - uses: dart-lang/setup-dart@v1
+
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.44.2"
@@ -287,7 +282,7 @@ jobs:
       - name: Publish Flutter package
         if: steps.existing.outputs.published != 'true'
         working-directory: packages/flutter
-        run: flutter pub publish --force
+        run: dart pub publish --force
 
   verify-wrappers:
     needs: [preflight, publish-react-native, publish-flutter]
