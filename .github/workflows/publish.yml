@@ -75,6 +75,12 @@ jobs:
           set -euo pipefail
           npm run check:versions -- --expected "$VERSION"
           git ls-remote --exit-code origin "refs/tags/$VERSION"
+          tag_commit="$(git rev-parse "refs/tags/$VERSION^{commit}")"
+          checkout_commit="$(git rev-parse HEAD)"
+          if [[ "$checkout_commit" != "$tag_commit" ]]; then
+            echo "release_ref must resolve to the commit tagged $VERSION" >&2
+            exit 1
+          fi
 
   publish-ios:
     needs: preflight
@@ -124,6 +130,9 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
+      - name: Install Android publication toolchain
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
       - id: existing
         name: Check Maven Central version
         shell: bash
@@ -151,8 +160,8 @@ jobs:
             -Ponlo.maven.central=true \
             -Ponlo.release.version=${{ needs.preflight.outputs.version }}
 
-  verify-native:
-    needs: [preflight, publish-ios, publish-android]
+  verify-ios:
+    needs: [preflight, publish-ios]
     runs-on: macos-15
     permissions:
       contents: read
@@ -182,6 +191,12 @@ jobs:
           echo "OnloSDK $VERSION is not publicly resolvable" >&2
           exit 1
 
+  verify-android:
+    needs: [preflight, publish-android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
       - name: Verify public Maven version
         shell: bash
         env:
@@ -199,7 +214,7 @@ jobs:
           exit 1
 
   publish-react-native:
-    needs: [preflight, verify-native]
+    needs: [preflight, verify-ios, verify-android]
     runs-on: ubuntu-latest
     environment: sdk-release
     permissions:
@@ -237,7 +252,7 @@ jobs:
         run: npm publish --access public --provenance
 
   publish-flutter:
-    needs: [preflight, verify-native]
+    needs: [preflight, verify-ios, verify-android]
     if: needs.preflight.outputs.publish_flutter == 'true'
     runs-on: ubuntu-latest
     environment: sdk-release
@@ -249,7 +264,10 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.release_ref }}
 
-      - uses: dart-lang/setup-dart@v1
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.44.2"
+          cache: true
 
       - id: existing
         name: Check pub.dev version
@@ -269,19 +287,30 @@ jobs:
       - name: Publish Flutter package
         if: steps.existing.outputs.published != 'true'
         working-directory: packages/flutter
-        run: dart pub publish --force
+        run: flutter pub publish --force
 
   verify-wrappers:
     needs: [preflight, publish-react-native, publish-flutter]
     if: always() && needs.publish-react-native.result == 'success' && (needs.publish-flutter.result == 'success' || needs.publish-flutter.result == 'skipped')
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
       - name: Verify public npm version
+        shell: bash
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
-        run: npm view "@onlo-ai/react-native@$VERSION" version
+        run: |
+          set -euo pipefail
+          for attempt in {1..20}; do
+            if [[ "$(npm view "@onlo-ai/react-native@$VERSION" version 2>/dev/null)" == "$VERSION" ]]; then
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "React Native SDK $VERSION is not publicly resolvable" >&2
+          exit 1
 
       - name: Verify public pub.dev version when requested
         if: needs.preflight.outputs.publish_flutter == 'true'
@@ -290,9 +319,16 @@ jobs:
           VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error --location \
-            "https://pub.dev/api/packages/onlo_flutter" |
-            grep -Fq "\"version\":\"$VERSION\""
+          for attempt in {1..40}; do
+            if curl --fail --silent --show-error --location \
+              "https://pub.dev/api/packages/onlo_flutter" |
+              grep -Fq "\"version\":\"$VERSION\""; then
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Flutter SDK $VERSION is not publicly resolvable" >&2
+          exit 1
 
   github-release:
     needs: [preflight, verify-wrappers]
