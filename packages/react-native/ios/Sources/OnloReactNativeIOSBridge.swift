@@ -15,7 +15,7 @@ public final class OnloReactNativeIOSBridge: NSObject {
     public typealias ResultCompletion = (NSString?, NSDictionary?) -> Void
 
     private let sdk = OnloSDK()
-    private lazy var presenter = OnloMessengerPresenter(sdk: sdk)
+    private var presenter: OnloMessengerPresenter?
     private let eventSink: (NSDictionary) -> Void
     private var stateTask: Task<Void, Never>?
     private var initializedSDKKey: String?
@@ -68,26 +68,31 @@ public final class OnloReactNativeIOSBridge: NSObject {
     public func logout(completion: @escaping Completion) {
         operation(completion) {
             _ = try await self.sdk.logout()
-            self.presenter.dismiss(animated: false)
+            self.presenter?.dismiss(animated: false)
+            self.presenter = nil
         }
     }
 
-    public func present(from host: UIViewController, conversationID: String?, completion: @escaping Completion) {
-        guard conversationID == nil || isNonBlank(conversationID!) else { completion(failure("invalid_argument")); return }
+    public func present(from host: UIViewController, conversationID: String?, presentationMode: String?, completion: @escaping Completion) {
+        guard conversationID == nil || isNonBlank(conversationID!),
+              let options = messengerOptions(presentationMode) else {
+            completion(failure("invalid_argument")); return
+        }
         operation(completion) {
-            try await self.presenter.present(from: host, conversationId: conversationID)
+            try await self.presentMessenger(from: host, conversationID: conversationID, options: options)
         }
     }
 
     public func dismiss(completion: @escaping Completion) {
-        presenter.dismiss()
+        presenter?.dismiss()
+        presenter = nil
         completion(nil)
     }
 
     public func openConversation(_ conversationID: String, from host: UIViewController, completion: @escaping Completion) {
         guard isNonBlank(conversationID) else { completion(failure("invalid_argument")); return }
         operation(completion) {
-            try await self.presenter.present(from: host, conversationId: conversationID)
+            try await self.presentMessenger(from: host, conversationID: conversationID)
         }
     }
 
@@ -117,7 +122,7 @@ public final class OnloReactNativeIOSBridge: NSObject {
                     // intent. The presenter repeats its account-boundary gate
                     // before UIKit attaches anything.
                     guard let host, let target else { completion("deferred", nil); return }
-                    try await self.presenter.present(from: host, conversationId: target)
+                    try await self.presentMessenger(from: host, conversationID: target)
                     completion("handled", nil)
                 }
             } catch {
@@ -169,9 +174,30 @@ public final class OnloReactNativeIOSBridge: NSObject {
             catch { completion(errorPayload(error)) }
         }
     }
+
+    private func presentMessenger(
+        from host: UIViewController,
+        conversationID: String?,
+        options: OnloMessengerOptions = .init()
+    ) async throws {
+        guard presenter?.isPresentingFrameworkMessenger != true else {
+            throw OnloError.invalidState
+        }
+        let candidate = OnloMessengerPresenter(sdk: sdk, options: options)
+        try await candidate.present(from: host, conversationId: conversationID)
+        presenter = candidate
+    }
 }
 
 private func isNonBlank(_ value: String) -> Bool { !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+private func messengerOptions(_ value: String?) -> OnloMessengerOptions? {
+    switch value {
+    case nil, "contained": return OnloMessengerOptions(presentationMode: .contained)
+    case "fullScreen": return OnloMessengerOptions(presentationMode: .fullScreen)
+    default: return nil
+    }
+}
 
 /// `nil` means no preference was supplied; a non-nil unknown value fails
 /// before it reaches the native core.

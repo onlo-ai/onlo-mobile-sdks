@@ -16,6 +16,7 @@ import ai.onlo.sdk.chat.HelpCenterTopic
 import ai.onlo.sdk.config.MobileConfig
 import android.Manifest
 import android.animation.ObjectAnimator
+import android.animation.PropertyValuesHolder
 import android.animation.ValueAnimator
 import android.app.Activity
 import android.app.AlertDialog
@@ -388,6 +389,7 @@ internal class MessengerDialog(
     private var helpCenterTopics: List<HelpCenterTopic>? = null
     private var helpCenterAvailabilityLoading = false
     private val streamedReplies = mutableMapOf<String, TextView>()
+    private val typingIndicators = mutableMapOf<String, TypingIndicatorView>()
     private var showingEmptyState = false
     private var speechRecognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
@@ -406,6 +408,7 @@ internal class MessengerDialog(
         setOnDismissListener {
             stopVoice()
             stopSkeleton()
+            clearTypingIndicators()
             speechRecognizer?.destroy()
             speechRecognizer = null
             textToSpeech?.shutdown()
@@ -748,6 +751,7 @@ internal class MessengerDialog(
     ) dp(16) else 0
 
     private fun loadInbox(destination: Surface = Surface.HOME) {
+        clearTypingIndicators()
         activeSurface = destination
         updateChrome()
         activeConversationId = null
@@ -845,6 +849,7 @@ internal class MessengerDialog(
                     pendingAttachments.clear()
                     updateAttachmentControl()
                     appendMessage(liveMessage(message, outgoing = true))
+                    removeTypingIndicator(clientMessageId)
                     streamedReplies.remove(clientMessageId)
                 }
                 announce("Message queued for delivery.")
@@ -1010,6 +1015,7 @@ internal class MessengerDialog(
         val visibility = currentSurfaceVisibility()
         if (surface == Surface.FAQ && !visibility.faq) return
         if (surface != Surface.CONVERSATIONS) stopVoice()
+        if (surface != Surface.CONVERSATIONS) clearTypingIndicators()
         activeSurface = surface
         composerRow.visibility = View.VISIBLE
         updateChrome()
@@ -1071,6 +1077,10 @@ internal class MessengerDialog(
 
     private fun sectionHeader(title: String, action: String?, onAction: () -> Unit): View =
         LinearLayout(context).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(10), 0, dp(4))
             addView(TextView(context).apply {
@@ -1446,10 +1456,14 @@ internal class MessengerDialog(
                 activeConversationId = event.conversationId
                 announce("Message sent.")
                 if (event.duplicate) {
+                    removeTypingIndicator(event.clientMessageId)
                     loadConversation(event.conversationId, showLoading = false)
+                } else {
+                    showTypingIndicator(event.clientMessageId)
                 }
             }
             is NativeMessengerEvent.Text -> {
+                removeTypingIndicator(event.clientMessageId)
                 val reply = streamedReplies.getOrPut(event.clientMessageId) {
                     liveMessage("", outgoing = false).also(::appendMessage)
                 }
@@ -1457,6 +1471,7 @@ internal class MessengerDialog(
                 scrollToBottom()
             }
             is NativeMessengerEvent.Done -> {
+                removeTypingIndicator(event.clientMessageId)
                 val completedReply = streamedReplies.remove(event.clientMessageId)?.text?.toString()
                 if (speaksReplies && !completedReply.isNullOrBlank()) {
                     speakCompletedReply(completedReply)
@@ -1464,6 +1479,7 @@ internal class MessengerDialog(
                 loadConversation(event.conversationId, showLoading = false)
             }
             is NativeMessengerEvent.Failed -> {
+                removeTypingIndicator(event.clientMessageId)
                 streamedReplies.remove(event.clientMessageId)
                 announce(
                     when {
@@ -1505,6 +1521,38 @@ internal class MessengerDialog(
         scrollToBottom()
     }
 
+    private fun showTypingIndicator(clientMessageId: String) {
+        removeTypingIndicator(clientMessageId)
+        if (activeConversationId == null || showingEmptyState) {
+            body.removeAllViews()
+            showingEmptyState = false
+        }
+        val indicator = TypingIndicatorView(
+            context,
+            withAlpha(incomingTextColor(), 0.55f),
+        )
+        typingIndicators[clientMessageId] = indicator
+        body.addView(
+            indicator,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(8) },
+        )
+        scrollToBottom()
+    }
+
+    private fun removeTypingIndicator(clientMessageId: String) {
+        val indicator = typingIndicators.remove(clientMessageId) ?: return
+        indicator.stop()
+        (indicator.parent as? ViewGroup)?.removeView(indicator)
+    }
+
+    private fun clearTypingIndicators() {
+        typingIndicators.values.forEach(TypingIndicatorView::stop)
+        typingIndicators.clear()
+    }
+
     private fun scrollToBottom() {
         scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
     }
@@ -1531,6 +1579,7 @@ internal class MessengerDialog(
 
     private fun renderTranscript(transcript: ai.onlo.sdk.chat.ConversationDetail) {
         stopSkeleton()
+        clearTypingIndicators()
         streamedReplies.clear()
         showingEmptyState = false
         body.removeAllViews()
@@ -2048,6 +2097,76 @@ internal class MessengerDialog(
         const val MESSAGE_OUTGOING = "onlo_message_outgoing"
         const val MESSAGE_INCOMING = "onlo_message_incoming"
     }
+}
+
+private class TypingIndicatorView(
+    context: android.content.Context,
+    dotColor: Int,
+) : LinearLayout(context) {
+    private val dots = List(3) {
+        View(context).apply {
+            alpha = 0.5f
+            scaleX = 0.8f
+            scaleY = 0.8f
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(dotColor)
+            }
+        }
+    }
+    private val animators = mutableListOf<ObjectAnimator>()
+
+    init {
+        orientation = HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, dp(4), 0, dp(4))
+        contentDescription = "Support is typing"
+        accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+        dots.forEachIndexed { index, dot ->
+            addView(
+                dot,
+                LayoutParams(dp(6), dp(6)).apply {
+                    if (index < dots.lastIndex) marginEnd = dp(3)
+                },
+            )
+        }
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        start()
+    }
+
+    override fun onDetachedFromWindow() {
+        stop()
+        super.onDetachedFromWindow()
+    }
+
+    fun stop() {
+        animators.forEach(ObjectAnimator::cancel)
+        animators.clear()
+    }
+
+    private fun start() {
+        if (animators.isNotEmpty()) return
+        dots.forEachIndexed { index, dot ->
+            ObjectAnimator.ofPropertyValuesHolder(
+                dot,
+                PropertyValuesHolder.ofFloat(View.SCALE_X, 0.8f, 1f, 0.8f, 0.8f),
+                PropertyValuesHolder.ofFloat(View.SCALE_Y, 0.8f, 1f, 0.8f, 0.8f),
+                PropertyValuesHolder.ofFloat(View.ALPHA, 0.5f, 1f, 0.5f, 0.5f),
+            ).apply {
+                duration = 1_400
+                startDelay = index * 160L
+                repeatCount = ValueAnimator.INFINITE
+                repeatMode = ValueAnimator.RESTART
+                start()
+                animators += this
+            }
+        }
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 }
 
 private class OnloMarkView(context: android.content.Context) : View(context) {

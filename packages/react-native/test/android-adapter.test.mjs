@@ -40,11 +40,13 @@ test('Android adapter delegates every supported operation to the native core', (
   assert.match(moduleSource, /"unreadCountChanged"/);
   assert.match(moduleSource, /OnloPhase\.RESTORING -> "uninitialized"/);
   assert.match(moduleSource, /OnloPhase\.OFFLINE_READY -> "offline"/);
-  assert.match(moduleSource, /OnloMessenger\.present\(requireCurrentActivity\(\), requireClient\(\)\)/);
+  assert.match(moduleSource, /"contained" -> OnloMessengerPresentationMode\.CONTAINED/);
+  assert.match(moduleSource, /"fullScreen" -> OnloMessengerPresentationMode\.FULL_SCREEN/);
+  assert.match(moduleSource, /OnloMessenger\.present\(requireCurrentActivity\(\), messengerOptions, requireClient\(\)\)/);
   assert.match(moduleSource, /OnloMessenger\.dismiss\(\)/);
   assert.match(moduleSource, /currentActivity/);
   assert.doesNotMatch(moduleSource, /PRESENTER_OUTCOME_GATE/);
-  assert.match(moduleSource, /OnloMessenger\.openConversation\(requireCurrentActivity\(\), conversationId, requireClient\(\)\)/);
+  assert.match(moduleSource, /OnloMessenger\.openConversation\(requireCurrentActivity\(\), conversationId, options, requireClient\(\)\)/);
   assert.match(moduleSource, /OnloMessenger\.openConversation\(activity, outcome\.conversationId, core\)/);
   assert.match(moduleSource, /availableCurrentActivity\(\) \?: return@runResultOperation "deferred"/);
 });

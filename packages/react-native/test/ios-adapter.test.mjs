@@ -13,7 +13,10 @@ test('iOS adapter delegates the public RN surface to one native OnloSDK core', (
   for (const seam of ['loginUnidentifiedUser', 'loginIdentifiedUser', 'logout', 'setAPNsPushToken', 'handlePushNotificationFromBridge']) {
     assert.match(swift, new RegExp(`sdk\\.${seam}`));
   }
-  assert.match(swift, /OnloMessengerPresenter\(sdk: sdk\)/);
+  assert.match(swift, /OnloMessengerPresenter\(sdk: sdk, options: options\)/);
+  assert.match(swift, /presenter\?\.isPresentingFrameworkMessenger != true/);
+  assert.match(swift, /case nil, "contained": return OnloMessengerOptions\(presentationMode: \.contained\)/);
+  assert.match(swift, /case "fullScreen": return OnloMessengerOptions\(presentationMode: \.fullScreen\)/);
   assert.match(module, /RCT_EXPORT_MODULE\(OnloSDK\)/);
   assert.match(module, /#import <OnloSDKSpec\/OnloSDKSpec\.h>/);
   assert.match(module, /NativeOnloSDKSpecJSI/);
@@ -40,6 +43,6 @@ test('iOS adapter is a local autolinked pod with no parallel persistence, networ
 test('push navigation is authorised in the core before a host-selected presentation', () => {
   assert.match(swift, /handlePushNotificationFromBridge/);
   assert.match(swift, /guard let host, let target else \{ completion\("deferred", nil\); return \}/);
-  assert.match(swift, /presenter\.present\(from: host, conversationId: target\)/);
+  assert.match(swift, /presentMessenger\(from: host, conversationID: target\)/);
   assert.match(module, /RCTPresentedViewController\(\)/);
 });

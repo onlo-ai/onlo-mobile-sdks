@@ -22,6 +22,8 @@ enum OnloNotificationPreference { enabled, muted }
 
 enum OnloPushHandlingResult { handled, deferred, notOnlo }
 
+enum OnloPresentationMode { contained, fullScreen }
+
 enum OnloRetryDirective {
   never('never'),
   afterTokenRefresh('after_token_refresh'),
@@ -123,9 +125,13 @@ final class OnloIdentifiedLoginOptions {
 }
 
 final class OnloPresentOptions {
-  const OnloPresentOptions({this.conversationId});
+  const OnloPresentOptions({
+    this.conversationId,
+    this.presentationMode = OnloPresentationMode.contained,
+  });
 
   final String? conversationId;
+  final OnloPresentationMode presentationMode;
 }
 
 final class OnloPushTokenOptions {

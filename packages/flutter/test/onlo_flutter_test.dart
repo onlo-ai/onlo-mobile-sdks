@@ -21,7 +21,15 @@ void main() {
     await Onlo.initialize(sdkKey: 'onlo_flutter_sk_public_example');
     await Onlo.loginUnidentifiedUser();
     await Onlo.loginIdentifiedUser(userJwt: 'header.payload.signature');
-    await Onlo.present(conversationId: 'conversation-id');
+    await Onlo.present(
+      conversationId: 'conversation-id',
+      presentationMode: OnloPresentationMode.fullScreen,
+    );
+    expect(fake.lastPresentOptions?.conversationId, 'conversation-id');
+    expect(
+      fake.lastPresentOptions?.presentationMode,
+      OnloPresentationMode.fullScreen,
+    );
     await Onlo.dismiss();
     await Onlo.openConversation('conversation-id');
     await Onlo.setPushToken(
@@ -131,6 +139,7 @@ void main() {
     OnloPlatform.instance = MethodChannelOnloPlatform();
 
     await Onlo.initialize(sdkKey: 'onlo_flutter_sk_public_example');
+    await Onlo.present();
     final outcome = await Onlo.handlePushNotification(
       const OnloPushNotificationPayload(
         conversationId: 'conversation-id',
@@ -141,8 +150,13 @@ void main() {
 
     expect(calls.map((call) => call.method), [
       'initialize',
+      'present',
       'handlePushNotification',
     ]);
+    expect(calls[1].arguments, <String, Object?>{
+      'conversationId': null,
+      'presentationMode': 'contained',
+    });
     expect(outcome, OnloPushHandlingResult.deferred);
   });
 
@@ -179,6 +193,7 @@ void main() {
 
 final class _FakeOnloPlatform extends OnloPlatform {
   final List<String> calls = <String>[];
+  OnloPresentOptions? lastPresentOptions;
 
   @override
   Future<void> dismiss() async => calls.add('dismiss');
@@ -217,8 +232,10 @@ final class _FakeOnloPlatform extends OnloPlatform {
       );
 
   @override
-  Future<void> present(OnloPresentOptions options) async =>
-      calls.add('present');
+  Future<void> present(OnloPresentOptions options) async {
+    lastPresentOptions = options;
+    calls.add('present');
+  }
 
   @override
   Future<void> setPushToken(OnloPushTokenOptions options) async =>

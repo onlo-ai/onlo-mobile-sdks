@@ -11,6 +11,8 @@ import ai.onlo.sdk.OnloState
 import ai.onlo.sdk.Onlo
 import ai.onlo.sdk.OpenConversationOutcome
 import ai.onlo.sdk.messenger.OnloMessenger
+import ai.onlo.sdk.messenger.OnloMessengerOptions
+import ai.onlo.sdk.messenger.OnloMessengerPresentationMode
 import ai.onlo.sdk.protocol.NotificationPreference
 import ai.onlo.sdk.protocol.PushProvider
 import ai.onlo.sdk.push.PushPayloadOutcome
@@ -146,23 +148,40 @@ public class OnloFlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
     }
 
     private fun present(call: MethodCall, result: MethodChannel.Result) {
-        val conversationId = call.optionalString("conversationId")
-        if (call.hasArgument("conversationId") && conversationId == null) return result.safeError("invalid_argument")
+        val rawConversationId = (call.arguments as? Map<*, *>)?.get("conversationId")
+        if (rawConversationId != null && (rawConversationId !is String || rawConversationId.isBlank())) {
+            return result.safeError("invalid_argument")
+        }
+        val conversationId = rawConversationId as? String
+        val rawPresentationMode = call.optionalString("presentationMode")
+        if (call.hasArgument("presentationMode") && rawPresentationMode == null) {
+            return result.safeError("invalid_argument")
+        }
+        val presentationMode = when (rawPresentationMode) {
+            null, "contained" -> OnloMessengerPresentationMode.CONTAINED
+            "fullScreen" -> OnloMessengerPresentationMode.FULL_SCREEN
+            else -> return result.safeError("invalid_argument")
+        }
+        val messengerOptions = OnloMessengerOptions(presentationMode = presentationMode)
         if (conversationId != null) {
-            openConversation(conversationId, result)
+            openConversation(conversationId, result, messengerOptions)
             return
         }
         operation(result) {
             val host = requireActivity()
-            OnloMessenger.present(host, requireClient())
+            OnloMessenger.present(host, messengerOptions, requireClient())
         }
     }
 
-    private fun openConversation(conversationId: String, result: MethodChannel.Result) = operation(result) {
+    private fun openConversation(
+        conversationId: String,
+        result: MethodChannel.Result,
+        options: OnloMessengerOptions = OnloMessengerOptions(),
+    ) = operation(result) {
         val host = requireActivity()
         // This helper performs exactly one native authorization/refetch before
         // it attaches a native dialog. Dart receives no transcript content.
-        when (OnloMessenger.openConversation(host, conversationId, requireClient())) {
+        when (OnloMessenger.openConversation(host, conversationId, options, requireClient())) {
             OpenConversationOutcome.NoActiveSession -> throw BridgeFailure("native_operation_failed")
             OpenConversationOutcome.NotAuthorised -> throw BridgeFailure("forbidden_principal")
             OpenConversationOutcome.Unavailable -> throw BridgeFailure("native_operation_failed")

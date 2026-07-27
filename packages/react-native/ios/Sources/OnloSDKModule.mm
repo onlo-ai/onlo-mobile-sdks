@@ -93,12 +93,18 @@ RCT_REMAP_METHOD(present,
                  resolve:(RCTPromiseResolveBlock)resolve
                  reject:(RCTPromiseRejectBlock)reject) {
   NSString *conversationID = options[@"conversationId"];
+  NSString *presentationMode = options[@"presentationMode"];
   if (conversationID != nil && (![conversationID isKindOfClass:NSString.class] || conversationID.length == 0)) {
+    [self reject:reject payload:OnloInvalidArgument()]; return;
+  }
+  if (presentationMode != nil &&
+      (![presentationMode isKindOfClass:NSString.class] ||
+       ![@[ @"contained", @"fullScreen" ] containsObject:presentationMode])) {
     [self reject:reject payload:OnloInvalidArgument()]; return;
   }
   UIViewController *host = RCTPresentedViewController();
   if (host == nil) { [self reject:reject payload:OnloOperationFailure()]; return; }
-  [self.nativeBridge presentFrom:host conversationID:conversationID completion:^(NSDictionary *error) { [self complete:resolve reject:reject error:error]; }];
+  [self.nativeBridge presentFrom:host conversationID:conversationID presentationMode:presentationMode completion:^(NSDictionary *error) { [self complete:resolve reject:reject error:error]; }];
 }
 
 RCT_REMAP_METHOD(dismiss, dismiss:(RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject) {

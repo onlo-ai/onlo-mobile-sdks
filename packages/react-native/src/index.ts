@@ -16,7 +16,11 @@ export interface LoginIdentifiedUserOptions {
 
 export interface PresentOptions {
   conversationId?: string;
+  /** Defaults to `contained`, keeping Messenger inside the host app surface. */
+  presentationMode?: OnloPresentationMode;
 }
+
+export type OnloPresentationMode = 'contained' | 'fullScreen';
 
 export type OnloPushProvider = 'apns' | 'fcm';
 export type OnloNotificationPreference = 'enabled' | 'muted';
@@ -141,6 +145,11 @@ function validatePresentOptions(value: PresentOptions | undefined): void {
   }
   if (value.conversationId !== undefined) {
     requireNonEmptyString(value.conversationId, 'present requires a non-empty conversationId when supplied.');
+  }
+  if (value.presentationMode !== undefined
+    && value.presentationMode !== 'contained'
+    && value.presentationMode !== 'fullScreen') {
+    throw bridgeError('invalid_argument', 'presentationMode must be contained or fullScreen.');
   }
 }
 

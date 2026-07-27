@@ -165,6 +165,14 @@ public final class OnloMessengerPresenter: NSObject, UIAdaptivePresentationContr
         unregisterInvalidator()
     }
 
+    /// Framework bridges use this to reject a second presentation instead of
+    /// nesting another Messenger when a host changes presentation mode.
+    @_spi(FrameworkBridge)
+    public var isPresentingFrameworkMessenger: Bool {
+        clearFinishedPresentation()
+        return navigationController != nil
+    }
+
     public func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
         navigationController = nil
         messengerController = nil

@@ -35,7 +35,7 @@ the native iOS/Android artifacts and then the pub.dev package are released.
 | Area | Facade API | Current boundary |
 | --- | --- | --- |
 | Lifecycle | `initialize(sdkKey:)`, `loginUnidentifiedUser()`, `loginIdentifiedUser(userJwt:)`, `logout()` | Both adapters forward to the native session core; Dart retains no session state. |
-| Presentation | `present(conversationId: optional)`, `dismiss()`, `openConversation(conversationId)` | Android uses the host activity; iOS uses the current Flutter presentation host. Conversation ownership remains native. |
+| Presentation | `present(conversationId: optional, presentationMode: optional)`, `dismiss()`, `openConversation(conversationId)` | `presentationMode` defaults to `OnloPresentationMode.contained`; hosts may explicitly select `fullScreen`. Android uses the host activity; iOS uses the current Flutter presentation host. Conversation ownership remains native. |
 | Push | `setPushToken(provider:token:notificationPreference:locale:)`, `handlePushNotification(payload)` | Android accepts FCM and iOS accepts APNs; both delegate protected registration/reconciliation and authorised opening to the core. |
 | Observation | `observeState()`, `observeIdentityState()`, `observeConnectionState()`, `observeUnreadCount()` | The event channel exposes native-derived lifecycle and identified-customer aggregate unread state; no inbox or credential state is retained in Dart. |
 | Types | Session, identity, connection, push-result, error-code, and retry-directive types | Typed boundary values and native-safe error mapping. |
@@ -44,6 +44,8 @@ the native iOS/Android artifacts and then the pub.dev package are released.
 `observeUnreadCount()` emits the server's exact aggregate for identified
 users. It emits `null` for anonymous sessions and immediately at
 logout/account switch. Per-conversation badges remain native.
+
+The Messenger UI is always rendered by the native Onlo core, so the widget-parity layout, cached conversations, typing indicator, message alignment, skeleton loading, connectivity badge, and fixed Onlo footer branding stay identical in native and Flutter hosts. Use `Onlo.present()` for the contained host-app surface, or pass `presentationMode: OnloPresentationMode.fullScreen` only when the host intentionally wants a full-screen experience.
 
 Pass the platform token when APNs/FCM supplies it. Native memory retains a
 pre-login token without contacting Onlo anonymously, then registers it after

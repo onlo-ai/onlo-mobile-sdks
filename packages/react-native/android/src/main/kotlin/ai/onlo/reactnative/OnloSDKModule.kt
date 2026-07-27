@@ -15,6 +15,8 @@ import ai.onlo.sdk.protocol.RetryDirective
 import ai.onlo.sdk.push.PushPayloadOutcome
 import ai.onlo.sdk.push.PushRegistrationOutcome
 import ai.onlo.sdk.messenger.OnloMessenger
+import ai.onlo.sdk.messenger.OnloMessengerOptions
+import ai.onlo.sdk.messenger.OnloMessengerPresentationMode
 import android.app.Activity
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
@@ -102,14 +104,30 @@ public class OnloSDKModule(
 
     @ReactMethod
     override fun present(options: ReadableMap?, promise: Promise) {
+        val presentationMode = when (val value = options?.optionalString("presentationMode")) {
+            null -> {
+                if (options?.hasKey("presentationMode") == true) {
+                    promise.rejectSafe("invalid_argument")
+                    return
+                }
+                OnloMessengerPresentationMode.CONTAINED
+            }
+            "contained" -> OnloMessengerPresentationMode.CONTAINED
+            "fullScreen" -> OnloMessengerPresentationMode.FULL_SCREEN
+            else -> {
+                promise.rejectSafe("invalid_argument")
+                return
+            }
+        }
+        val messengerOptions = OnloMessengerOptions(presentationMode = presentationMode)
         if (options != null && options.hasKey("conversationId")) {
             val conversationId = options.requiredNonBlankString("conversationId")
                 ?: return promise.rejectSafe("invalid_argument")
-            openConversationInternal(conversationId, promise)
+            openConversationInternal(conversationId, messengerOptions, promise)
             return
         }
         runOperation(promise) {
-            OnloMessenger.present(requireCurrentActivity(), requireClient())
+            OnloMessenger.present(requireCurrentActivity(), messengerOptions, requireClient())
         }
     }
 
@@ -126,7 +144,7 @@ public class OnloSDKModule(
             promise.rejectSafe("invalid_argument")
             return
         }
-        openConversationInternal(conversationId, promise)
+        openConversationInternal(conversationId, OnloMessengerOptions(), promise)
     }
 
     @ReactMethod
@@ -214,8 +232,12 @@ public class OnloSDKModule(
         super.invalidate()
     }
 
-    private fun openConversationInternal(conversationId: String, promise: Promise) = runOperation(promise) {
-        when (OnloMessenger.openConversation(requireCurrentActivity(), conversationId, requireClient())) {
+    private fun openConversationInternal(
+        conversationId: String,
+        options: OnloMessengerOptions,
+        promise: Promise,
+    ) = runOperation(promise) {
+        when (OnloMessenger.openConversation(requireCurrentActivity(), conversationId, options, requireClient())) {
             OpenConversationOutcome.Opened -> Unit
             OpenConversationOutcome.NoActiveSession -> throw BridgeFailure("native_operation_failed")
             OpenConversationOutcome.NotAuthorised -> throw BridgeFailure("native_operation_failed")

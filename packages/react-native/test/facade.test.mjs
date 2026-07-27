@@ -48,7 +48,10 @@ test('validates initialization and forwards valid calls directly to native', asy
   await Onlo.initialize({ sdkKey: 'onlo_rn_sk_example' });
   await Onlo.loginUnidentifiedUser();
   await Onlo.loginIdentifiedUser({ userJwt: 'header.payload.signature' });
-  await Onlo.present({ conversationId: 'synthetic-conversation' });
+  await Onlo.present({
+    conversationId: 'synthetic-conversation',
+    presentationMode: 'fullScreen',
+  });
   await Onlo.dismiss();
   await Onlo.openConversation('synthetic-conversation');
   await Onlo.setPushToken({
@@ -71,7 +74,10 @@ test('validates initialization and forwards valid calls directly to native', asy
     ['initialize', { sdkKey: 'onlo_rn_sk_example' }],
     ['loginUnidentifiedUser'],
     ['loginIdentifiedUser', { userJwt: 'header.payload.signature' }],
-    ['present', { conversationId: 'synthetic-conversation' }],
+    ['present', {
+      conversationId: 'synthetic-conversation',
+      presentationMode: 'fullScreen',
+    }],
     ['dismiss'],
     ['openConversation', 'synthetic-conversation'],
     ['setPushToken', {
@@ -110,6 +116,7 @@ test('rejects invalid presentation and push input before calling native', async 
   const { Onlo } = loadFacade(native);
 
   await assert.rejects(Onlo.present({ conversationId: ' ' }), { code: 'invalid_argument' });
+  await assert.rejects(Onlo.present({ presentationMode: 'sheet' }), { code: 'invalid_argument' });
   await assert.rejects(Onlo.openConversation(''), { code: 'invalid_argument' });
   await assert.rejects(Onlo.setPushToken({ provider: 'web', token: 'synthetic' }), { code: 'invalid_argument' });
   await assert.rejects(Onlo.setPushToken({ provider: 'fcm', token: ' ' }), { code: 'invalid_argument' });

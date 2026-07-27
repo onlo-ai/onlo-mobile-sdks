@@ -44,7 +44,10 @@ final class MethodChannelOnloPlatform extends OnloPlatform {
   @override
   Future<void> present(OnloPresentOptions options) => _invokeVoid(
         'present',
-        <String, Object?>{'conversationId': options.conversationId},
+        <String, Object?>{
+          'conversationId': options.conversationId,
+          'presentationMode': options.presentationMode.name,
+        },
       );
 
   @override

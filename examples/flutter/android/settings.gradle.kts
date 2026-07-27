@@ -15,6 +15,12 @@ pluginManagement {
         mavenCentral()
         gradlePluginPortal()
     }
+
+    plugins {
+        id("org.jetbrains.dokka") version "2.2.0"
+        id("org.jetbrains.dokka-javadoc") version "2.2.0"
+        id("com.vanniktech.maven.publish.base") version "0.34.0"
+    }
 }
 
 plugins {

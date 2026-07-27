@@ -62,6 +62,15 @@ Onlo.present();
 await Onlo.logout();
 ```
 
+Presentation remains host-controlled while the Messenger UI remains native:
+
+| Wrapper | Contained host-app surface (default) | Explicit full screen |
+| --- | --- | --- |
+| React Native | `Onlo.present()` | `Onlo.present({ presentationMode: 'fullScreen' })` |
+| Flutter | `Onlo.present()` | `Onlo.present(presentationMode: OnloPresentationMode.fullScreen)` |
+
+Both modes reuse the native Messenger’s protected cache, configured content, widget-parity layout, typing state, connection status, and hardcoded Onlo footer branding. React Native and Flutter never render or persist a parallel chat UI.
+
 `initialize` does not display UI or prompt for notifications, camera, gallery, or microphone access. The release implementation restores protected local state, obtains a server session, and loads compatible Onlo configuration.
 
 > Origin rule: production uses `https://onlo.ai`. A staging/review build receives its exact HTTPS origin from release configuration; the SDK never guesses or accepts a host-selected endpoint. Local development-only overrides must not ship.

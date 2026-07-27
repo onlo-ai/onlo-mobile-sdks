@@ -27,7 +27,10 @@ abstract final class Onlo {
 
   static Future<void> logout() => OnloPlatform.instance.logout();
 
-  static Future<void> present({String? conversationId}) {
+  static Future<void> present({
+    String? conversationId,
+    OnloPresentationMode presentationMode = OnloPresentationMode.contained,
+  }) {
     if (conversationId != null) {
       _requireNonEmpty(
         conversationId,
@@ -35,7 +38,10 @@ abstract final class Onlo {
       );
     }
     return OnloPlatform.instance.present(
-      OnloPresentOptions(conversationId: conversationId),
+      OnloPresentOptions(
+        conversationId: conversationId,
+        presentationMode: presentationMode,
+      ),
     );
   }
 

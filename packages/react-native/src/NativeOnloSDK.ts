@@ -12,6 +12,7 @@ export interface NativeLoginIdentifiedUserOptions {
 
 export interface NativePresentOptions {
   conversationId?: string;
+  presentationMode?: string;
 }
 
 export interface NativePushTokenOptions {

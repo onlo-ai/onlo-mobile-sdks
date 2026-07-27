@@ -484,6 +484,7 @@ await Onlo.loginIdentifiedUser({
 });
 
 await Onlo.present();
+// Optional: await Onlo.present({ presentationMode: 'fullScreen' });
 await Onlo.logout();
 ```
 
@@ -526,6 +527,9 @@ await Onlo.loginIdentifiedUser(
 );
 
 await Onlo.present();
+// Optional: await Onlo.present(
+//   presentationMode: OnloPresentationMode.fullScreen,
+// );
 await Onlo.logout();
 ```
 

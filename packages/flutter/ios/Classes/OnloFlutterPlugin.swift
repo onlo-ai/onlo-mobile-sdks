@@ -9,7 +9,7 @@ import UIKit
 @MainActor
 public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private let sdk = OnloSDK()
-    private lazy var presenter = OnloMessengerPresenter(sdk: sdk)
+    private var presenter: OnloMessengerPresenter?
     private weak var hostViewController: UIViewController?
     private var eventSink: FlutterEventSink?
     private var stateTask: Task<Void, Never>?
@@ -65,12 +65,14 @@ public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHand
         case "logout":
             operation(result) {
                 _ = try await self.sdk.logout()
-                self.presenter.dismiss()
+                self.presenter?.dismiss()
+                self.presenter = nil
             }
         case "present":
             present(call, result: result)
         case "dismiss":
-            presenter.dismiss()
+            presenter?.dismiss()
+            presenter = nil
             result(nil)
         case "openConversation":
             guard let conversationId = nonEmpty(arguments(call)["conversationId"]) else {
@@ -117,16 +119,21 @@ public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHand
             result(failure("invalid_argument")); return
         }
         let conversationId = values["conversationId"] as? String
+        let rawPresentationMode = values["presentationMode"] as? String
+        guard (!values.keys.contains("presentationMode") || rawPresentationMode != nil),
+              let options = messengerOptions(rawPresentationMode) else {
+            result(failure("invalid_argument")); return
+        }
         operation(result) {
             guard let host = self.presentationHost() else { throw BridgeError(code: "native_operation_failed") }
-            try await self.presenter.present(from: host, conversationId: conversationId)
+            try await self.presentMessenger(from: host, conversationId: conversationId, options: options)
         }
     }
 
     private func openConversation(_ conversationId: String, result: @escaping FlutterResult) {
         operation(result) {
             guard let host = self.presentationHost() else { throw BridgeError(code: "native_operation_failed") }
-            try await self.presenter.present(from: host, conversationId: conversationId)
+            try await self.presentMessenger(from: host, conversationId: conversationId)
         }
     }
 
@@ -170,7 +177,7 @@ public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHand
                     // The push refetch was authorised above. Re-authorise at
                     // presentation time because a logout/account switch can
                     // happen while the Flutter host is resuming.
-                    try await self.presenter.present(from: host, conversationId: conversationId)
+                    try await self.presentMessenger(from: host, conversationId: conversationId)
                     return "handled"
                 }
             case .deferred: return "deferred"
@@ -217,6 +224,19 @@ public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHand
         let host = hostViewController ?? topViewController()
         return host?.viewIfLoaded?.window == nil ? nil : host
     }
+
+    private func presentMessenger(
+        from host: UIViewController,
+        conversationId: String?,
+        options: OnloMessengerOptions = .init()
+    ) async throws {
+        guard presenter?.isPresentingFrameworkMessenger != true else {
+            throw OnloError.invalidState
+        }
+        let candidate = OnloMessengerPresenter(sdk: sdk, options: options)
+        try await candidate.present(from: host, conversationId: conversationId)
+        presenter = candidate
+    }
 }
 
 private struct BridgeError: Error { let code: String }
@@ -225,6 +245,14 @@ private func arguments(_ call: FlutterMethodCall) -> [String: Any] { call.argume
 private func nonEmpty(_ value: Any?) -> String? {
     guard let string = value as? String, !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
     return string
+}
+
+private func messengerOptions(_ value: String?) -> OnloMessengerOptions? {
+    switch value {
+    case nil, "contained": return OnloMessengerOptions(presentationMode: .contained)
+    case "fullScreen": return OnloMessengerOptions(presentationMode: .fullScreen)
+    default: return nil
+    }
 }
 
 private func failure(_ code: String) -> FlutterError { FlutterError(code: code, message: "Onlo operation failed (\(code)).", details: ["code": code]) }
