@@ -40,8 +40,48 @@ physical-device qualification and Maven Central release.
 | `loginIdentifiedUser(userJwt)` | Checks only compact JWT shape, then exchanges the proof without persisting or verifying it locally. |
 | `logout()` | Blocks the old partition before revocation; returns a typed pending result when a retry is needed. |
 | `state` / `unreadCount` / `presentationIntent` | Native `StateFlow` values. `unreadCount` is the exact identified-user aggregate and becomes `null` for anonymous/logout/account switch. `present()` only emits an intent; it installs no overlay. |
-| `OnloMessenger.present(activity)` | Presents the SDK-owned Android Views messenger from a host-controlled entry point. It never adds an overlay, manifest component, or permission prompt. |
+| `OnloMessenger.present(activity)` | Presents the SDK-owned Android Views messenger as an inset-safe contained modal inside the existing Activity. It never launches another Activity, adds a manifest component, or asks for permission. |
+| `OnloMessenger.present(activity, options)` | Lets the host explicitly select `CONTAINED` (default) or `FULL_SCREEN` presentation. Both modes respect system bars, IME, rotation, and multi-window bounds. |
 | `OnloMessenger.openConversation(activity, id)` | Re-authorises and refreshes the requested conversation before presenting it; an unauthorised target is not shown. |
+
+## Messenger behavior
+
+Normal presentation opens on the WebChat-parity Home surface instead of a
+thread or segmented navigation view.
+
+| Home element | Behavior |
+| --- | --- |
+| Greeting | Uses the accepted JWT first name for the current runtime; falls back to `Hi there 👋` after process restoration. The name is never persisted. |
+| Recent conversations | Shows up to three with relative time; **See all** opens the complete authorised list. |
+| Quick questions | Shows up to three; **Browse all** appears only when published Help Center articles exist and opens Help Center. |
+| Composer | Multiline WebChat-parity input with dashboard-gated voice, attachment, code and link controls; starts a new durable thread from Home. |
+| Back | Returns from a thread, FAQ, or Help Center surface to Home. |
+| Footer | Keeps Powered by Onlo visible below the composer. |
+
+The default contained dialog stays inside the host Activity, uses a rounded
+surface, and keeps header, composer, branding, and navigation above Android
+system bars. Android Back returns nested content to Home, then dismisses Home.
+Full-screen is an explicit host choice.
+
+| Placement | Configuration | Result |
+| --- | --- | --- |
+| Contained | `OnloMessengerOptions()` | Default modal, inset on phones and width-limited on larger windows. |
+| Full-screen | `OnloMessengerOptions(OnloMessengerPresentationMode.FULL_SCREEN)` | Fills the Activity content area while still respecting status/navigation bars. |
+
+```kotlin
+OnloMessenger.present(
+    activity = this,
+    options = OnloMessengerOptions(
+        presentationMode = OnloMessengerPresentationMode.FULL_SCREEN,
+    ),
+)
+```
+
+All Home rows come from the authorised SDK inbox/configuration; the shipping
+messenger contains no sample conversation or FAQ data.
+
+Answered FAQs render directly without creating a conversation or invoking AI.
+An unanswered quick question uses the normal durable chat and AI pipeline.
 
 ## Storage and protocol invariants
 

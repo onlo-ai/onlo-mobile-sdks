@@ -175,6 +175,13 @@ internal interface OwnerScopedOutboxStore {
         replaceTranscript(authority.ownerScope, conversationId, payload)
         return true
     }
+    /** Stores the encrypted inbox index only while this exact session authority is active. */
+    suspend fun replaceConversationListIfAuthorised(
+        authority: PersistenceAuthority,
+        payload: String,
+    ): Boolean = false
+    /** Reads the encrypted inbox index only while this exact session authority is active. */
+    suspend fun conversationListIfAuthorised(authority: PersistenceAuthority): String? = null
     suspend fun reconcileAcceptedIfAuthorised(
         authority: PersistenceAuthority,
         clientMessageId: String,
@@ -191,3 +198,4 @@ internal interface OwnerScopedOutboxStore {
 
 internal class OwnerBlockedException : IllegalStateException("owner_blocked")
 internal class TranscriptStorageUnreadableException : IllegalStateException("transcript_unreadable")
+internal class ConversationListStorageUnreadableException : IllegalStateException("conversation_list_unreadable")

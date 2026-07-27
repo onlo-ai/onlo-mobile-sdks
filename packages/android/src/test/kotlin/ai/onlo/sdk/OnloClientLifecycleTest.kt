@@ -20,6 +20,7 @@ import ai.onlo.sdk.storage.OutboxState
 import ai.onlo.sdk.storage.OwnerBlockedException
 import ai.onlo.sdk.storage.OwnerScope
 import ai.onlo.sdk.storage.OwnerScopedOutboxStore
+import ai.onlo.sdk.storage.PersistenceAuthority
 import ai.onlo.sdk.transport.OnloHttpRequest
 import ai.onlo.sdk.transport.OnloHttpResponse
 import ai.onlo.sdk.transport.OnloSessionApi
@@ -952,6 +953,60 @@ class OnloClientLifecycleTest {
         assertEquals(1, transport.readRequests)
     }
 
+    @Test
+    fun `encrypted inbox index remains available after client recreation and an offline refresh`() = runBlocking {
+        val credentials = FakeCredentials().apply {
+            state = ProtectedSessionState(protectedIdentified(), null)
+        }
+        val outbox = FakeOutbox()
+        val online = InboxCacheTransport(failConversationList = false)
+        val first = client(
+            credentials,
+            outbox,
+            transport = online,
+            widgetChatApi = WidgetChatApi(online, ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())),
+        )
+        first.startRestoration()
+
+        val fresh = first.loadMessengerInbox() as MessengerInboxResult.Ready
+        assertEquals("cached-conversation", fresh.conversations.single().id)
+
+        val offline = InboxCacheTransport(failConversationList = true)
+        val recreated = client(
+            credentials,
+            outbox,
+            transport = offline,
+            widgetChatApi = WidgetChatApi(offline, ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())),
+        )
+        recreated.startRestoration()
+
+        val cached = recreated.loadMessengerInbox() as MessengerInboxResult.Stale
+        assertEquals("cached-conversation", cached.conversations.single().id)
+        assertEquals(1, recreated.unreadCount.value)
+    }
+
+    @Test
+    fun `expired inbox bearer refreshes the session once and retries with fresh authority`() = runBlocking {
+        val credentials = FakeCredentials().apply {
+            state = ProtectedSessionState(protectedAnonymous(), null)
+        }
+        val transport = ExpiredInboxBearerTransport()
+        val client = client(
+            credentials,
+            FakeOutbox(),
+            transport = transport,
+            widgetChatApi = WidgetChatApi(transport, ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())),
+        )
+        client.startRestoration()
+
+        val result = client.loadMessengerInbox() as MessengerInboxResult.Ready
+
+        assertEquals("refreshed-conversation", result.conversations.single().id)
+        assertEquals(2, transport.sessionCalls)
+        assertEquals(2, transport.conversationListCalls)
+        assertEquals(OnloPhase.ANONYMOUS_READY, client.state.value.phase)
+    }
+
     private fun client(
         credentials: FakeCredentials,
         outbox: FakeOutbox,
@@ -1019,6 +1074,8 @@ class OnloClientLifecycleTest {
         val blocked = mutableListOf<String>()
         val blockedAndPurged = mutableListOf<String>()
         private val blockedKeys = mutableSetOf<String>()
+        private val conversationLists = mutableMapOf<String, String>()
+        private var activeAuthority: PersistenceAuthority? = null
         override suspend fun enqueue(entry: OutboxEntry) { if (entry.ownerScope.storageKey() in blockedKeys) throw OwnerBlockedException() }
         override suspend fun eligible(ownerScope: OwnerScope, nowMs: Long, limit: Int): List<OutboxEntry> = if (ownerScope.storageKey() in blockedKeys) emptyList() else emptyList()
         override suspend fun markSending(ownerScope: OwnerScope, clientMessageId: String) = false
@@ -1029,11 +1086,22 @@ class OnloClientLifecycleTest {
         override suspend fun markTerminalFailure(ownerScope: OwnerScope, clientMessageId: String, errorCode: String) = Unit
         override suspend fun recoverInterruptedSends(ownerScope: OwnerScope, nowMs: Long) = Unit
         override suspend fun blockOwner(ownerScope: OwnerScope) { blocked += ownerScope.storageKey(); blockedKeys += ownerScope.storageKey() }
-        override suspend fun blockAndPurgeOwner(ownerScope: OwnerScope) { blockedAndPurged += ownerScope.storageKey(); blockedKeys += ownerScope.storageKey() }
-        override suspend fun purgeOwner(ownerScope: OwnerScope) = Unit
-        override suspend fun clearAll() = Unit
+        override suspend fun blockAndPurgeOwner(ownerScope: OwnerScope) { blockedAndPurged += ownerScope.storageKey(); blockedKeys += ownerScope.storageKey(); conversationLists.remove(ownerScope.storageKey()) }
+        override suspend fun purgeOwner(ownerScope: OwnerScope) { conversationLists.remove(ownerScope.storageKey()) }
+        override suspend fun clearAll() { conversationLists.clear(); activeAuthority = null }
         override suspend fun replaceTranscript(ownerScope: OwnerScope, conversationId: String, payload: String) = Unit
         override suspend fun transcript(ownerScope: OwnerScope, conversationId: String): String? = null
+        override suspend fun activateAuthority(authority: PersistenceAuthority) { activeAuthority = authority }
+        override suspend fun revokeAuthority(ownerScope: OwnerScope) {
+            if (activeAuthority?.ownerScope == ownerScope) activeAuthority = null
+        }
+        override suspend fun replaceConversationListIfAuthorised(authority: PersistenceAuthority, payload: String): Boolean {
+            if (activeAuthority != authority) return false
+            conversationLists[authority.ownerScope.storageKey()] = payload
+            return true
+        }
+        override suspend fun conversationListIfAuthorised(authority: PersistenceAuthority): String? =
+            if (activeAuthority == authority) conversationLists[authority.ownerScope.storageKey()] else null
     }
 
     private class SchedulingOutbox(
@@ -1423,6 +1491,55 @@ class OnloClientLifecycleTest {
             } finally {
                 streamCancelled = true
             }
+        }
+    }
+
+    private class InboxCacheTransport(
+        private val failConversationList: Boolean,
+    ) : OnloTransport {
+        override suspend fun execute(request: OnloHttpRequest): OnloHttpResponse {
+            if (request.url.encodedPath.endsWith("/conversations")) {
+                if (failConversationList) throw IOException("fixture_offline")
+                return OnloHttpResponse(
+                    200,
+                    emptyMap(),
+                    """{"conversations":[{"id":"cached-conversation","sessionId":"synthetic-session","title":"[redacted]","unread":true,"unreadCount":1,"status":"open","updatedAt":"2026-01-01T00:00:00Z","messageCount":2,"lastMessageRole":"assistant"}],"totalUnreadCount":1}""",
+                )
+            }
+            val body = request.body?.let { Buffer().also(it::writeTo).readUtf8() }.orEmpty()
+            val proposed = org.json.JSONObject(body).getJSONObject("operation").getString("proposedCredential")
+            return OnloHttpResponse(
+                200,
+                emptyMap(),
+                """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"synthetic-session","chatToken":"synthetic-chat-token","installationId":"00000000-0000-0000-0000-000000000001","generation":1,"proposedCredential":"$proposed","identityClass":"identified","publicationState":"testing","attestationState":"not_required","configRevision":"fixture","configSchemaVersion":1,"configEtag":"fixture"}}""",
+            )
+        }
+    }
+
+    private class ExpiredInboxBearerTransport : OnloTransport {
+        var sessionCalls = 0
+        var conversationListCalls = 0
+
+        override suspend fun execute(request: OnloHttpRequest): OnloHttpResponse {
+            if (request.url.encodedPath.endsWith("/conversations")) {
+                conversationListCalls += 1
+                if (conversationListCalls == 1) {
+                    return OnloHttpResponse(401, emptyMap(), "{\"error\":\"expired\"}")
+                }
+                return OnloHttpResponse(
+                    200,
+                    emptyMap(),
+                    """{"conversations":[{"id":"refreshed-conversation","sessionId":"synthetic-session-2","title":"[redacted]","unread":false,"unreadCount":0,"status":"open","updatedAt":"2026-01-01T00:00:00Z","messageCount":2,"lastMessageRole":"assistant"}],"totalUnreadCount":0}""",
+                )
+            }
+            sessionCalls += 1
+            val body = request.body?.let { Buffer().also(it::writeTo).readUtf8() }.orEmpty()
+            val proposed = org.json.JSONObject(body).getJSONObject("operation").getString("proposedCredential")
+            return OnloHttpResponse(
+                200,
+                emptyMap(),
+                """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"synthetic-session-$sessionCalls","chatToken":"synthetic-chat-token-$sessionCalls","installationId":"00000000-0000-0000-0000-000000000001","generation":$sessionCalls,"proposedCredential":"$proposed","identityClass":"anonymous","publicationState":"testing","attestationState":"not_required","configRevision":"fixture","configSchemaVersion":1,"configEtag":"fixture"}}""",
+            )
         }
     }
 

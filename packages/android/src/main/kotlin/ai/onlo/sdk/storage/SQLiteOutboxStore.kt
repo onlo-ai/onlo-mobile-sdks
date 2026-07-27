@@ -380,6 +380,7 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
             )
             it.delete(OUTBOX_TABLE, "owner_scope = ?", arrayOf(ownerScope.storageKey()))
             it.delete(TRANSCRIPT_TABLE, "owner_scope = ?", arrayOf(ownerScope.storageKey()))
+            it.delete(INBOX_CACHE_TABLE, "owner_scope = ?", arrayOf(ownerScope.storageKey()))
             it.setTransactionSuccessful()
         } finally {
             it.endTransaction()
@@ -392,6 +393,7 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
             it.delete(OUTBOX_TABLE, "owner_scope = ?", arrayOf(ownerScope.storageKey()))
             // Purge payloads but retain the tombstone: stale tasks must remain unauthorized.
             it.delete(TRANSCRIPT_TABLE, "owner_scope = ?", arrayOf(ownerScope.storageKey()))
+            it.delete(INBOX_CACHE_TABLE, "owner_scope = ?", arrayOf(ownerScope.storageKey()))
             it.setTransactionSuccessful()
         } finally {
             it.endTransaction()
@@ -406,6 +408,7 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
                 it.delete(OUTBOX_TABLE, null, null)
                 it.delete(OWNER_ACCESS_TABLE, null, null)
                 it.delete(TRANSCRIPT_TABLE, null, null)
+                it.delete(INBOX_CACHE_TABLE, null, null)
                 it.setTransactionSuccessful()
             } finally {
                 it.endTransaction()
@@ -457,6 +460,50 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
         replaceTranscript(authority.ownerScope, conversationId, payload)
         true
     }
+
+    override suspend fun replaceConversationListIfAuthorised(
+        authority: PersistenceAuthority,
+        payload: String,
+    ): Boolean = authorityMutex.withLock {
+        if (activeAuthority != authority) return@withLock false
+        onDatabase { database ->
+            ensureUnblocked(database, authority.ownerScope)
+            database.insertWithOnConflict(
+                INBOX_CACHE_TABLE,
+                null,
+                ContentValues().apply {
+                    put("owner_scope", authority.ownerScope.storageKey())
+                    put("payload_ciphertext", payloadCipher.encrypt(payload))
+                },
+                SQLiteDatabase.CONFLICT_REPLACE,
+            ) != -1L
+        }
+    }
+
+    override suspend fun conversationListIfAuthorised(authority: PersistenceAuthority): String? =
+        authorityMutex.withLock {
+            if (activeAuthority != authority) return@withLock null
+            onDatabase { database ->
+                ensureUnblocked(database, authority.ownerScope)
+                try {
+                    database.query(
+                        INBOX_CACHE_TABLE,
+                        arrayOf("payload_ciphertext"),
+                        "owner_scope = ?",
+                        arrayOf(authority.ownerScope.storageKey()),
+                        null,
+                        null,
+                        null,
+                    ).useCursor { cursor ->
+                        if (cursor.moveToFirst()) payloadCipher.decrypt(cursor.getString(0)) else null
+                    }
+                } catch (failure: Exception) {
+                    if (!isDefinitivelyUnreadable(failure)) throw failure
+                    purgeUnreadableOutbox(database)
+                    throw ConversationListStorageUnreadableException()
+                }
+            }
+        }
 
     override suspend fun reconcileAcceptedIfAuthorised(
         authority: PersistenceAuthority,
@@ -717,6 +764,7 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
             database.delete(OUTBOX_TABLE, null, null)
             // Blocked-owner markers are authorization boundaries, not encrypted payloads.
             database.delete(TRANSCRIPT_TABLE, null, null)
+            database.delete(INBOX_CACHE_TABLE, null, null)
             return
         }
         database.beginTransaction()
@@ -724,6 +772,7 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
             database.delete(OUTBOX_TABLE, null, null)
             // Preserve durable blocked-owner markers across ciphertext corruption cleanup.
             database.delete(TRANSCRIPT_TABLE, null, null)
+            database.delete(INBOX_CACHE_TABLE, null, null)
             database.setTransactionSuccessful()
         } finally {
             database.endTransaction()
@@ -765,21 +814,26 @@ internal class SQLiteOutboxStore(context: Context) : OwnerScopedOutboxStore {
                 "CREATE TABLE $OWNER_ACCESS_TABLE (owner_scope TEXT PRIMARY KEY, blocked INTEGER NOT NULL)",
             )
             database.execSQL("CREATE TABLE $TRANSCRIPT_TABLE (owner_scope TEXT PRIMARY KEY, payload_ciphertext TEXT NOT NULL)")
+            database.execSQL("CREATE TABLE $INBOX_CACHE_TABLE (owner_scope TEXT PRIMARY KEY, payload_ciphertext TEXT NOT NULL)")
         }
 
         override fun onUpgrade(database: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
             if (oldVersion < 2) {
                 database.execSQL("ALTER TABLE $OUTBOX_TABLE ADD COLUMN server_conversation_id_ciphertext TEXT")
             }
+            if (oldVersion < 3) {
+                database.execSQL("CREATE TABLE $INBOX_CACHE_TABLE (owner_scope TEXT PRIMARY KEY, payload_ciphertext TEXT NOT NULL)")
+            }
         }
     }
 
     private companion object {
         const val DATABASE_NAME = "onlo-sdk-v1.db"
-        const val DATABASE_VERSION = 2
+        const val DATABASE_VERSION = 3
         const val OUTBOX_TABLE = "outbox"
         const val OWNER_ACCESS_TABLE = "owner_access"
         const val TRANSCRIPT_TABLE = "transcript"
+        const val INBOX_CACHE_TABLE = "inbox_cache"
     }
 }
 

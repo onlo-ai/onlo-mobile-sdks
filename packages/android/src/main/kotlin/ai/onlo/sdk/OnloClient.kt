@@ -31,7 +31,10 @@ import ai.onlo.sdk.storage.StagedAttachment
 import ai.onlo.sdk.transport.OnloSessionApi
 import ai.onlo.sdk.chat.DurableChatOutbox
 import ai.onlo.sdk.chat.WidgetChatApi
+import ai.onlo.sdk.chat.WidgetHttpFailure
 import ai.onlo.sdk.chat.ConversationDetail
+import ai.onlo.sdk.chat.ConversationList
+import ai.onlo.sdk.chat.ConversationListCacheCodec
 import ai.onlo.sdk.chat.ConversationSummary
 import ai.onlo.sdk.chat.HelpCenterArticle
 import ai.onlo.sdk.chat.HelpCenterTopic
@@ -69,6 +72,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.json.JSONObject
 
 internal const val SDK_VERSION: String = "0.1.0"
 
@@ -146,6 +150,8 @@ public sealed interface LogoutOutcome {
 /** Internal UI data boundary. Content never crosses a React Native or Flutter adapter. */
 internal sealed interface MessengerInboxResult {
     data class Ready(val conversations: List<ConversationSummary>) : MessengerInboxResult
+    /** Last authorised encrypted inbox index remains renderable while refresh is offline. */
+    data class Stale(val conversations: List<ConversationSummary>) : MessengerInboxResult
     data object NoActiveSession : MessengerInboxResult
     data object Unavailable : MessengerInboxResult
 }
@@ -183,6 +189,7 @@ internal sealed interface NativeMessengerEvent {
     data class Accepted(
         override val clientMessageId: String,
         val conversationId: String,
+        val duplicate: Boolean,
     ) : NativeMessengerEvent
 
     data class Text(
@@ -239,6 +246,10 @@ public class OnloClient internal constructor(
     private var protectedSession: ProtectedSession? = null
     private var pendingTransition: PendingSessionTransition? = null
     private var inMemorySession: InMemorySession? = null
+    /** Memory-only greeting data, populated only after the server accepts the
+     * corresponding identify transition and cleared before account teardown. */
+    internal var identifiedFirstName: String? = null
+        private set
     private var configSessionVersion = 0L
     private var restorationJob: Job? = null
     private var chatFlushJob: Job? = null
@@ -276,6 +287,7 @@ public class OnloClient internal constructor(
         val sessionId: String,
         val bearerVersion: Long,
         val conversations: List<ConversationSummary>,
+        val totalUnreadCount: Int,
     )
     private var messengerInboxCache: MessengerInboxCache? = null
 
@@ -285,6 +297,7 @@ public class OnloClient internal constructor(
     private val mutablePresentation = MutableStateFlow(MessengerPresentationIntent.HIDDEN)
     private val mutablePresentationTarget = MutableStateFlow<MessengerPresentationTarget>(MessengerPresentationTarget.Inbox)
     private val mutableUnreadCount = MutableStateFlow<Int?>(null)
+    private val mutablePlatformConnected = MutableStateFlow(false)
     private val mutableMessengerEvents = MutableSharedFlow<NativeMessengerEvent>(
         extraBufferCapacity = 32,
     )
@@ -294,6 +307,8 @@ public class OnloClient internal constructor(
     public val presentationTarget: StateFlow<MessengerPresentationTarget> = mutablePresentationTarget.asStateFlow()
     /** Identified-customer unread total; `null` clears badges for anonymous/boundary states. */
     public val unreadCount: StateFlow<Int?> = mutableUnreadCount.asStateFlow()
+    /** Live Onlo reachability for SDK-owned chrome; it contains no host or customer data. */
+    internal val platformConnected: StateFlow<Boolean> = mutablePlatformConnected.asStateFlow()
     internal val messengerEvents: SharedFlow<NativeMessengerEvent> = mutableMessengerEvents.asSharedFlow()
     /** Validated native configuration only; it never exposes credentials or customer state. */
     public val mobileConfig: StateFlow<MobileConfigSnapshot>? get() = configController?.snapshot
@@ -475,7 +490,10 @@ public class OnloClient internal constructor(
     }
 
     /** SDK messenger-only inbox fetch. The list route is contract-backed and bearer-authorised. */
-    internal suspend fun loadMessengerInbox(): MessengerInboxResult {
+    internal suspend fun loadMessengerInbox(): MessengerInboxResult =
+        loadMessengerInbox(allowTokenRefresh = true)
+
+    private suspend fun loadMessengerInbox(allowTokenRefresh: Boolean): MessengerInboxResult {
         val observation = operationMutex.withLock {
             val session = inMemorySession ?: return@withLock null
             val protected = protectedSession ?: return@withLock null
@@ -488,9 +506,10 @@ public class OnloClient internal constructor(
                 )
             }
         } ?: return MessengerInboxResult.NoActiveSession
+        val capture = observation.authority
         return try {
-            val capture = observation.authority
             val result = capture.api.conversations(capture.chatToken, capture.sessionId)
+            mutablePlatformConnected.value = true
             operationMutex.withLock {
                 if (!matchesMessengerAuthority(capture)) MessengerInboxResult.NoActiveSession
                 else if (observation.generation != conversationObservationGeneration) {
@@ -501,18 +520,42 @@ public class OnloClient internal constructor(
                     val identified = capture.session.identityClass == IdentityClass.IDENTIFIED
                     val conversations = if (identified) result.conversations
                     else result.conversations.map { it.copy(unread = false, unreadCount = 0) }
-                    mutableUnreadCount.value = if (identified) result.totalUnreadCount else null
+                    val totalUnreadCount = if (identified) result.totalUnreadCount else 0
+                    try {
+                        outboxStore.replaceConversationListIfAuthorised(
+                            persistenceAuthority(capture),
+                            ConversationListCacheCodec.encode(ConversationList(conversations, totalUnreadCount)),
+                        )
+                    } catch (failure: CancellationException) {
+                        throw failure
+                    } catch (_: Exception) {
+                        // A cache write failure must not hide a fresh authorised server response.
+                    }
+                    mutableUnreadCount.value = if (identified) totalUnreadCount else null
                     messengerInboxCache = MessengerInboxCache(
                         owner = capture.session.ownerScope(),
                         sessionId = capture.sessionId,
                         bearerVersion = capture.version,
                         conversations = conversations,
+                        totalUnreadCount = totalUnreadCount,
                     )
                     MessengerInboxResult.Ready(conversations)
                 }
             }
-        } catch (_: IOException) { MessengerInboxResult.Unavailable }
-        catch (_: ProtocolViolation) { MessengerInboxResult.Unavailable }
+        } catch (failure: WidgetHttpFailure) {
+            if (allowTokenRefresh && failure.status == 401 && refreshMessengerBearer(capture)) {
+                return loadMessengerInbox(allowTokenRefresh = false)
+            }
+            mutablePlatformConnected.value = false
+            loadCachedMessengerInbox(capture)
+        } catch (_: IOException) {
+            mutablePlatformConnected.value = false
+            loadCachedMessengerInbox(capture)
+        }
+        catch (_: ProtocolViolation) {
+            mutablePlatformConnected.value = true
+            loadCachedMessengerInbox(capture)
+        }
     }
 
     /** SDK messenger-only transcript refresh. It never returns a result for a retired account. */
@@ -538,6 +581,7 @@ public class OnloClient internal constructor(
                     )
                 },
             )
+            mutablePlatformConnected.value = true
             operationMutex.withLock {
                 if (!matchesMessengerAuthority(capture)) MessengerTranscriptResult.NoActiveSession
                 else MessengerTranscriptResult.Ready(transcript)
@@ -546,6 +590,7 @@ public class OnloClient internal constructor(
             currentCoroutineContext().ensureActive()
             MessengerTranscriptResult.NoActiveSession
         } catch (_: IOException) {
+            mutablePlatformConnected.value = false
             val cached = runCatching { convergence.cached(capture.session.ownerScope(), conversationId, capture.sessionId) }.getOrNull()
             operationMutex.withLock {
                 if (!matchesMessengerAuthority(capture)) MessengerTranscriptResult.NoActiveSession
@@ -565,11 +610,15 @@ public class OnloClient internal constructor(
         } ?: return MessengerHelpCenterResult.NoActiveSession
         return try {
             val topics = capture.api.helpCenter(capture.chatToken)
+            mutablePlatformConnected.value = true
             operationMutex.withLock {
                 if (!matchesMessengerAuthority(capture)) MessengerHelpCenterResult.NoActiveSession
                 else MessengerHelpCenterResult.Ready(topics)
             }
-        } catch (_: IOException) { MessengerHelpCenterResult.Unavailable }
+        } catch (_: IOException) {
+            mutablePlatformConnected.value = false
+            MessengerHelpCenterResult.Unavailable
+        }
         catch (_: ProtocolViolation) { MessengerHelpCenterResult.Unavailable }
     }
 
@@ -583,11 +632,15 @@ public class OnloClient internal constructor(
         } ?: return MessengerHelpArticleResult.NoActiveSession
         return try {
             val article = capture.api.helpCenterArticle(capture.chatToken, articleId)
+            mutablePlatformConnected.value = true
             operationMutex.withLock {
                 if (!matchesMessengerAuthority(capture)) MessengerHelpArticleResult.NoActiveSession
                 else MessengerHelpArticleResult.Ready(article)
             }
-        } catch (_: IOException) { MessengerHelpArticleResult.Unavailable }
+        } catch (_: IOException) {
+            mutablePlatformConnected.value = false
+            MessengerHelpArticleResult.Unavailable
+        }
         catch (_: ProtocolViolation) { MessengerHelpArticleResult.NotAuthorised }
     }
 
@@ -620,12 +673,23 @@ public class OnloClient internal constructor(
             if (matchesMessengerAuthority(capture) &&
                 observation.generation == conversationObservationGeneration
             ) {
+                try {
+                    outboxStore.replaceConversationListIfAuthorised(
+                        persistenceAuthority(capture),
+                        ConversationListCacheCodec.encode(list),
+                    )
+                } catch (failure: CancellationException) {
+                    throw failure
+                } catch (_: Exception) {
+                    // Read acknowledgement remains successful even if its local cache refresh fails.
+                }
                 mutableUnreadCount.value = list.totalUnreadCount
                 messengerInboxCache = MessengerInboxCache(
                     owner = capture.session.ownerScope(),
                     sessionId = capture.sessionId,
                     bearerVersion = capture.version,
                     conversations = list.conversations,
+                    totalUnreadCount = list.totalUnreadCount,
                 )
             }
         }
@@ -658,6 +722,8 @@ public class OnloClient internal constructor(
         mutablePresentation.value = MessengerPresentationIntent.HIDDEN
         mutablePresentationTarget.value = MessengerPresentationTarget.Inbox
         mutableUnreadCount.value = null
+        mutablePlatformConnected.value = false
+        identifiedFirstName = null
         pushRegistry?.activateAuthority(null)
         invalidateConfigSession()
         val blocked = stored.copy(logoutPending = true)
@@ -873,7 +939,11 @@ public class OnloClient internal constructor(
                         }
                     }
                     mutableMessengerEvents.emit(
-                        NativeMessengerEvent.Accepted(entry.clientMessageId, event.conversationId),
+                        NativeMessengerEvent.Accepted(
+                            entry.clientMessageId,
+                            event.conversationId,
+                            event.duplicate,
+                        ),
                     )
                     requireEventAuthority()
                 }
@@ -1548,7 +1618,7 @@ public class OnloClient internal constructor(
                     val authority = foregroundAuthority(token, version)
                         ?: throw CancellationException("stale_foreground_stream")
                     when (hint) {
-                        ForegroundHint.Ready -> Unit
+                        ForegroundHint.Ready -> mutablePlatformConnected.value = true
                         is ForegroundHint.ConfigChanged -> refreshConfigWithSessionRecovery(authority.token, authority.version)
                         is ForegroundHint.Conversation -> {
                             operationMutex.withLock {
@@ -1573,6 +1643,7 @@ public class OnloClient internal constructor(
             } finally {
                 operationMutex.withLock {
                     if (foregroundOwnershipToken == ownershipToken) {
+                        mutablePlatformConnected.value = false
                         foregroundPhase = ForegroundPhase.STOPPED
                         foregroundOwnershipToken = null
                         foregroundOwner = null
@@ -1617,6 +1688,59 @@ public class OnloClient internal constructor(
             it.owner == capture.session.ownerScope() &&
                 it.sessionId == capture.sessionId &&
                 it.bearerVersion == capture.version
+        }
+
+    private suspend fun loadCachedMessengerInbox(capture: ConversationOpenAuthority): MessengerInboxResult =
+        operationMutex.withLock {
+            if (!matchesMessengerAuthority(capture)) return@withLock MessengerInboxResult.NoActiveSession
+            val cached = currentInbox(capture)?.let {
+                ConversationList(it.conversations, it.totalUnreadCount)
+            } ?: try {
+                outboxStore.conversationListIfAuthorised(persistenceAuthority(capture))
+                    ?.let(ConversationListCacheCodec::decode)
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                null
+            } ?: return@withLock MessengerInboxResult.Unavailable
+
+            val identified = capture.session.identityClass == IdentityClass.IDENTIFIED
+            val conversations = if (identified) cached.conversations else {
+                cached.conversations.map { it.copy(unread = false, unreadCount = 0) }
+            }
+            val totalUnreadCount = if (identified) cached.totalUnreadCount else 0
+            mutableUnreadCount.value = if (identified) totalUnreadCount else null
+            messengerInboxCache = MessengerInboxCache(
+                owner = capture.session.ownerScope(),
+                sessionId = capture.sessionId,
+                bearerVersion = capture.version,
+                conversations = conversations,
+                totalUnreadCount = totalUnreadCount,
+            )
+            MessengerInboxResult.Stale(conversations)
+        }
+
+    /** One bounded session refresh for a rejected Widget bearer; Operator JWT is not involved. */
+    private suspend fun refreshMessengerBearer(capture: ConversationOpenAuthority): Boolean =
+        operationMutex.withLock {
+            if (!matchesMessengerAuthority(capture)) {
+                return@withLock protectedSession?.ownerScope() == capture.session.ownerScope() &&
+                    !capture.session.logoutPending &&
+                    state.value.phase in setOf(OnloPhase.ANONYMOUS_READY, OnloPhase.IDENTIFIED_READY)
+            }
+            val stored = loadProtectedSession() ?: return@withLock false
+            if (stored.logoutPending || stored.ownerScope() != capture.session.ownerScope()) return@withLock false
+            try {
+                restoreOrBootstrapLocked(stored)
+                protectedSession?.ownerScope() == capture.session.ownerScope() &&
+                    state.value.phase in setOf(OnloPhase.ANONYMOUS_READY, OnloPhase.IDENTIFIED_READY)
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (failure: Throwable) {
+                mutablePlatformConnected.value = false
+                publishFailure(failure, phaseForCurrentScope())
+                false
+            }
         }
 
     private fun matchesForegroundAuthority(capture: ForegroundAuthority): Boolean {
@@ -1716,12 +1840,25 @@ public class OnloClient internal constructor(
                 if (matchesForegroundAuthority(authority) &&
                     observation == conversationObservationGeneration
                 ) {
+                    val protected = checkNotNull(protectedSession)
+                    val session = checkNotNull(inMemorySession)
+                    try {
+                        outboxStore.replaceConversationListIfAuthorised(
+                            persistenceAuthority(authority.owner, protected, session, authority.version),
+                            ConversationListCacheCodec.encode(result),
+                        )
+                    } catch (failure: CancellationException) {
+                        throw failure
+                    } catch (_: Exception) {
+                        // Hint-driven unread refresh remains best effort when cache storage fails.
+                    }
                     mutableUnreadCount.value = result.totalUnreadCount
                     messengerInboxCache = MessengerInboxCache(
                         owner = authority.owner,
                         sessionId = authority.sessionId,
                         bearerVersion = authority.version,
                         conversations = result.conversations,
+                        totalUnreadCount = result.totalUnreadCount,
                     )
                 }
             }
@@ -1920,6 +2057,7 @@ public class OnloClient internal constructor(
             val result = exchange(pending.toOperation(userJwt), pending.installationId)
             if (result.identityClass != IdentityClass.IDENTIFIED) throw OnloException.InvalidProtocol
             applySession(result, ownerScopeId = newOpaqueOwnerScopeId())
+            identifiedFirstName = firstNameClaim(userJwt)
             return state.value
         } catch (failure: Throwable) {
             if (failure is CancellationException) throw failure
@@ -1941,6 +2079,14 @@ public class OnloClient internal constructor(
         protectedSession = session
         pendingTransition = pending
     }
+
+    private fun firstNameClaim(jwt: String): String? = runCatching {
+        val encoded = jwt.split('.')[1]
+        val decoded = Base64.getUrlDecoder().decode(encoded)
+        val name = JSONObject(String(decoded, Charsets.UTF_8)).optString("name").trim()
+        require(name.isNotEmpty() && name.length <= 200 && name.none(Char::isISOControl))
+        name.split(Regex("\\s+")).first()
+    }.getOrNull()
 
     /** Reject corrupt or stale logical state before it can issue a credential-bearing request. */
     private fun requirePendingMatchesStoredSession(

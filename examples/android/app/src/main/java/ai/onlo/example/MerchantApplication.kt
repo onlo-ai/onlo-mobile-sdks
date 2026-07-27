@@ -19,13 +19,13 @@ class MerchantApplication : Application() {
 
     @OptIn(OnloDevelopmentSupport::class)
     private fun initializeOnlo(publicSdkKey: String): OnloClient =
-        if (BuildConfig.ONLO_DEVELOPMENT_ORIGIN.isBlank()) {
-            Onlo.initialize(applicationContext, publicSdkKey)
-        } else {
+        if (BuildConfig.DEBUG && BuildConfig.ONLO_USE_DEVELOPMENT_ORIGIN) {
             Onlo.initializeDevelopment(
                 applicationContext,
                 publicSdkKey,
                 BuildConfig.ONLO_DEVELOPMENT_ORIGIN,
             )
+        } else {
+            Onlo.initialize(applicationContext, publicSdkKey)
         }
 }

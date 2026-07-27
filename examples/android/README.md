@@ -8,7 +8,7 @@
 
    Expected result: JDK 17 and Android API 35/build-tools 35.0.0 are installed after explicit licence acceptance.
 
-2. If `local.properties` does not exist, copy `local.properties.example` to `local.properties`; otherwise add the `ONLO_SDK_KEY` line from the example without replacing your existing `sdk.dir`.
+2. If `local.properties` does not exist, copy `local.properties.example` to `local.properties`; otherwise add the `ONLO_SDK_KEY` line from the example without replacing your existing `sdk.dir`. Keep `ONLO_USE_DEVELOPMENT_ORIGIN=false` to use production `https://onlo.ai`; enable it only for an approved Debug origin.
 
    Expected result: the ignored file contains the machine-local Android SDK
    path, public test integration key, and authenticated Operator-backend URL,

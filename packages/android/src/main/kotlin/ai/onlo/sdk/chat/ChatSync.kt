@@ -16,6 +16,7 @@ import ai.onlo.sdk.transport.SseStreamResult
 import ai.onlo.sdk.transport.OnloTransport
 import ai.onlo.sdk.transport.ProtocolRequestFactory
 import org.json.JSONObject
+import org.json.JSONArray
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.min
 import kotlin.random.Random
@@ -52,6 +53,62 @@ internal data class ConversationList(
     val conversations: List<ConversationSummary>,
     val totalUnreadCount: Int,
 )
+
+/** Versioned local format for the encrypted, owner-scoped inbox index. */
+internal object ConversationListCacheCodec {
+    private const val VERSION = 1
+
+    fun encode(value: ConversationList): String = JSONObject().apply {
+        put("version", VERSION)
+        put("totalUnreadCount", value.totalUnreadCount)
+        put("conversations", JSONArray().apply {
+            value.conversations.forEach { conversation ->
+                put(JSONObject().apply {
+                    put("id", conversation.id)
+                    put("sessionId", conversation.sessionId)
+                    put("title", conversation.title)
+                    put("unread", conversation.unread)
+                    put("unreadCount", conversation.unreadCount)
+                    put("status", conversation.status)
+                    put("updatedAt", conversation.updatedAt)
+                    put("messageCount", conversation.messageCount)
+                    put("lastMessageRole", conversation.lastMessageRole)
+                })
+            }
+        })
+    }.toString()
+
+    fun decode(raw: String): ConversationList = try {
+        val root = JSONObject(raw)
+        if (root.getInt("version") != VERSION) throw IllegalArgumentException("cache_version")
+        val totalUnreadCount = root.getInt("totalUnreadCount")
+        val values = root.getJSONArray("conversations")
+        if (totalUnreadCount < 0 || values.length() > 50) throw IllegalArgumentException("cache_bounds")
+        val conversations = buildList {
+            for (index in 0 until values.length()) {
+                val value = values.getJSONObject(index)
+                val summary = ConversationSummary(
+                    id = value.getString("id"),
+                    sessionId = value.getString("sessionId"),
+                    title = value.getString("title"),
+                    unread = value.getBoolean("unread"),
+                    unreadCount = value.getInt("unreadCount"),
+                    status = value.getString("status"),
+                    updatedAt = value.getString("updatedAt"),
+                    messageCount = value.getInt("messageCount"),
+                    lastMessageRole = value.optionalString("lastMessageRole"),
+                )
+                if (summary.id.isBlank() || summary.sessionId.isBlank() || summary.unreadCount < 0 ||
+                    summary.unread != (summary.unreadCount > 0) || summary.messageCount < 0
+                ) throw IllegalArgumentException("cache_conversation")
+                add(summary)
+            }
+        }
+        ConversationList(conversations, totalUnreadCount)
+    } catch (_: Exception) {
+        throw ai.onlo.sdk.protocol.ProtocolViolation("conversation_list_cache")
+    }
+}
 internal data class ConversationReadResult(
     val conversationId: String,
     val readThroughMessageId: String,
@@ -135,7 +192,7 @@ internal class WidgetChatApi(
 
     suspend fun transcript(chatToken: String, conversationId: String, page: ConversationPageQuery, expectedSessionId: String): ConversationDetail {
         val response = transport.execute(requests.transcript(chatToken, conversationId, page))
-        if (response.status !in 200..299) throw WidgetFailure
+        if (response.status !in 200..299) throw WidgetHttpFailure(response.status)
         val root = try { JSONObject(response.body) } catch (_: Exception) { throw ai.onlo.sdk.protocol.ProtocolViolation("transcript") }; val conversation = try { root.getJSONObject("conversation") } catch (_: Exception) { throw ai.onlo.sdk.protocol.ProtocolViolation("transcript") }; val sync = try { root.getJSONObject("sync") } catch (_: Exception) { throw ai.onlo.sdk.protocol.ProtocolViolation("transcript") }
         if (conversation.optString("id") != conversationId) throw ai.onlo.sdk.protocol.ProtocolViolation("transcript_conversation")
         val messages = root.getJSONArray("messages")
@@ -150,7 +207,7 @@ internal class WidgetChatApi(
 
     suspend fun conversations(chatToken: String, expectedSessionId: String, limit: Int = 50): ConversationList {
         val response = transport.execute(requests.conversations(chatToken, limit))
-        if (response.status !in 200..299) throw WidgetFailure
+        if (response.status !in 200..299) throw WidgetHttpFailure(response.status)
         val root = try { JSONObject(response.body) } catch (_: Exception) { throw ai.onlo.sdk.protocol.ProtocolViolation("conversation_list") }
         val values = try { root.getJSONArray("conversations") } catch (_: Exception) { throw ai.onlo.sdk.protocol.ProtocolViolation("conversation_list") }
         val totalUnreadCount = try { root.getInt("totalUnreadCount") } catch (_: Exception) {
@@ -189,7 +246,7 @@ internal class WidgetChatApi(
 
     suspend fun helpCenter(chatToken: String): List<HelpCenterTopic> {
         val response = transport.execute(requests.helpCenter(chatToken))
-        if (response.status !in 200..299) throw WidgetFailure
+        if (response.status !in 200..299) throw WidgetHttpFailure(response.status)
         val root = try { JSONObject(response.body) } catch (_: Exception) {
             throw ai.onlo.sdk.protocol.ProtocolViolation("help_center")
         }
@@ -244,7 +301,7 @@ internal class WidgetChatApi(
 
     suspend fun helpCenterArticle(chatToken: String, articleId: String): HelpCenterArticle {
         val response = transport.execute(requests.helpCenterArticle(chatToken, articleId))
-        if (response.status !in 200..299) throw WidgetFailure
+        if (response.status !in 200..299) throw WidgetHttpFailure(response.status)
         val root = try { JSONObject(response.body).getJSONObject("article") } catch (_: Exception) {
             throw ai.onlo.sdk.protocol.ProtocolViolation("help_center_article")
         }
@@ -270,7 +327,7 @@ internal class WidgetChatApi(
         throughMessageId: String,
     ): ConversationReadResult {
         val response = transport.execute(requests.acknowledgeRead(chatToken, conversationId, throughMessageId))
-        if (response.status !in 200..299) throw WidgetFailure
+        if (response.status !in 200..299) throw WidgetHttpFailure(response.status)
         val root = try { JSONObject(response.body) } catch (_: Exception) {
             throw ai.onlo.sdk.protocol.ProtocolViolation("conversation_read")
         }
@@ -302,11 +359,10 @@ internal class WidgetChatApi(
         } } catch (failure: ai.onlo.sdk.protocol.ProtocolViolation) { throw failure } catch (_: Exception) { throw ai.onlo.sdk.protocol.ProtocolViolation("chat_event") }
     }
 
-    // Widget routes do not yet define a contract-safe HTTP error classification.
-    // Treat a non-success status as transport unavailability so callers preserve
-    // durable work and retry only from their existing recovery seams.
-    private data object WidgetFailure : java.io.IOException("widget_failure")
 }
+
+/** Status only: response bodies can contain customer or provider data and never cross this seam. */
+internal class WidgetHttpFailure(val status: Int) : java.io.IOException("widget_http_failure")
 
 internal class WidgetAttachmentFailure(val safeCode: String) : IllegalStateException(safeCode)
 

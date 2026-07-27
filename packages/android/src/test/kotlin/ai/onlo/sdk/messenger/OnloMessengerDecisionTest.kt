@@ -69,8 +69,48 @@ class OnloMessengerDecisionTest {
     }
 
     @Test
-    fun `dashboard dark mode selects the native dark palette independent of OS mode`() {
-        assertTrue(messengerUsesDarkPalette(serverDarkEnabled = true))
-        assertFalse(messengerUsesDarkPalette(serverDarkEnabled = false))
+    fun `dark palette requires both dashboard support and system dark mode`() {
+        assertTrue(messengerUsesDarkPalette(serverDarkEnabled = true, systemDarkMode = true))
+        assertFalse(messengerUsesDarkPalette(serverDarkEnabled = true, systemDarkMode = false))
+        assertFalse(messengerUsesDarkPalette(serverDarkEnabled = false, systemDarkMode = true))
+    }
+
+    @Test
+    fun `messenger defaults to a contained host presentation`() {
+        assertEquals(
+            OnloMessengerPresentationMode.CONTAINED,
+            OnloMessengerOptions().presentationMode,
+        )
+    }
+
+    @Test
+    fun `back dismisses home and returns nested surfaces to home`() {
+        assertEquals(MessengerBackAction.DISMISS, messengerBackAction(isHome = true))
+        assertEquals(MessengerBackAction.RETURN_HOME, messengerBackAction(isHome = false))
+    }
+
+    @Test
+    fun `end user messages align right and every support role aligns left`() {
+        assertEquals(MessengerMessageAlignment.END, messengerMessageAlignment("user"))
+        assertEquals(MessengerMessageAlignment.END, messengerMessageAlignment("USER"))
+        assertEquals(MessengerMessageAlignment.START, messengerMessageAlignment("assistant"))
+        assertEquals(MessengerMessageAlignment.START, messengerMessageAlignment("operator"))
+    }
+
+    @Test
+    fun `composer creates widget parity code and link markdown`() {
+        assertEquals(
+            ComposerInsertion(text = "```\n\n```", cursorOffset = 4),
+            codeComposerInsertion(selectedText = ""),
+        )
+        assertEquals("```\nval value = 1\n```", codeComposerInsertion("val value = 1").text)
+        assertEquals(
+            "[Onlo](https://onlo.ai/docs)",
+            markdownLinkComposerInsertion(" Onlo ", " https://onlo.ai/docs "),
+        )
+        assertEquals(
+            "[https://onlo.ai](https://onlo.ai)",
+            markdownLinkComposerInsertion("", "https://onlo.ai"),
+        )
     }
 }

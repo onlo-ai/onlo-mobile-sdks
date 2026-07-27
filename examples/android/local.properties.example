@@ -2,5 +2,6 @@
 # sdk.dir is machine-local; ONLO_SDK_KEY is public app configuration, not a signing secret.
 sdk.dir=/absolute/path/to/Android/sdk
 ONLO_SDK_KEY=replace-with-public-mobile-sdk-key
+ONLO_USE_DEVELOPMENT_ORIGIN=false
 ONLO_DEVELOPMENT_ORIGIN=https://replace-with-approved-qa-origin.example
 ONLO_OPERATOR_BACKEND_URL=https://merchant-backend.example
