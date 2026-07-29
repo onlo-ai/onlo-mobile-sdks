@@ -4,9 +4,9 @@ Open `OnloLocalE2EApp.xcodeproj`, select an iPhone 17 simulator, and press Run. 
 
 ## Prerequisites
 
-- [ ] Open the ignored `Onlo.local.xcconfig` beside this README and replace
-  `paste-your-public-ios-sdk-key-here` with the public iOS SDK key. The Debug
-  target already includes this file through `OnloExample.xcconfig.example`.
+- [ ] Create the ignored `Onlo.local.xcconfig` beside this README and set
+  `ONLO_SDK_KEY` to the public iOS SDK key. Both build configurations load its
+  values through the tracked `OnloExample.xcconfig.example` safe defaults.
   `ONLO_USE_DEVELOPMENT_ORIGIN = NO` uses production `https://onlo.ai`.
 - [ ] Only for local SDK-team testing, set `ONLO_USE_DEVELOPMENT_ORIGIN = YES`.
   The app then uses `ONLO_DEVELOPMENT_ORIGIN`; Release builds always use the
