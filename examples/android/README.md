@@ -2,12 +2,14 @@
 
 Run a small Android host against the sibling Onlo SDK. The example demonstrates anonymous login, backend-proven identified login, a host-owned Support button, logout, FCM forwarding, and account-safe navigation.
 
+> **Firebase setup is not included automatically.** Basic chat works without Firebase, but push notifications cannot be tested until you create or select a Firebase project, register the example’s Android application ID, add its `google-services.json` to `app/`, and upload the matching service-account JSON to Onlo Dashboard. Follow Firebase’s [Android project setup](https://firebase.google.com/docs/android/setup) and [FCM HTTP v1 credential](https://firebase.google.com/docs/cloud-messaging/send/v1-api#provide-credentials-manually) instructions.
+
 ## Prerequisites
 
 - [ ] JDK 17, Android API 35, and build-tools 35.0.0.
 - [ ] A public test Mobile SDK key.
 - [ ] For identified login, a test account on an authenticated Operator-backend endpoint.
-- [ ] For FCM testing, a Firebase project and a Google Play-enabled emulator or physical device.
+- [ ] For FCM testing, a Firebase project containing `ai.onlo.example`, the matching configuration and service-account files, and a Google Play-enabled emulator or physical device.
 
 ## Concepts
 
@@ -54,11 +56,11 @@ Run a small Android host against the sibling Onlo SDK. The example demonstrates 
 
 ## Enable FCM
 
-1. Register `ai.onlo.example` in the merchant’s Firebase project and place the downloaded `google-services.json` in `app/`.
+1. Register `ai.onlo.example` using Firebase’s [Android project setup](https://firebase.google.com/docs/android/setup), then place the downloaded `google-services.json` in `app/`.
 
    Expected result: the conditional Google Services plugin configures this host. Keep the file out of source control.
 
-2. Upload the corresponding FCM HTTP v1 service-account JSON to the Mobile target in Onlo Dashboard. Never add it to the app.
+2. Generate the corresponding [FCM HTTP v1 service-account JSON](https://firebase.google.com/docs/cloud-messaging/send/v1-api#provide-credentials-manually) and upload it to the Mobile target in Onlo Dashboard. Never add it to the app.
 
    Expected result: Onlo can send for the example while the private provider credential remains server-side.
 

@@ -16,4 +16,4 @@ To integrate React Native:
 
    Expected result: the app links exactly one supported native core on each platform.
 
-The canonical behavior is defined by the [mobile integration guide](../../docs/integration-guide.md) and [v1 API contract](../../docs/api-contract.md).
+The canonical behavior is defined by the current [React Native package guide](../../packages/react-native/README.md) and [v1 API contract](../../docs/api-contract.md).

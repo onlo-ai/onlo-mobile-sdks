@@ -2,12 +2,15 @@
 
 Run the repository’s React Native 0.86 host against the local bridge and one local native core per platform. The example covers anonymous and identified login, native Support presentation, logout, push forwarding, and deep links.
 
+> **Push-provider dependencies are not included.** Basic chat works without them, but push notifications do not. Android requires your own Firebase project, Android app configuration, FCM library, and service-account credentials; iOS requires an Apple Developer account, push-enabled App ID, APNs library callbacks, and an APNs authentication key. Follow the official [Firebase Android setup](https://firebase.google.com/docs/android/setup), [FCM credential setup](https://firebase.google.com/docs/cloud-messaging/send/v1-api#provide-credentials-manually), and [Apple APNs setup](https://developer.apple.com/documentation/UserNotifications/registering-your-app-with-apns) before testing push.
+
 ## Prerequisites
 
 - [ ] Node.js 20 and the React Native iOS/Android toolchains.
 - [ ] A public test Mobile SDK key.
 - [ ] For identified login, an authenticated Operator-backend URL.
 - [ ] A development or release build; Expo Go cannot load this native module.
+- [ ] For push, the external Firebase/FCM setup on Android or Apple/APNs setup on iOS described above.
 
 ## Concepts
 
@@ -27,7 +30,7 @@ Run the repository’s React Native 0.86 host against the local bridge and one l
 
    Expected result: the app resolves `file:../../packages/react-native`.
 
-2. Follow the [monorepo native-link instructions](../../packages/react-native/README.md#repository-development) for the platform you want to run.
+2. Follow the [local development workflow](../../docs/development-and-go-live-guide.md#local-development-workflow) for the platform you want to run.
 
    Expected result: iOS or Android contains exactly one local native Onlo core, not a local-plus-published duplicate.
 
@@ -59,7 +62,7 @@ Run the repository’s React Native 0.86 host against the local bridge and one l
 ## Add push for a release build
 
 The example does not install a Firebase/APNs library because the host app owns
-that choice. Connect your existing library to `forwardPushTokenToOnlo` after
+that choice. Without that external provider setup, push cannot work. Connect your existing library to `forwardPushTokenToOnlo` after
 `anonymousReady` or `identifiedReady` and on every token refresh. Ask for permission from a clear
 customer action, not during `Onlo.initialize`.
 

@@ -6,7 +6,7 @@ Use this guide to prepare the Operator account, backend, mobile hosts, and local
 
 | Environment | What can be done now | What is blocked |
 | --- | --- | --- |
-| Local | Implement and mock-test native/bridge behavior with synthetic fixtures, mock transport, and redacted data. Local host foundations are available under `examples/`. | Android native test execution awaits Android API 35/build-tools licence acceptance; full iOS XCTest/simulator execution awaits full Xcode. React Native/Flutter host-native compilation remains unverified. Local implementation is not server-gated. |
+| Local | Run native, bridge, protocol, hygiene, and representative host-build checks with synthetic fixtures, mock transport, and redacted data. Local host foundations are available under `examples/`. | Provider-configured physical-device evidence remains incomplete except for the verified native Android FCM journey. Local implementation is not server-gated. |
 | Staging | Configure the exact HTTPS origin injected by release configuration. | Requires an enabled synthetic testing target. Never guess a hostname. |
 | Production | Use `https://onlo.ai` only after release authorization. | Launch, publishing, deployment, and release actions remain prohibited without explicit approval. |
 
@@ -26,10 +26,10 @@ Use this guide to prepare the Operator account, backend, mobile hosts, and local
 ## Prerequisites
 
 - [ ] Work from local `dev`; leave `main` as the protected release branch.
-- [ ] Read the [API contract](api-contract.md) and [integration guide](integration-guide.md).
+- [ ] Read the [API contract](api-contract.md), root [SDK overview](../README.md), and the package README for the platform being integrated.
 - [ ] Assign an Operator admin, Operator backend engineer, mobile host engineer, and Onlo server owner.
-- [ ] JDK 17, Gradle, and `adb` are installed for Android work; platform 35/build tools require explicit Android licence acceptance.
-- [ ] Use Swift Package Manager outside the nested sandbox for iOS package checks; full Xcode/simulator tooling is not installed or selected.
+- [ ] JDK 17, Gradle, `adb`, Android platform 35, and build tools 35.0.0 are installed for Android work.
+- [ ] Full Xcode, Swift Package Manager, and the required iOS simulator runtimes are installed for iOS work.
 - [ ] Keep real JWTs, signing secrets, chat tokens, push tokens, customer data, messages, and attachment URLs out of the repository, fixtures, logs, and issue text.
 
 ## Tool and account setup
@@ -119,10 +119,10 @@ The [API contract](api-contract.md) is complete and authoritative. Additive serv
    | Conformance manifests | `npm run test:conformance` | Scenario shape, fixture references, JSON parsing, and synthetic/redacted policy pass; native behavior is not executed. |
    | Hygiene unit tests | `npm run test:hygiene` | Deterministic path/content-boundary tests pass. |
    | Repository hygiene | `npm run check:hygiene` | Tracked and non-ignored files pass the safe path/content preflight. |
-   | New React Native facade | `npm --prefix packages/react-native run typecheck && npm --prefix packages/react-native test` | Typed facade and adapter boundary checks pass; a real RN host-native build is still required. |
+   | New React Native facade | `npm --prefix packages/react-native run typecheck && npm --prefix packages/react-native test` | Typed facade and adapter boundary checks pass; run the representative iOS and Android host builds before release. |
    | Legacy React Native prototype | `npm --prefix sdk/react-native run typecheck && npm --prefix sdk/react-native test` | Reference-only regression tests pass; this is not v1 conformance. |
    | Flutter facade | `(cd packages/flutter && flutter test)` | Dart facade tests pass without Dart-held SDK state. |
-   | iOS core | `swift test --package-path packages/ios` | Requires full Xcode/XCTest for complete execution; source package build is a narrower check. |
+   | iOS core | `swift test --package-path packages/ios` | Swift package tests execute the native core; simulator and physical-device journeys remain separate evidence. |
    | Android core | `packages/android/gradlew -p packages/android testDebugUnitTest` | The checked-in Gradle 8.7 wrapper runs Android tests after JDK 17 and Android API 35/build tools are installed through accepted licences. |
    | Fixture syntax | `find contracts/v1 conformance/scenarios -type f -name '*.json' -print0 \| xargs -0 jq empty` | All redacted JSON fixtures parse. |
 
@@ -181,7 +181,7 @@ The local merchant-backend simulator is **SDK-team-only** integration infrastruc
 | Offline outbox | Disable network after creating a synthetic send. | One stable `clientMessageId` survives retry and a duplicate acceptance does not create another turn. | Platform-specific test status; synthetic public-service target required |
 | Transcript/deep link | Synthetic conversation ID and authorised transcript response. | The core fetches the transcript before presentation; push/deep-link data is only a hint. | Native source/mock coverage; device evidence pending |
 | Attachments | Synthetic JPEG, PNG, or WebP up to 8 MiB; no more than five. | Widget upload grant binds owner/session/metadata; first-message and authorised historical sends retain one `clientMessageId`. | Native/contract tests pass; physical picker, camera, expiry, policy-toggle, restart, and account-switch evidence pending |
-| Push | Synthetic APNs/FCM token fixture after explicit host-controlled permission and intent. | Opening a notification re-syncs the authorised transcript before showing content. | Native source/mock coverage; device evidence pending |
+| Push | Synthetic APNs/FCM token fixture after explicit host-controlled permission and intent. | Opening a notification re-syncs the authorised transcript before showing content. | Native automated coverage passes; native Android FCM delivery is E2E verified; APNs and wrapper provider-host evidence remain pending |
 | Configuration | Redacted configuration, ETag, and 304 fixtures. | Compatible revision applies atomically; offline cache remains valid. | Native source/mock coverage; platform execution evidence pending |
 
 ## Staging readiness procedure
@@ -222,6 +222,26 @@ correctly; it does not need a separate server implementation.
 The verified rows apply to iOS, Android, React Native, and Flutter clients that
 conform to the same contract. They do not prove that each client has implemented
 or called the contract correctly.
+
+### Push implementation and device evidence
+
+“FCM support across all four SDKs” does not mean using FCM on iOS. Provider
+selection follows the native runtime, while React Native and Flutter delegate to
+that runtime's core implementation.
+
+| Client surface | iOS runtime | Android runtime | Current evidence |
+| --- | --- | --- | --- |
+| Native iOS | APNs | — | Core and mock tests pass; physical APNs delivery is pending. |
+| Native Android | — | FCM | Core and mock tests pass; FCM registration and notification delivery were verified end to end by the project owner. |
+| React Native | APNs through iOS core | FCM through Android core | Facade/adapter tests and representative iOS/Android host builds pass; provider-configured physical-device journeys are pending. |
+| Flutter | APNs through iOS core | FCM through Android core | Facade/adapter tests and representative iOS/Android host builds pass; provider-configured physical-device journeys are pending. |
+
+The latest Android example adds privacy-safe FCM diagnostics, strict Onlo
+payload validation, current-token and rotated-token registration tracing, and
+notification-delivery tracing. Those host-example diagnostics are
+Android-specific. They are not duplicated in React Native, Flutter, or iOS;
+the cross-platform guarantee is the shared native registration, owner fencing,
+failure isolation, and authorized-refetch behavior.
 
 ### Per-client integration checklist
 

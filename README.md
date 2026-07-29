@@ -1,135 +1,85 @@
 # Onlo Mobile SDKs
 
-Add Onlo’s native support messenger to an iOS, Android, React Native, or Flutter app. Every SDK follows the same flow: **install → initialize → choose a login mode → present → logout**.
+Add Onlo’s ready-made support Messenger to an iOS, Android, React Native, or Flutter app.
 
 ## Choose your SDK
 
-| Your app | Start here | Package |
+| Platform | Complete guide | Example app |
 | --- | --- | --- |
-| iOS (SwiftUI or UIKit) | [iOS step-by-step guide](packages/ios/README.md) | `OnloSDK` `0.3.0` |
-| Android (Kotlin) | [Android step-by-step guide](packages/android/README.md) | `ai.onlo:onlo-android-sdk:0.3.0` |
-| React Native | [React Native step-by-step guide](packages/react-native/README.md) | `@onlo-ai/react-native@0.3.0` |
-| Flutter | [Flutter step-by-step guide](packages/flutter/README.md) | `onlo_flutter 0.3.0` |
+| iOS | [iOS guide](packages/ios/README.md) | [iOS example](examples/ios/README.md) |
+| Android | [Android guide](packages/android/README.md) | [Android example](examples/android/README.md) |
+| React Native | [React Native guide](packages/react-native/README.md) | [React Native example](examples/react-native/README.md) |
+| Flutter | [Flutter guide](packages/flutter/README.md) | [Flutter example](examples/flutter/README.md) |
 
-React Native and Flutter display the same native messenger as the iOS and Android SDKs. Do not add a native SDK separately when using a framework package.
+> **Release status:** version `0.3.2` is prepared in this repository, but the public packages are not published yet. Install only a version marked as available in **Onlo Dashboard → WebChat → Install → Mobile app**.
 
 ## Prerequisites
 
-- [ ] Create or select a Mobile SDK integration in Onlo Dashboard.
-- [ ] Copy its public SDK key. This key may be included in the app; it is not a secret.
-- [ ] Decide whether customers will use support anonymously, as signed-in users, or both.
-- [ ] For signed-in users, add an authenticated endpoint to your backend that returns a fresh Onlo user JWT.
-- [ ] Choose a screen or button in your app that will open Support. Onlo does not add a launcher automatically.
+- An Onlo account with **Owner** or **Admin** access to WebChat.
+- For push notifications, a Firebase account and project for Android FCM or an Apple Developer account with APNs access for iOS.
 
 ## Concepts
 
-| Value | Created by | Used by | Storage rule |
-| --- | --- | --- | --- |
-| Public SDK key | Onlo Dashboard | App calls `initialize` | Safe in app configuration; never use it as customer identity |
-| User JWT | Your authenticated backend | App calls `loginIdentifiedUser` | Pass directly to the SDK; never create, decode, log, or persist it in the app |
-| Signing secret | Onlo Dashboard / your backend configuration | Your backend signs the user JWT | Server-only; never ship it in an app, repository, or build setting |
+| Value | Purpose | Where it belongs |
+| --- | --- | --- |
+| Public SDK key | Connects the app to one Onlo Mobile SDK integration | App configuration; this value is not a secret |
+| Identity secret | Signs short-lived customer identity tokens | Your backend secret manager only; never put it in the app or repository |
+| User JWT | Proves which customer is signed in | Created by your backend and passed directly to the SDK; do not store or log it |
 
-There is no Onlo OTP or second customer login. Your app authenticates the customer once; your backend then proves that identity to Onlo.
+## Start in five minutes
 
-## Integration steps
+1. Open **Onlo Dashboard → WebChat → Install → Mobile app**.
+2. Choose your platform and select **Generate key**.
+3. Open the platform guide above, install the package, and copy the SDK key into your app.
+4. Follow this common SDK flow using the exact syntax from your platform guide:
 
-1. Open the guide for your platform and install its package.
+```ts
+await Onlo.initialize({ sdkKey: "<PUBLIC_SDK_KEY>" });
 
-   Expected result: the Onlo import resolves and the host app builds.
+// Choose one login method for the current customer.
+await Onlo.loginUnidentifiedUser();
+// await Onlo.loginIdentifiedUser({ userJwt });
 
-2. Initialize Onlo once with the public SDK key.
+await Onlo.present();
 
-   ```text
-   initialize(public SDK key)
-   ```
-
-   Expected result: the SDK restores or creates protected native session state without presenting UI or requesting permissions.
-
-3. Choose one login path for the current customer.
-
-   | Customer state | App action |
-   | --- | --- |
-   | Not signed in | Call `loginUnidentifiedUser()` |
-   | Signed in | Fetch a fresh JWT from your backend, then call `loginIdentifiedUser(...)` |
-
-   Expected result: Support is ready for the correct anonymous installation or verified customer.
-
-4. Add a host-owned Support button and call `present()` from its tap handler.
-
-   Expected result: the native Onlo messenger opens only when your app requests it.
-
-5. When your customer signs out or switches accounts, disable Support and await `logout()` before enabling it for the next customer.
-
-   Expected result: the previous customer’s messages, queued sends, unread state, and push association are inaccessible before another customer can use Onlo.
-
-6. After the basic chat flow works, configure optional push, images, voice, unread badges, and deep-link routing from the platform guide.
-
-   Expected result: each optional feature is added independently without changing the login flow.
-
-## How identified login works
-
-```mermaid
-sequenceDiagram
-    participant C as Customer
-    participant A as Your app
-    participant B as Your backend
-    participant O as Onlo SDK
-    C->>A: Signs in to your app
-    A->>B: Requests Onlo identity with app auth
-    B->>B: Derives stable customer ID and signs short-lived JWT
-    B-->>A: Returns userJwt
-    A->>O: loginIdentifiedUser(userJwt)
-    O-->>A: Identified Support is ready
+// Call before your app logs out or changes accounts.
+await Onlo.logout();
 ```
 
-The JWT must use the customer’s stable, opaque ID as `sub`; do not use a mutable email address or phone number as the primary identity. The exact claim rules are in the [API contract](docs/api-contract.md#operator-user-jwt).
+5. Build the app, open Messenger, and send a test message.
+6. Return to the Mobile SDK page in Dashboard and check the connection status.
 
-## What the SDK handles
+Expected result: the message reaches your Onlo workspace and Dashboard automatically reports a successful connection.
 
-| Your app controls | Onlo SDK controls |
+The snippet shows the shared flow, not copy-paste platform syntax. The complete guides include the correct imports, lifecycle setup, identity example, push registration, and Messenger presentation code.
+
+## Features
+
+| Feature | What it provides |
 | --- | --- |
-| Public SDK key selection | Protected credential storage |
-| Anonymous or identified login choice | Session restoration and token refresh |
-| Backend JWT request | Durable offline outbox and retries |
-| Where and when Support opens | Native messenger UI and configuration |
-| Account logout ordering | Transcript, unread, media, and push ownership boundaries |
+| Ready-made Messenger | Native conversation list, transcript, composer, loading, retry, and offline states |
+| Send and receive messages | Durable message sending, streamed replies, conversation history, and unread state |
+| Shared WebChat configuration | Supported greetings, bot details, FAQs, Help Center content, and feature settings refresh automatically |
+| Themes | Supported light, dark, and brand colors are shared with the mobile Messenger |
+| Anonymous and signed-in customers | Start anonymously or identify an existing app customer with a short-lived backend-signed JWT |
+| Automatic connection recovery | Restores the session and refreshes conversations when the app starts, returns to the foreground, or reconnects |
+| Push notifications | APNs on iOS and FCM on Android, including React Native and Flutter native runtimes |
+| Image messages | Native image selection, upload progress, retry, and server-validated limits |
+| Secure logout | Removes access to the previous customer’s support state before another account can use Messenger |
 
-## Success criteria
+## You are ready when
 
-- The app builds with exactly one Onlo package/native core per platform.
-- Anonymous or identified login completes without blocking the rest of the app.
-- The messenger opens from a button or route owned by the host app.
-- No signing secret, user JWT, chat token, message text, or attachment URL is stored or logged by the host.
-- Logout finishes, or remains safely pending with Support disabled, before another customer uses Onlo.
+- Messenger opens from your app’s Support button.
+- A test message reaches the correct Onlo workspace.
+- Dashboard confirms the SDK connection.
+- Logout finishes before another customer can open Support.
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-| --- | --- | --- |
-| The package imports but Support never becomes ready | Initialization or login did not complete | Check the public SDK key and inspect only the SDK’s safe error code |
-| Identified login fails | The backend returned an expired or invalid JWT | Request a new JWT; verify `HS256`, `aud: onlo-messenger`, stable `sub`, and a lifetime of at most five minutes |
-| A second customer sees stale Support state | Account switching did not await Onlo logout | Disable Support before host logout and do not enable it for the next account until Onlo logout completes |
-| React Native or Flutter has duplicate native symbols | A native core was added manually beside the wrapper | Remove the extra native dependency; the framework package already resolves it |
-| Push works in a simulator-only test but not on a device | Provider setup is incomplete | Follow the platform push steps and validate APNs/FCM delivery on a real supported device |
-
-## For contributors
-
-This repository also contains the protocol contract, native cores, framework bridges, examples, and conformance fixtures. Start with [CONTRIBUTING.md](CONTRIBUTING.md), then read the [development and go-live guide](docs/development-and-go-live-guide.md).
-
-| Path | Purpose |
+| Symptom | What to check |
 | --- | --- |
-| `packages/ios`, `packages/android` | Native SDKs that own session, secure storage, outbox, lifecycle, push, permissions, and UI |
-| `packages/react-native`, `packages/flutter` | Thin typed bridges over the native SDKs |
-| `examples` | Runnable host integrations with safe placeholder configuration |
-| `contracts/v1`, `packages/protocol` | Canonical language-neutral fixtures and shared protocol types |
-| `conformance` | Cross-SDK lifecycle and protocol scenarios |
-| `sdk/react-native` | Legacy prototype reference only; never use it as a production fallback |
-
-## Related documentation
-
-- [Complete mobile integration guide](docs/integration-guide.md)
-- [API contract](docs/api-contract.md)
-- [Architecture](docs/architecture.md)
-- [Development and go-live guide](docs/development-and-go-live-guide.md)
-
-Next: choose your platform guide and complete the basic chat flow before adding optional features.
+| The package cannot be downloaded | Install only a version marked as available in Dashboard. |
+| Messenger does not open | Confirm initialization and one login method completed, then inspect the SDK error code. |
+| Dashboard does not confirm the connection | Send a test message and confirm the app uses the SDK key from the selected integration. |
+| Push does not register | Follow the platform guide for APNs or FCM credentials, permission, and device-token registration. |
+| Another customer cannot open Support | Keep Support disabled until the previous Onlo logout finishes. |

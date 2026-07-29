@@ -2,13 +2,16 @@
 
 Embed `SupportView` in the merchant’s existing iOS app. The app supplies a public SDK key and obtains a short-lived proof from its own authenticated backend; every other session, storage, retry, and messenger concern belongs to `OnloSDK`.
 
+> **Example format:** this directory contains copy-ready integration source, not a standalone Xcode app. Add the files to an existing iOS app target by following the steps below.
+
+> **APNs setup is not included automatically.** Basic chat works without APNs, but push notifications cannot be tested until you have an Apple Developer account, a push-enabled App ID matching the app, an APNs `.p8` authentication key configured in Onlo Dashboard, and a signed physical device. Follow Apple’s [Push Notifications capability](https://developer.apple.com/help/account/identifiers/enable-app-capabilities/#enable-push-notifications) and [APNs authentication-key](https://developer.apple.com/help/account/capabilities/communicate-with-apns-using-authentication-tokens/) instructions.
+
 ## Prerequisites
 
 - [ ] An iOS 15+ app target with `packages/ios` added as a local Swift Package during development.
 - [ ] A public SDK key issued for the merchant’s iOS integration.
 - [ ] An existing merchant-backend endpoint that returns a fresh contract-valid user JWT for the app’s currently authenticated customer.
-- [ ] For push, an Apple Developer App ID with Push Notifications enabled and
-      a signed physical device.
+- [ ] For push, an Apple Developer App ID with Push Notifications enabled, an APNs `.p8` key uploaded to Onlo Dashboard, and a signed physical device.
 
 ## Concepts
 
@@ -76,6 +79,6 @@ Embed `SupportView` in the merchant’s existing iOS app. The app supplies a pub
 | Identified support does not connect | The merchant backend did not return a fresh valid user JWT. | Refresh the merchant app login/backend session, then request a new proof. Do not alter or decode the proof in the app. |
 | Customer changed accounts | Host logout did not await SDK logout. | Block the new support action until SDK logout finishes; a pending logout intentionally keeps old state inaccessible. |
 
-SDK-team-only local harnesses, including signing and development-origin mechanics, are documented separately in the [development and go-live guide](../../docs/development-and-go-live-guide.md#local-full-stack-ios-simulator).
+SDK-team-only local harnesses, including signing and development-origin mechanics, are documented separately in the [development and go-live guide](../../docs/development-and-go-live-guide.md#sdk-team-local-full-stack-ios-simulator).
 
 Next: validate this integration with the merchant app’s normal customer-login flow.

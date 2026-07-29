@@ -1,32 +1,61 @@
 # Onlo Flutter SDK
 
-Add Onlo’s native support messenger to a Flutter app. Dart calls a typed plugin; the iOS and Android cores own credentials, sessions, offline messages, push, and UI.
+Add Onlo’s ready-made native support Messenger to a Flutter app. Get the basic flow working first: **install → initialize → open Messenger → send a test message**. Add signed-in identity and push afterward.
+
+> **Want working code first?** Start with the [runnable Flutter example](../../examples/flutter/README.md). It uses the local plugin and native SDKs from this repository and demonstrates initialization, customer login, Messenger presentation, logout, and push-forwarding hooks.
+
+> **Package availability:** version `0.3.2` is prepared in this repository, but the public package is not published yet. Install only a version marked as available in **Onlo Dashboard → WebChat → Install → Mobile app**; otherwise, run the repository example.
+
+Flutter is a typed plugin. The iOS and Android Onlo cores own credentials, sessions, offline messages, push registration, and UI.
 
 ## Prerequisites
 
 - [ ] Flutter 3.27 or newer and Dart 3.6 or newer.
 - [ ] An iOS 15+ and/or Android API 24+ host. Android builds require compile SDK 35 and Java 17.
-- [ ] A public Mobile SDK key from Onlo Dashboard.
-- [ ] For signed-in support, an authenticated backend endpoint that returns a fresh Onlo user JWT.
+- [ ] An Onlo account with **Owner** or **Admin** access to **WebChat → Install → Mobile app**.
+- [ ] A host-owned Support button or route.
+- [ ] For identified customers, a backend endpoint authenticated by your app.
+- [ ] For push, APNs credentials for iOS and/or a Firebase project for Android.
 
 ## Concepts
 
-| Term | Meaning |
-| --- | --- |
-| SDK key | Public key that selects your Onlo organisation/app integration. It is safe in app configuration and is not customer identity. |
-| User JWT | Short-lived proof minted by your backend for the customer already signed in to your app. Dart passes it directly to native code. |
-| Native core | Onlo’s iOS or Android SDK. It owns protected state, retries, transcript, push, permissions, and messenger UI. |
-| Flutter plugin | `onlo_flutter`; it forwards typed calls and native state without recreating the session in Dart. |
+| Item | Purpose | Where it belongs |
+| --- | --- | --- |
+| Public SDK key | Connects the app to one Onlo Mobile SDK integration | App configuration; it is not a secret or customer identity |
+| Identity secret | Signs short-lived customer JWTs | Backend secret manager only; never Dart, app config, or source |
+| User JWT | Proves the identity of the customer already signed in to your app | Created by your backend, held briefly in memory, then passed to native Onlo |
+| Native core | Owns protected state, retries, transcript, push, permissions, and Messenger UI | Resolved automatically by `onlo_flutter` |
+| Push token | APNs token on iOS or FCM registration token on Android | Forward from your push plugin to native Onlo; never store or log it in Dart |
 
-Never store a user JWT or Onlo session data in shared preferences, providers, blocs, Dart databases, app files, or logs.
+Never store Onlo JWTs, session state, push tokens, customer data, or messages in shared preferences, providers, blocs, Dart databases, app files, or logs.
 
-## Step 1: Install the plugin
+## 1. Quickstart: connect and test Onlo
+
+### Create the Flutter integration
+
+1. In Onlo Dashboard, open **WebChat**.
+
+   Expected result: the WebChat channel settings are visible.
+
+2. Select **Install → Mobile app**.
+
+   Expected result: the Mobile SDK setup page opens.
+
+3. Choose **Flutter**.
+
+   Expected result: Onlo shows the pub and initialization snippets for the plugin.
+
+4. Select **Generate key**, then copy the public SDK key.
+
+   Expected result: the integration has a public key that is safe to include in app configuration.
+
+### Install the plugin
 
 Add the package to `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  onlo_flutter: 0.3.0
+  onlo_flutter: 0.3.2
 ```
 
 Run:
@@ -35,75 +64,230 @@ Run:
 flutter pub get
 ```
 
-The plugin resolves `OnloSDK` 0.3.0 on iOS and `ai.onlo:onlo-android-sdk:0.3.0` on Android. Do not add either native core manually.
+The plugin resolves `OnloSDK` 0.3.2 on iOS and `ai.onlo:onlo-android-sdk:0.3.2` on Android. Do not add either native core manually.
 
-Expected result: the following import resolves and both native hosts build:
+Expected result: the import resolves and both native hosts build:
 
 ```dart
 import 'package:onlo_flutter/onlo_flutter.dart';
 ```
 
-## Step 2: Initialize once
+### Initialize and connect anonymously
 
-Initialize when the root widget starts. Keep the rest of the app usable if Support is temporarily unavailable.
+Initialize when the root widget starts, then select the anonymous login path:
 
 ```dart
 class _AppState extends State<App> {
-  String? supportError;
-
   @override
   void initState() {
     super.initState();
-    _initializeOnlo();
+    _connectOnlo();
   }
 
-  Future<void> _initializeOnlo() async {
-    try {
-      await Onlo.setLogLevel(
-        kReleaseMode ? OnloLogLevel.off : OnloLogLevel.verbose,
-      );
-      await Onlo.initialize(sdkKey: '<YOUR_PUBLIC_SDK_KEY>');
-    } catch (_) {
-      if (mounted) {
-        setState(() => supportError = 'Support is temporarily unavailable.');
-      }
-    }
+  Future<void> _connectOnlo() async {
+    // Paste the public key generated by the Mobile app setup page.
+    await Onlo.initialize(
+      sdkKey: '<YOUR_PUBLIC_MOBILE_SDK_KEY>',
+    );
+
+    // Create or resume this installation's anonymous support session.
+    await Onlo.loginUnidentifiedUser();
   }
 }
 ```
 
-Expected result: native code restores protected state without presenting UI or requesting permissions.
+| Added line | What it does |
+| --- | --- |
+| `Onlo.initialize(sdkKey:)` | Selects the Onlo integration and starts protected native state restoration; it does not show UI or ask for permissions |
+| `loginUnidentifiedUser()` | Creates or resumes an installation-scoped anonymous session without email, phone, or customer ID |
+| `initState()` | Starts the one-time connection when the root state is created |
+| `Future<void>` | Keeps native/network work asynchronous; production code should show a safe Support-unavailable state when it throws |
 
-## Step 3: Choose a login path
+### Open Messenger
 
-Call one login method after your app knows whether the current customer is signed in.
-
-### Anonymous customer
+Call `present` from your app’s Support button after anonymous login completes:
 
 ```dart
-await Onlo.loginUnidentifiedUser();
+FilledButton(
+  onPressed: () => Onlo.present(),
+  child: const Text('Support'),
+)
 ```
 
-Expected result: Support uses an installation-scoped anonymous session with no customer identifier.
+Expected result: tapping Support opens the native Onlo Messenger. Onlo does not add a launcher automatically.
 
-### Signed-in customer
+### Verify the connection
+
+1. Tap your app’s Support button.
+
+   Expected result: the native Onlo Messenger opens; Flutter does not render a parallel chat screen.
+
+2. Send an anonymous test message to your workspace.
+
+   Expected result: the message reaches the same WebChat AI and support pipeline as the website widget.
+
+3. Return to **WebChat → Install → Mobile app → Flutter** in Onlo Dashboard.
+
+   Expected result: Onlo automatically updates the integration status after receiving the SDK connection. Use the displayed status or SDK error code to confirm whether setup succeeded.
+
+## 2. Verify signed-in customer identity
+
+Identified login starts with your app’s existing authentication. Customers do not enter an Onlo OTP or sign in a second time.
+
+### Generate and store the identity secret
+
+1. On the Flutter Mobile SDK setup page, open **Identity verification** and select **Generate secret**.
+
+   Expected result: Onlo creates the secret used to sign mobile identity proofs.
+
+2. Copy the secret directly into your backend secret manager.
+
+   Expected result: the secret is available only to trusted server code. Never return it to Dart or place it in app configuration, source control, CI logs, or analytics.
+
+3. Add an authenticated backend endpoint that derives the current customer from your app session and signs a short-lived JWT with `HS256`.
+
+   Expected result: the app receives a fresh `userJwt`, not the identity secret.
+
+Replace these placeholders before your backend signs the JWT:
+
+```jsonc
+{
+  "aud": "onlo-messenger",
+  "sub": "<stable-customer-id>",
+  "iat": "<current-unix-seconds>",
+  "exp": "<iat-plus-no-more-than-300-seconds>",
+  "name": "<optional-customer-name>",
+  "customAttributes": {
+    "plan": "<optional-plan>"
+  }
+}
+```
+
+Use an immutable, opaque customer ID for `sub`. `iat` and `exp` are numeric Unix seconds, and the lifetime must not exceed five minutes; see the [complete JWT claim contract](../../docs/api-contract.md#operator-user-jwt).
+
+### Log in the identified customer
 
 ```dart
-// Your authenticated app client calls your backend. The backend derives the
-// stable customer ID and returns a short-lived Onlo JWT.
+// Your backend authenticates the current app session and signs the JWT.
 final userJwt = await merchantBackend.fetchOnloUserJwt();
 
-// Pass it directly to native Onlo. Do not decode, save, or log it.
+// Pass it directly to native Onlo. Do not decode, persist, or log it.
 await Onlo.loginIdentifiedUser(userJwt: userJwt);
 ```
 
-Expected result: the native session is attached to the customer already authenticated by your app. There is no Onlo OTP or second login.
+Expected result: Onlo verifies the backend signature and associates the native installation with the identified contact for `sub`.
 
-Your backend must use an immutable, opaque customer ID for the JWT `sub`. See the [exact claim rules](../../docs/api-contract.md#operator-user-jwt).
+### Test identity continuity
 
-## Step 4: Present Support
+1. Sign in to your app with a test account, fetch a fresh JWT, and call `loginIdentifiedUser`.
+2. Open Messenger and send a test message.
+3. Disable Support and await `Onlo.logout()` before completing app logout.
+4. Sign in again with the same app credentials, mint a new JWT with the same stable `sub`, and call `loginIdentifiedUser` again.
+5. Check Onlo Dashboard.
 
-Listen to native state and enable the host button only when the session is ready:
+Expected result: Onlo resolves the same identified contact after the second login. A different app customer must use a different stable `sub`.
+
+## 3. Enable push notifications
+
+Flutter uses the provider for the current native runtime:
+
+| Runtime | Provider sent to Onlo | Dashboard credential |
+| --- | --- | --- |
+| iOS | `OnloPushProvider.apns` with the hexadecimal APNs device token | APNs `.p8`, Key ID, Team ID, Bundle ID, and environment |
+| Android | `OnloPushProvider.fcm` with the FCM registration token | Firebase service-account JSON and Android application ID |
+
+Onlo does not install a push-provider plugin or ask for notification permission. Use your existing plugin, ask from a clear customer action, and forward the current token only after `anonymousReady` or `identifiedReady`.
+
+### Configure the Android runtime with FCM
+
+1. Add a matching Android app to your Firebase project and follow Firebase’s [Android project setup](https://firebase.google.com/docs/android/setup).
+2. Place `google-services.json` in `android/app/`, apply the Google Services plugin, and install your Firebase messaging plugin.
+3. In Onlo Dashboard, expand **Mobile Features & App Controls**, enable **Push notifications → FCM**, and enter the Android application ID.
+4. In Firebase Console, open **Project settings → Service accounts → Generate new private key**. Follow Firebase’s [service-account instructions](https://firebase.google.com/docs/admin/setup#initialize_the_sdk_in_non-google_environments).
+5. Paste the complete service-account JSON into Onlo Dashboard and select **Save FCM**.
+
+Expected result: the dashboard status becomes **FCM ready**. The service-account JSON remains in Onlo Dashboard and is never bundled into the app.
+
+### Configure the iOS runtime with APNs
+
+1. Add the **Push Notifications** capability to the iOS app target and enable APNs for its App ID. Follow Apple’s [APNs registration guide](https://developer.apple.com/documentation/usernotifications/registering-your-app-with-apns).
+2. In Onlo Dashboard, enable **Push notifications → APNs** and enter the Bundle ID and Team ID.
+3. Create and download an APNs `.p8` key by following Apple’s [private-key guide](https://developer.apple.com/help/account/keys/create-a-private-key/).
+4. Enter the Key ID, Team ID, `.p8` contents, and matching Sandbox/Production environment, then select **Validate and save APNs**.
+
+Expected result: the dashboard shows the APNs ready state. The `.p8` credential remains in Onlo Dashboard and is never bundled into the app.
+
+### Forward the device push token
+
+The following example uses the token APIs exposed by `firebase_messaging`. Another push plugin is also valid if it returns the raw APNs token on iOS and the FCM registration token on Android:
+
+```dart
+import 'dart:io';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:onlo_flutter/onlo_flutter.dart';
+
+final token = Platform.isIOS
+    ? await FirebaseMessaging.instance.getAPNSToken()
+    : await FirebaseMessaging.instance.getToken();
+
+if (token != null) {
+  await Onlo.setPushToken(
+    provider: Platform.isIOS
+        ? OnloPushProvider.apns
+        : OnloPushProvider.fcm,
+    token: token,
+  );
+}
+```
+
+Forward every later token rotation. On iOS, fetch the current APNs token again after native registration/foreground recovery; do not pass an iOS FCM token to Onlo as `apns`.
+
+Expected result: the current anonymous or identified native installation is registered with the matching provider.
+
+When the customer taps an Onlo notification, wait for a ready state and forward the three routing values:
+
+```dart
+final result = await Onlo.handlePushNotification(
+  OnloPushNotificationPayload(
+    conversationId: data['conversationId']!,
+    messageId: data['messageId']!,
+    notificationType: 'message_available',
+  ),
+);
+```
+
+Expected result: native code re-authorizes and refreshes the conversation before navigation. Route `notOnlo` through the app’s normal notification handler; retry `deferred` after foreground/network recovery without persisting the payload in Dart.
+
+### Build and test each installation
+
+1. Build the native host. Use a signed physical iPhone for APNs and a physical or Google Play-enabled Android device for FCM.
+
+   ```bash
+   flutter build apk --release
+   flutter build ios --release
+   ```
+
+   Expected result: the provider returns a current token and the app forwards it after Onlo readiness.
+
+2. In the Mobile SDK dashboard, open **Installations**.
+
+   Expected result: each test device appears and the installation count increases.
+
+3. Select one device, choose **Send to selected installation**, and keep the default five-second safety delay or select another available delay.
+
+   Expected result: Onlo schedules the test only for the selected iOS or Android installation.
+
+4. Wait for the selected delay and tap the delivered notification.
+
+   Expected result: the notification reaches the selected device and the authorized native Messenger route opens.
+
+Push-token or provider errors are push-only failures. They must not interrupt Messenger, transcript synchronization, login, or logout.
+
+## 4. Control Messenger presentation
+
+The quickstart opens Messenger directly. In production, observe native readiness before enabling the Support button. Onlo provides the complete native Messenger UI on both platforms and reuses the supported WebChat greeting, colors, bot identity, FAQs, Help Center content, voice controls, and image-upload settings.
+
+Observe native state and enable your host-owned Support button:
 
 ```dart
 StreamBuilder<OnloStateSnapshot>(
@@ -121,137 +305,64 @@ StreamBuilder<OnloStateSnapshot>(
 )
 ```
 
-Expected result: tapping the host-owned button opens the contained native messenger. Onlo does not add a floating launcher or render chat in Dart.
+| Added line | What it does |
+| --- | --- |
+| `Onlo.observeState()` | Streams token-free state emitted by the native core |
+| `anonymousReady` / `identifiedReady` | Ensures Messenger opens only after the selected session is ready |
+| `Onlo.present()` | Opens the contained native Messenger; it does not render chat in Dart |
+| `onPressed: ready ? ... : null` | Keeps the Support action disabled during initialization, logout, or recovery |
 
-Use full-screen presentation only when your navigation design requires it:
+Expected result: iOS and Android customers get the same configured support experience without a custom Flutter chat screen. Onlo does not insert a launcher; your app controls where and when Support opens.
 
-```dart
-await Onlo.present(presentationMode: OnloPresentationMode.fullScreen);
-```
+## Logout and account switching
 
-## Step 5: Handle logout and account switching
-
-Disable Support, await Onlo logout, then finish your app’s account transition:
+Disable Support before app logout, then wait for Onlo logout to finish:
 
 ```dart
 Future<void> logoutCustomer() async {
   setState(() => supportEnabled = false);
-
-  try {
-    await Onlo.logout();
-  } finally {
-    await merchantAuth.logout();
-  }
+  await Onlo.logout();
+  await merchantAuth.logout();
 }
 ```
 
-Expected result: the old native owner partition is blocked before another customer can use Support. If logout throws or native state becomes `logoutPending`, keep Support disabled until recovery completes.
-
-## Step 6: Add optional features
-
-### Unread badge
-
-```dart
-final unreadSubscription = Onlo.observeUnreadCount().listen((count) {
-  // null means anonymous, logout, or account switch.
-  setSupportBadge(count ?? 0);
-});
-
-// Cancel unreadSubscription from dispose().
-```
-
-Expected result: identified customers see the exact server unread total and all account-boundary states clear it.
-
-### Push notifications
-
-Onlo does not install a push-provider plugin or ask for permission. Use your
-app's existing APNs/FCM plugin, ask from a customer action, and forward the
-current native token after anonymous or identified readiness plus every later token rotation:
-
-```dart
-import 'dart:io';
-
-await Onlo.setPushToken(
-  provider: Platform.isIOS ? OnloPushProvider.apns : OnloPushProvider.fcm,
-  token: token,
-);
-```
-
-When a customer taps an Onlo notification, forward the three v1 routing values:
-
-```dart
-final result = await Onlo.handlePushNotification(
-  OnloPushNotificationPayload(
-    conversationId: data['conversationId']!,
-    messageId: data['messageId']!,
-    notificationType: 'message_available',
-  ),
-);
-```
-
-Expected result: native code re-authorises the current customer and conversation before navigation. Route `notOnlo` through your app and do not force a stale screen open for `deferred`.
-
-For a background or cold-start tap, wait until `observeState` reports
-`OnloSessionState.anonymousReady` or `OnloSessionState.identifiedReady` before forwarding the payload. If the native
-result is `deferred` because the network is unavailable, retry from the next
-foreground recovery. Keep only the one transient callback value; do not persist
-push payloads, tokens, or customer state in Dart.
-
-Treat token and provider errors as push-only failures. The active chat session,
-Messenger UI, transcript synchronization, and logout remain usable; forward
-the current token again to re-register that installation.
-
-### Deep links and known conversations
-
-```dart
-await Onlo.openConversation(conversationId);
-```
-
-Expected result: native code presents the conversation only after ownership validation and transcript refresh.
-
-Images, camera, voice, themes, FAQs, and Help Center content are native and Dashboard-controlled. Do not build a parallel Dart composer or transcript store.
+If native state becomes `logoutPending`, keep Support disabled until recovery completes. User A’s messages, queued sends, unread state, and push association must remain inaccessible before User B can use Onlo.
 
 ## API summary
 
-| Task | API |
+| Task | Flutter API |
 | --- | --- |
 | Initialize | `Onlo.initialize(sdkKey:)` |
 | Anonymous login | `Onlo.loginUnidentifiedUser()` |
 | Identified login | `Onlo.loginIdentifiedUser(userJwt:)` |
-| Present/dismiss | `Onlo.present(...)`, `Onlo.dismiss()` |
-| Open conversation | `Onlo.openConversation(conversationId)` |
+| Present Messenger | `Onlo.present(...)` |
 | Logout | `Onlo.logout()` |
-| Push | `Onlo.setPushToken(...)`, `Onlo.handlePushNotification(...)` |
-| Observe | `observeState`, `observeIdentityState`, `observeConnectionState`, `observeUnreadCount` |
-| Safe diagnostics | `Onlo.setLogLevel(OnloLogLevel...)` |
+| Register push | `Onlo.setPushToken(provider:, token:)` |
+| Route a push tap | `Onlo.handlePushNotification(payload)` |
+| Observe state/unread | `Onlo.observeState()`, `Onlo.observeUnreadCount()` |
 
 ## Success criteria
 
-- iOS and Android builds contain exactly one matching native Onlo core.
-- Anonymous and identified login both reach a ready state.
-- The messenger opens only from a host-owned action and is rendered natively.
-- Dart never signs, stores, logs, or decodes the user JWT.
-- Logout finishes, or Support remains disabled while native logout recovery is pending, before an account switch.
+- The anonymous test message updates the Flutter integration status in Onlo Dashboard.
+- A server-signed JWT resolves the same contact after logout and login with the same stable `sub`.
+- Each enabled provider shows ready, its test installation appears, and a selected-device test reaches that runtime.
+- The native Messenger opens from a host-owned action and reflects shared WebChat settings on iOS and Android.
+- Dart never signs, decodes, stores, or logs identity proofs, native state, push tokens, customer data, or message content.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| `OnloBridgeUnavailableException` | The native plugin was not registered in the current build | Run `flutter clean`, `flutter pub get`, and rebuild the native host |
-| iOS reports duplicate Onlo symbols | `OnloSDK` was added separately | Remove the manual SwiftPM/CocoaPods core; the Flutter plugin already resolves it |
-| Android reports duplicate classes | The Maven core was added separately | Remove the manual `ai.onlo:onlo-android-sdk` dependency |
-| Identified login fails | Backend JWT is invalid or expired | Fetch a fresh JWT and verify the contract claims; do not modify it in Dart |
-| Support button never enables | Initialization/login failed or state is still restoring | Observe `OnloStateSnapshot` and inspect only typed safe errors |
-| Old badge remains after logout | Host retained derived UI state | Treat `null` from `observeUnreadCount` as an immediate badge clear |
+| `OnloBridgeUnavailableException` | The plugin was not registered in the rebuilt native host | Run `flutter clean`, `flutter pub get`, and rebuild the selected platform |
+| Duplicate iOS symbols or Android classes | A native Onlo core was added manually beside the plugin | Remove the manual core; the Flutter plugin already resolves it |
+| Dashboard does not confirm the connection | The package, public key, rebuild, or anonymous login is incomplete | Verify the generated public key, reach a ready state, open Messenger, and send one test message |
+| Identified login fails | The backend JWT is expired, signed by the wrong secret, or has invalid claims | Mint a fresh HS256 JWT with the exact audience, stable `sub`, and maximum five-minute lifetime |
+| Push setup is ready but no installation appears | The app forwarded the wrong device push token or did so before login finished | Use the APNs token on iOS or the FCM token on Android, then call `setPushToken` after login completes |
+| Notification tap does not open Messenger | The payload was forwarded before native restoration or failed ownership validation | Wait for a ready state and handle `deferred`/`notOnlo` without forcing navigation |
+| Old Support state appears during account switching | The host did not await native logout | Disable Support and complete `Onlo.logout()` before enabling another customer |
 
 ## Run the example
 
-See the [Flutter host example](../../examples/flutter/README.md) for local iOS and Android builds.
+Use the [Flutter host example](../../examples/flutter/README.md) to test both native runtimes against this repository.
 
-## Repository development
-
-Local examples replace published dependencies with one sibling native core per platform. Android uses the sibling Gradle project; iOS uses the plugin pod plus one root-level local `OnloSDK` pod. Never add both the local and published core.
-
-For protocol details and advanced behavior, see the [complete integration guide](../../docs/integration-guide.md) and [API contract](../../docs/api-contract.md).
-
-Next: run the [Flutter example](../../examples/flutter/README.md) on each native platform you support.
+Next: use the [API contract](../../docs/api-contract.md) when implementing the backend JWT endpoint.

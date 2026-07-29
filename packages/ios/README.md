@@ -1,429 +1,221 @@
 # Onlo iOS SDK
 
-Add native Onlo support to an iOS 15+ app with one lifecycle:
-**initialize → login → present → logout**.
+Add Onlo’s ready-made support Messenger to an iOS app. Get the basic flow working first: **install → initialize → open Messenger → send a test message**. Add signed-in identity and APNs afterward.
+
+> **Want working code first?** Start with the [iOS integration example](../../examples/ios/README.md). It provides copy-ready host code for initialization, customer login, Messenger presentation, logout, and APNs callbacks. It is not a standalone Xcode app.
+
+> **Package availability:** version `0.3.2` is prepared in this repository, but the public package is not published yet. Install only a version marked as available in **Onlo Dashboard → WebChat → Install → Mobile app**; otherwise, run the repository example.
 
 ## Prerequisites
 
-- [ ] iOS 15 or newer and an app target that can add Swift packages or CocoaPods.
-- [ ] A public Mobile SDK key from Onlo Dashboard.
+- [ ] iOS 15 or newer and an app target that can use Swift Package Manager or CocoaPods.
+- [ ] An Onlo account with **Owner** or **Admin** access to **WebChat → Install → Mobile app**.
 - [ ] A host-owned Support button or route and the active `UIViewController` that will present it.
-- [ ] For signed-in support, an authenticated backend endpoint that returns a fresh Onlo user JWT.
+- [ ] For identified customers, a backend endpoint authenticated by your app.
+- [ ] For push, an Apple Developer account, a push-enabled App ID, and a physical iPhone for final delivery testing.
 
 ## Concepts
 
-| Term | Meaning |
-|---|---|
-| SDK key | Public key that selects your Onlo organisation/app integration. It is safe to include in the app and is not customer identity. |
-| User JWT | Short-lived identity proof created by your backend after the customer signs in to your app. The iOS app passes it directly to Onlo. |
-| `Onlo` | Application-scoped native SDK that owns protected session state, offline sends, transcript, push, and configuration. |
-| Presenter | Your currently visible `UIViewController`; your app decides where and when the messenger opens. |
+| Item | Purpose | Where it belongs |
+| --- | --- | --- |
+| Public SDK key | Connects the app to one Onlo Mobile SDK integration | App configuration; it is not a secret or customer identity |
+| Identity secret | Signs short-lived customer JWTs | Backend secret manager only; never the app, plist, build settings, or source |
+| User JWT | Proves the identity of the customer already signed in to your app | Created by your backend, held briefly in memory, then passed to Onlo |
+| APNs `.p8` key | Lets Onlo send iOS notifications | Onlo Dashboard only; never the app bundle or repository |
+| APNs device token | Identifies one app installation for push | Forward directly from iOS to Onlo; never persist or log it |
 
-Do not put the user-JWT signing secret in the iOS app, build settings, property lists, or source control.
+## 1. Quickstart: connect and test Onlo
 
-## Integration at a glance
+### Create the iOS integration
 
-| Call | When to use it | Result |
-|---|---|---|
-| 1. `Onlo.initialize(apiKey:)` | Once when the app starts | Connects this app to its Onlo organisation and restores protected state |
-| 2. `Onlo.loginUnidentifiedUser()` or `Onlo.loginIdentifiedUser(userJwt:)` | After deciding whether your customer is signed in | Opens the correct anonymous or identified Onlo session |
-| 3. `Onlo.present(from:)` | When the customer taps your Support button | Presents the native messenger from your chosen screen |
-| 4. `Onlo.logout()` | Before your app logs out or switches customers | Revokes the current session and makes its protected state inaccessible |
+1. In Onlo Dashboard, open **WebChat**.
 
-## Step 1: Install the SDK
+   Expected result: the WebChat channel settings are visible.
 
-### Option A: Public installation
+2. Select **Install → Mobile app**.
 
-In Xcode, select **Add Package Dependencies**, enter
-`https://github.com/onlo-ai/onlo-mobile-sdks`, and choose exact version
-`0.3.0`.
+   Expected result: the Mobile SDK setup page opens.
+
+3. Choose **iOS**.
+
+   Expected result: Onlo shows the iOS package and initialization snippets.
+
+4. Select **Generate key**, then copy the public SDK key.
+
+   Expected result: the integration has a public key that is safe to include in app configuration.
+
+### Install the SDK
+
+In Xcode, select **File → Add Package Dependencies** and enter:
+
+```text
+https://github.com/onlo-ai/onlo-mobile-sdks
+```
+
+Choose exact version `0.3.2` and add the `OnloSDK` product once.
 
 For a manifest-based host:
 
 ```swift
 .package(
     url: "https://github.com/onlo-ai/onlo-mobile-sdks.git",
-    exact: "0.3.0"
+    exact: "0.3.2"
 )
 ```
-
-Add the `OnloSDK` product once.
 
 For CocoaPods:
 
 ```ruby
-pod 'OnloSDK', '0.3.0'
+pod 'OnloSDK', '0.3.2'
 ```
 
-Run `pod install`, then open the generated workspace. Use SwiftPM or CocoaPods
-for a target, never both.
+Run `pod install`, then open the generated workspace. Use Swift Package Manager or CocoaPods for a target, never both.
 
-Expected result: `import OnloSDK` builds in the app target with exactly one package manager supplying the SDK.
+Expected result: `import OnloSDK` builds with exactly one package manager supplying the SDK.
 
-### Option B: Repository development
+### Initialize and connect anonymously
 
-1. Open the merchant app in Xcode.
-2. Select **File → Add Package Dependencies**.
-3. Select **Add Local**.
-4. Choose `onlo-mobile-sdks/packages/ios`.
-5. Add `OnloSDK` to the app target.
-
-Expected result: `import OnloSDK` builds against the local repository source.
-
-## Steps 2–5: Add the customer lifecycle
+Initialize once, then select the anonymous login path:
 
 ```swift
-import UIKit
-import OnloSDK // 1. Import the package added to your app target.
+import OnloSDK
 
-final class SupportViewController: UIViewController {
-    @IBOutlet private weak var supportButton: UIButton!
-
-    func startOnloForSignedInCustomer() async {
-        do {
-            // 2. Copy this from:
-            // Onlo Dashboard → WebChat → Install → Mobile SDK
-            //
-            // Generate a key there first if needed.
-            // This public key identifies your organisation/app integration.
-            // It is not a customer identity or signing secret.
-            try await Onlo.initialize(
-                apiKey: "<PASTE_YOUR_PUBLIC_MOBILE_SDK_KEY_HERE>"
-            )
-
-            // 3. Your backend already knows the customer because they signed
-            // in to your app. It returns a short-lived Onlo user JWT containing
-            // the stable customer ID and optional name/email/phone attributes.
-            let userJwt = try await fetchOnloUserJWT()
-
-            // Pass the JWT directly to Onlo. Never save or log it.
-            try await Onlo.loginIdentifiedUser(userJwt: userJwt)
-
-            // Onlo is ready. Enable your app's Support button here.
-            supportButton.isEnabled = true
-        } catch {
-            // Onlo must not block login to the rest of your app.
-            supportButton.isEnabled = false
-        }
-    }
-
-    @IBAction func supportTapped(_ sender: UIButton) {
-        Task {
-            // 4. `from: self` means: present from this ViewController.
-            // Your app controls exactly where and when Onlo opens.
-            try await Onlo.present(from: self)
-        }
-    }
-
-    func logoutCustomer() async throws {
-        // 5. Await Onlo before another customer can use the app.
-        try await Onlo.logout()
-
-        // Now call your own authentication manager to complete logout.
-    }
-}
-```
-
-For a customer who has not signed in, replace the JWT lines with:
-
-```swift
-// Use an installation-scoped anonymous Onlo session.
-try await Onlo.loginUnidentifiedUser()
-```
-
-That is the complete normal integration. The remaining sections are optional.
-
-Expected result: initialization prepares Support in the background, the selected login mode becomes ready, the messenger opens only from the host button, and logout completes before another customer uses Onlo.
-
-## Why `try await`?
-
-| Keyword | Why it is required |
-|---|---|
-| `await` | Initialization, identity verification, secure storage, logout, and presentation can perform asynchronous native/network work without blocking the UI |
-| `try` | Network, configuration, identity proof, or protected-storage work can fail and must not be silently ignored |
-
-Use these calls inside an existing async function or a `Task`.
-
-## Identified users
-
-### Why the app cannot mint the JWT
-
-The Mobile SDK key is public and can be extracted from an app binary. If the
-mobile SDK accepted only an email/name, a modified app could impersonate another
-customer by submitting their identifiers.
-
-The approved flow is:
-
-1. The customer signs in to the merchant app.
-2. The merchant app calls its authenticated backend.
-3. The backend derives the customer from that authenticated session.
-4. The backend creates a JWT using the Operator signing secret.
-5. The app immediately passes the short-lived JWT to Onlo.
-
-The JWT may contain:
-
-- Stable opaque customer ID in `sub`
-- `name`
-- `email`
-- `phone`
-- `locale`
-- Bounded custom attributes
-
-Example merchant API request:
-
-```swift
-private struct OnloIdentityResponse: Decodable {
-    let userJwt: String
-}
-
-func fetchOnloUserJWT() async throws -> String {
-    var request = URLRequest(
-        url: URL(string: "\(yourAPI)/api/onlo-identity")!
-    )
-    request.httpMethod = "POST"
-
-    // This is your merchant-app access token—not an Onlo credential.
-    // The backend uses it to determine which customer is signed in.
-    request.setValue(
-        "Bearer \(merchantAccessToken)",
-        forHTTPHeaderField: "Authorization"
+func startAnonymousSupport() async throws {
+    // Paste the public key generated by the Mobile app setup page.
+    try await Onlo.initialize(
+        apiKey: "<YOUR_PUBLIC_MOBILE_SDK_KEY>"
     )
 
-    let (data, response) = try await URLSession.shared.data(for: request)
-
-    guard let http = response as? HTTPURLResponse,
-          http.statusCode == 200 else {
-        throw URLError(.badServerResponse)
-    }
-
-    // Decode the backend response, not the JWT itself.
-    // Return it directly; never persist or log it.
-    return try JSONDecoder()
-        .decode(OnloIdentityResponse.self, from: data)
-        .userJwt
+    // Create or resume this installation's anonymous support session.
+    try await Onlo.loginUnidentifiedUser()
 }
 ```
 
-Then exchange it:
+| Added line | What it does |
+| --- | --- |
+| `import OnloSDK` | Makes the public Onlo APIs available to the app target |
+| `Onlo.initialize(apiKey:)` | Selects the Onlo integration and restores protected native state; it does not present UI or request permissions |
+| `loginUnidentifiedUser()` | Creates or resumes an installation-scoped anonymous session without email, phone, or customer ID |
+| `try await` | Waits for native/network work and requires the host to handle a safe failure state |
+
+### Open Messenger
+
+Call `present` from your app’s Support button using the currently visible `UIViewController`:
 
 ```swift
-let userJwt = try await fetchOnloUserJWT()
+@IBAction func supportTapped(_ sender: UIButton) {
+    Task {
+        try await Onlo.present(from: self)
+    }
+}
+```
+
+Expected result: tapping Support opens Onlo’s native Messenger. Onlo does not add a launcher automatically.
+
+### Verify the connection
+
+1. Tap your app’s Support button.
+
+   Expected result: the native Onlo Messenger opens.
+
+2. Send an anonymous test message to your workspace.
+
+   Expected result: the message reaches the same WebChat AI and support pipeline as the website widget.
+
+3. Return to **WebChat → Install → Mobile app → iOS** in Onlo Dashboard.
+
+   Expected result: Onlo automatically updates the integration status after receiving the SDK connection. Use the displayed status or SDK error code to confirm whether setup succeeded.
+
+## 2. Verify signed-in customer identity
+
+Identified login starts with your app’s existing authentication. Customers do not enter an Onlo OTP or sign in a second time.
+
+### Generate and store the identity secret
+
+1. On the iOS Mobile SDK setup page, open **Identity verification** and select **Generate secret**.
+
+   Expected result: Onlo creates the secret used to sign mobile identity proofs.
+
+2. Copy the secret directly into your backend secret manager.
+
+   Expected result: the secret is available only to trusted server code. Never return it to the app or place it in source control, a plist, build settings, CI logs, or analytics.
+
+3. Add an authenticated backend endpoint that derives the current customer from your app session and signs a short-lived JWT with `HS256`.
+
+   Expected result: the app receives a fresh `userJwt`, not the identity secret.
+
+Replace these placeholders before your backend signs the JWT:
+
+```jsonc
+{
+  "aud": "onlo-messenger",
+  "sub": "<stable-customer-id>",
+  "iat": "<current-unix-seconds>",
+  "exp": "<iat-plus-no-more-than-300-seconds>",
+  "name": "<optional-customer-name>",
+  "customAttributes": {
+    "plan": "<optional-plan>"
+  }
+}
+```
+
+Use an immutable, opaque customer ID for `sub`. `iat` and `exp` are numeric Unix seconds, and the lifetime must not exceed five minutes; see the [complete JWT claim contract](../../docs/api-contract.md#operator-user-jwt).
+
+### Log in the identified customer
+
+```swift
+// Your backend authenticates the current app session and signs the JWT.
+let userJwt = try await merchantBackend.fetchOnloUserJWT()
+
+// Pass it directly to Onlo. Do not decode, persist, or log it.
 try await Onlo.loginIdentifiedUser(userJwt: userJwt)
 ```
 
-The backend—not this function—adds the stable customer ID, name, email, and
-other approved claims before signing the JWT.
+Expected result: Onlo verifies the backend signature and associates the installation with the identified contact for `sub`.
 
-## Anonymous visitors
+### Test identity continuity
 
-`Onlo.initialize(apiKey:)` creates or restores an anonymous session by default.
-The app may also select that mode explicitly:
+1. Sign in to your app with a test account, fetch a fresh JWT, and call `loginIdentifiedUser`.
+2. Open Messenger and send a test message.
+3. Disable Support and await `Onlo.logout()` before completing app logout.
+4. Sign in again with the same app credentials, mint a new JWT with the same stable `sub`, and call `loginIdentifiedUser` again.
+5. Check Onlo Dashboard.
 
-```swift
-try await Onlo.loginUnidentifiedUser()
-```
+Expected result: Onlo resolves the same identified contact after the second login. A different app customer must use a different stable `sub`.
 
-- The SDK generates an installation UUID automatically.
-- Its rotating credential is stored in protected native storage.
-- Anonymous conversations remain linked to that installation generation.
-- No email, phone number, or other customer identifier is required.
+## 3. Enable APNs push notifications
 
-When the customer later signs in, fetch a backend JWT and call
-`loginIdentifiedUser(userJwt:)`. The server verifies the contact and transitions
-the installation to an identified session.
+iOS uses Apple Push Notification service. iOS obtains the device token, but your app must explicitly forward that token to Onlo.
 
-The v1 contract does **not** currently guarantee that every historical anonymous
-conversation will be merged into the contact record. Do not promise automatic
-history merging until the server contract explicitly defines and tests it.
+### Configure Apple and Onlo Dashboard
 
-## Logout and user switching
+1. In Xcode, select the app target and add the **Push Notifications** capability.
 
-Always start the Onlo account boundary when a customer signs out:
+   Expected result: the signed app contains the APNs entitlement. Apple’s [APNs registration guide](https://developer.apple.com/documentation/usernotifications/registering-your-app-with-apns) covers the required App ID and capability setup.
 
-```swift
-supportButton.isEnabled = false
+2. In Onlo Dashboard, expand **Mobile Features & App Controls**, enable **Push notifications**, then enable **APNs**.
 
-do {
-    // Makes the old Onlo owner inaccessible, unregisters its APNs association,
-    // revokes/unlinks the session, and returns the installation to anonymous.
-    try await Onlo.logout()
+   Expected result: the iOS app identity and APNs credential fields become available.
 
-    // It is now safe to activate the next customer in Onlo.
-    YourAuthManager.signOut()
-} catch {
-    // Keep Support disabled. The SDK retains a protected `logoutPending`
-    // transition and must complete it before another Onlo customer can log in.
-    scheduleOnloLogoutRetry()
+3. Enter the Bundle ID and Apple Team ID for the signed app.
 
-    // Follow your app's own sign-out policy, but do not enable Onlo for the
-    // next customer until `Onlo.logout()` completes.
-}
-```
+   Expected result: the Onlo target matches the APNs topic and developer team.
 
-Logout behavior:
+4. In Apple Developer, create an APNs private key and securely download its `.p8` file. Apple allows the file to be downloaded only once; follow [Create a private key to access a service](https://developer.apple.com/help/account/keys/create-a-private-key/).
 
-1. Dismisses/redacts the previous messenger immediately.
-2. Blocks the previous transcript and outbox before network work.
-3. Durably unregisters the previous APNs association when one exists.
-4. Revokes/unlinks the previous Onlo session.
-5. Purges the previous owner partition after server confirmation.
-6. Prevents a different customer from using Onlo while logout is pending.
+   Expected result: you have the Key ID and `.p8` private key for the correct team and environment.
 
-> Skipping the account boundary can leave Support attached to the previous
-> merchant customer. Always disable Support and call `Onlo.logout()` during
-> logout or account switching.
+5. In Onlo Dashboard, enter the Key ID, Team ID, `.p8` contents, and the environment that matches the signed build: Sandbox for development or Production for TestFlight/App Store.
 
-## Presenting chat
+   Expected result: Onlo has the server-side APNs provider credential. The `.p8` file is never embedded in the app.
 
-Normal Support button:
+6. Select **Validate and save APNs**.
 
-```swift
-try await Onlo.present(from: self)
-```
+   Expected result: the dashboard shows the APNs ready state. This validates the credential shape; complete delivery testing still requires a signed physical device.
 
-`from` is required because iPad/multi-window apps may have several scenes. The
-SDK must not guess which ViewController should present Support.
+### Ask permission and forward the APNs token
 
-Open a known conversation after an authorised push/deep link:
-
-```swift
-try await Onlo.openConversation(
-    conversationId,
-    from: self
-)
-```
-
-`conversationId` is optional for normal chat and required only when routing to
-one existing conversation.
-
-Normal presentation opens on Home, matching Onlo WebChat: greeting, up to three
-recent conversations, up to three quick questions, composer, and Powered by
-Onlo footer. Sending or selecting a conversation enters its thread; Back
-returns Home instead of silently reopening the previous thread.
-
-The composer follows the WebChat control order and dashboard gates: multiline
-message input, optional voice, attachment, code and link controls, then the
-send action. It stays pinned above the footer while the contained sheet adapts
-to safe areas, keyboard changes, rotation, and multitasking size. Full-screen
-presentation remains an explicit host option.
-Every Home row is loaded from the authorised SDK inbox/configuration; the
-shipping messenger contains no sample conversation or FAQ data.
-
-An accepted identified JWT can personalize the greeting for the current SDK
-runtime. The first name is memory-only, is cleared before logout/account
-switch, and falls back to `Hi there 👋` after process restoration.
-
-## Customization
-
-Dashboard configuration controls the default colors, bot name, subtitle,
-greeting, dark mode, FAQ quick actions, voice, and whether image upload is
-available.
-
-Restrict those defaults before presenting the messenger:
-
-```swift
-Onlo.configureMessenger(
-    OnloMessengerOptions(
-        colorMode: .system,              // Or `.light` / `.dark`
-        allowsImageAttachments: false,   // App-level restriction
-        presentationMode: .contained     // Or `.fullScreen`
-    )
-)
-```
-
-Call `configureMessenger` before opening Support. It restricts presentation
-behavior but does not change the organisation's dashboard configuration.
-
-### FAQ and Help Center
-
-Dashboard **WebChat → Behaviour → FAQ quick actions** remains authoritative.
-Home presents the first three questions. When published Help Center articles
-exist, Browse all opens Help Center just like WebChat.
-Answered FAQs render the Operator-authored answer directly without sending a
-message, creating a conversation, or invoking AI.
-
-Selecting an unanswered quick question sends it through the normal durable
-composer and AI pipeline, matching WebChat.
-
-Published Help Center content loads through the authenticated widget article
-routes and renders directly. Disabling FAQs in the dashboard removes the FAQ
-content after the next configuration refresh.
-
-### Voice
-
-Dashboard **WebChat → Behaviour → Voice input** controls both native voice
-controls:
-
-| Control | Native implementation | Server behavior |
-|---|---|---|
-| Microphone | Apple Speech recognition fills the normal message composer | The resulting text uses the existing chat request and durable outbox |
-| Speaker | Apple speech synthesis reads AI replies after the customer opts in | No audio or voice session is sent to Onlo |
-
-Voice is deliberately not a separate WebRTC mode. It is a native input/output
-layer around the same text chat pipeline used by WebChat.
-
-Add both usage descriptions to the merchant app's `Info.plist`:
-
-```xml
-<key>NSMicrophoneUsageDescription</key>
-<string>Use your microphone to dictate a support message.</string>
-<key>NSSpeechRecognitionUsageDescription</key>
-<string>Convert your spoken support message into text.</string>
-```
-
-The SDK requests both permissions only after the customer taps the microphone.
-The speaker is off by default, applies only to AI replies from the current send
-cycle, and resets when the messenger is dismissed.
-
-### Images
-
-- Dashboard **File upload** is the shared source for WebChat and every Mobile
-  SDK; per-target media controls are not used.
-- The projected `features.fileUpload` and `mediaPolicy.enabled` must both be
-  enabled.
-- JPEG, PNG, and WebP contract types are supported.
-- Dashboard controls `mediaPolicy.maximumImagesPerMessage` from 0 through 5.
-- Dashboard controls `mediaPolicy.maximumImageBytes` from 1 byte through
-  8 MiB.
-- A customer may select a source image up to 25 MiB. The SDK preserves aspect
-  ratio, never crops, and reduces it to a 4096-pixel edge, 16 megapixels, and
-  the configured byte limit before upload.
-- The SDK applies the configured value or its built-in safety ceiling,
-  whichever is lower. The server independently enforces the same policy.
-- Media policy does not change AI-credit budgets or request-rate limits.
-- Photos use the system picker.
-- Camera permission is requested only after the customer taps **Camera**.
-
-Add this to the merchant app's `Info.plist` for camera capture:
-
-```xml
-<key>NSCameraUsageDescription</key>
-<string>Take a photo to share with support.</string>
-```
-
-### Push notifications
-
-Push setup has two separate sides:
-
-1. In Xcode, add the **Push Notifications** capability to the merchant app.
-2. Configure the merchant app's APNs provider credentials in Onlo Dashboard:
-   - **Channels → WebChat → Install → Mobile SDK**: select the SDK, add the
-     Bundle ID and Team ID under **App identity**, then turn on APNs under
-     **Mobile Features & App Controls**.
-   - Enter the Key ID and Apple `.p8` private key there. The environment must
-     match the signed build: Sandbox for development, Production for TestFlight
-     and App Store builds.
-   - The `.p8` file belongs on the server and must never be embedded in the app
-     or SDK.
-3. Ask for notification permission from a clear customer action, such as
-   **Enable support notifications**. Do not prompt during SDK initialization.
-4. Pass the returned APNs device token to Onlo.
-
-**Validate and save APNs** verifies the key structure and locally signs a
-provider JWT. It does not contact APNs or send a test notification, so complete
-delivery verification still requires a physical device.
-
-Request permission and register:
+Ask from a clear customer action such as **Enable support notifications**, not during SDK initialization:
 
 ```swift
 import UserNotifications
@@ -438,7 +230,7 @@ UNUserNotificationCenter.current().requestAuthorization(
 }
 ```
 
-Pass the APNs token:
+Forward every device token supplied by APNs:
 
 ```swift
 func application(
@@ -446,46 +238,18 @@ func application(
     didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
 ) {
     Task {
-        // Pass the token whenever APNs supplies it. The native SDK registers
-        // it for the current anonymous or identified installation and
-        // re-registers after an account switch.
         try await Onlo.setAPNsPushToken(deviceToken)
     }
 }
 ```
 
-Call `registerForRemoteNotifications()` again on later launches when permission
-is already authorized. APNs then supplies the current token, covering process
-restarts as well as token rotation. Pass every token APNs supplies; never save
-or compare it in app code.
+Call `registerForRemoteNotifications()` again on later launches when permission is already authorized. APNs may rotate the token; pass every token it supplies and never cache or compare it in app code.
 
-Observe the exact identified-customer application badge:
+Expected result: the current anonymous or identified installation is registered with Onlo, and later APNs token rotations replace it safely.
 
-```swift
-Task {
-    for await count in await Onlo.observeUnreadCount() {
-        // nil means anonymous/logout/account switch: clear the badge.
-        application.applicationIconBadgeNumber = count ?? 0
-    }
-}
-```
+### Route a notification tap
 
-#### Open the conversation after the customer taps
-
-The server sends `notificationType: "message_available"` with a real
-`conversationId` and `messageId`. This one contract shape covers any
-customer-visible conversation message, including:
-
-- an agent reply;
-- a ticket update represented as a conversation message;
-- a proactive message represented as a conversation message.
-
-There is no separate `proactive_message` notification type in protocol v1.
-A ticket status change with no customer-visible message also has no v1 push
-shape; the server must create a conversation message or the protocol must be
-extended before clients can route it.
-
-Forward the notification only from the user-tap callback:
+Forward the user tap from your notification-center delegate:
 
 ```swift
 func userNotificationCenter(
@@ -496,153 +260,105 @@ func userNotificationCenter(
     Task { @MainActor in
         defer { completionHandler() }
 
-        do {
-            let handledByOnlo = try await Onlo.handleNotificationTap(
-                response.notification.request.content.userInfo,
-                from: hostViewController
-            )
-
-            if !handledByOnlo {
-                // Route the merchant app's own notification.
-            }
-        } catch {
-            // Keep the host app usable. Log only a safe error code.
-        }
+        _ = try await Onlo.handleNotificationTap(
+            response.notification.request.content.userInfo,
+            from: hostViewController
+        )
     }
 }
 ```
 
-`hostViewController` is the currently active merchant screen. Requiring it
-keeps navigation under the host app's control and supports multi-window apps.
+Expected result: Onlo validates the routing fields, re-authorizes the current owner, refreshes the conversation, and then opens it. Receiving a push without a customer tap never takes over app navigation.
 
-The SDK does **not** open chat merely because a push arrived. After a customer
-taps, it validates the payload, refreshes authorization/transcript state, and
-opens the referenced conversation. If the app is still restoring, version
-0.3.0 retains one native tap and retries it when either the anonymous or
-identified session is ready. Logout clears that pending tap. Invalid tokens,
-registration failures, and APNs errors affect push only; they never interrupt
-Messenger, transcript synchronization, or normal support.
+### Build and test an installation
 
-Test APNs delivery on a physical device before release.
+1. Build and install the signed app on a physical iPhone, then enable support notifications in the app.
 
-## Account and profile changes
+   Expected result: the app obtains an APNs token and forwards it after Onlo reaches a ready state.
 
-| Merchant event | Required Onlo action |
-|---|---|
-| Anonymous app session | `loginUnidentifiedUser()` |
-| Customer signs in | Fetch a fresh backend JWT, then `loginIdentifiedUser(userJwt:)` |
-| Name/email/phone changes | Fetch a fresh JWT containing the same stable `sub` and updated attributes |
-| Customer logs out or switches account | Await `Onlo.logout()` before activating the next customer |
-| Support is not allowed for this customer | Hide the host-owned Support button; Onlo never inserts one |
+2. In the Mobile SDK dashboard, open **Installations**.
 
-## Advanced configuration
+   Expected result: the test device appears and the installation count increases; a clean test integration normally shows `1`.
 
-### Environment keys
+3. Select the device, choose **Send to selected installation**, and keep the default five-second safety delay or select another available delay.
 
-```swift
-#if DEBUG
-let onloSDKKey = "<STAGING_PUBLIC_MOBILE_SDK_KEY>"
-#else
-let onloSDKKey = "<PRODUCTION_PUBLIC_MOBILE_SDK_KEY>"
-#endif
+   Expected result: Onlo schedules the test only for the selected installation.
 
-try await Onlo.initialize(apiKey: onloSDKKey)
-```
+4. Put the app in the required foreground/background state for your test and wait for the selected delay.
 
-The public key selects an Operator integration, not the service hostname.
-Production is fixed to `https://onlo.ai`; staging origins are SDK
-release-configured. Never place a signing secret or user JWT in build settings.
+   Expected result: the notification arrives on the device. Test notification-tap routing before release.
 
-### Safe diagnostics
+Push-token or provider errors are push-only failures. They must not interrupt Messenger, transcript synchronization, login, or logout.
+
+## 4. Control Messenger presentation
+
+The quickstart opens Messenger directly. In production, keep the Support action disabled until login is ready. Onlo provides the complete native Messenger UI and reuses the supported WebChat greeting, colors, bot identity, FAQs, Help Center content, voice controls, and image-upload settings.
+
+Open Messenger from the active view controller:
 
 ```swift
-#if DEBUG
-Onlo.setLogLevel(.verbose)
-#else
-Onlo.setLogLevel(.off)
-#endif
+@IBAction func supportTapped(_ sender: UIButton) {
+    Task {
+        try await Onlo.present(from: self)
+    }
+}
 ```
 
-| Level | Output |
-|---|---|
-| `.off` | No SDK diagnostics; the default |
-| `.error` | Safe failures requiring retry, recovery, or host action |
-| `.info` | Errors plus request/lifecycle completion summaries |
-| `.verbose` | Info plus timing milestones such as first token and cache validation |
+| Added line | What it does |
+| --- | --- |
+| `Task` | Starts the asynchronous presentation from a synchronous button action |
+| `Onlo.present(from:)` | Opens Onlo’s contained native Messenger from the selected `UIViewController` |
+| `from: self` | Keeps scene, iPad, and multi-window presentation under the host app’s control |
 
-Output is restricted to operation, safe code, request ID, SDK/runtime version,
-and duration. Every level excludes SDK keys, identity data, JWTs, session/push
-tokens, customer fields, message text, and attachment URLs. The level can
-change before or after initialization without recreating the session.
+Expected result: customers get the same configured support experience without a custom iOS chat screen. Onlo does not insert a launcher; your app controls where and when Support opens.
 
-### Custom customer attributes
+## Logout and account switching
 
-The merchant backend places bounded `customAttributes` in the short-lived
-signed user JWT. The app passes the compact JWT unchanged:
+Disable Support before app logout, then wait for Onlo logout to finish:
 
 ```swift
-let userJwt = try await fetchOnloUserJWT()
-try await Onlo.loginIdentifiedUser(userJwt: userJwt)
+supportButton.isEnabled = false
+try await Onlo.logout()
+await merchantAuth.finishLogout()
 ```
 
-The app must not construct, edit, sign, persist, or log this JWT.
+If logout remains pending, keep Support disabled until native recovery completes. User A’s messages, queued sends, unread state, and push association must remain inaccessible before User B can use Onlo.
 
-### Open a known conversation
+## API summary
 
-```swift
-try await Onlo.openConversation(
-    conversationId,
-    from: hostViewController
-)
-```
-
-The SDK re-authorises and refreshes the conversation before presentation.
+| Task | iOS API |
+| --- | --- |
+| Initialize | `Onlo.initialize(apiKey:)` |
+| Anonymous login | `Onlo.loginUnidentifiedUser()` |
+| Identified login | `Onlo.loginIdentifiedUser(userJwt:)` |
+| Present Messenger | `Onlo.present(from:)` |
+| Logout | `Onlo.logout()` |
+| Register APNs | `Onlo.setAPNsPushToken(deviceToken)` |
+| Route a push tap | `Onlo.handleNotificationTap(userInfo, from:)` |
+| Observe state/unread | `Onlo.observeState()`, `Onlo.observeUnreadCount()` |
 
 ## Success criteria
 
-- The merchant app login works even if Onlo is unavailable.
-- Support enables only after the selected Onlo login flow is ready.
-- The messenger opens only after the merchant app requests it from the active screen.
-- The app never signs, stores, decodes, or logs the user JWT.
-- Logout completes before another customer becomes active, or Support stays disabled while recovery is pending.
+- The anonymous test message updates the iOS integration status in Onlo Dashboard.
+- A server-signed JWT resolves the same contact after logout and login with the same stable `sub`.
+- APNs shows ready, the physical test installation appears, and a selected-device test reaches the iPhone.
+- The native Messenger opens from a host-owned action and reflects shared WebChat settings.
+- No identity secret, JWT, provider credential, push token, customer data, or message content is stored or logged by the host app.
 
 ## Troubleshooting
 
-| Symptom | Check |
-|---|---|
-| `import OnloSDK` fails | Confirm the local `packages/ios` package was added to the app target |
-| Support button stays disabled | Log only `OnloError.safeCode`; verify initialization and login completed |
-| Identified login fails | Confirm the backend JWT is HS256, has `aud: onlo-messenger`, stable `sub`, and a lifetime of at most 5 minutes |
-| Chat opens from the wrong screen | Call `Onlo.present(from:)` with the currently visible ViewController |
-| Camera does not open | Add `NSCameraUsageDescription` and test on a camera-capable device |
-| Microphone does not start | Enable **Voice input**, add both microphone and speech-recognition usage descriptions, and grant both permissions after tapping the microphone |
-| Push does not arrive | Verify app capabilities, APNs environment, token registration, and physical-device delivery |
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `import OnloSDK` fails | The product is missing or two package managers conflict | Add `OnloSDK` once with SwiftPM or CocoaPods, then rebuild |
+| Dashboard does not confirm the connection | The package, public key, network, or anonymous login is incomplete | Verify the generated public key, reach a ready state, open Messenger, and send one test message |
+| Identified login fails | The backend JWT is expired, signed by the wrong secret, or has invalid claims | Mint a fresh HS256 JWT with the exact audience, stable `sub`, and maximum five-minute lifetime |
+| APNs does not become ready | The key, Key ID, Team ID, Bundle ID, or environment does not match | Compare the signed app identity and Apple credential without putting the `.p8` key in the app |
+| Installation count stays at zero | The host has not forwarded a current token after Onlo readiness | Request permission, register with APNs, and pass the returned `Data` to `setAPNsPushToken` |
+| Test push does not arrive | Signing, entitlement, permission, environment, or physical-device delivery is incomplete | Use a signed physical iPhone and match Sandbox/Production to the build |
+| Chat opens from the wrong screen | The wrong presenter was supplied | Pass the currently visible `UIViewController` to `Onlo.present(from:)` |
 
-Never log JWTs, credentials, customer data, message text, push tokens, or
-attachment URLs.
+## Run the example
 
-Cross-platform session, identity, offline, reinstall, language, and deployment
-questions are answered in the
-[integration FAQ](../../docs/integration-guide.md#frequently-asked-questions).
+Use the [iOS host example](../../examples/ios/README.md) to test anonymous login, identified login, APNs registration, notification taps, Messenger, and logout against this repository.
 
-## Local verification
-
-From the repository root:
-
-```bash
-swift package resolve
-swift build -c release
-xcodebuild \
-  -scheme OnloSDK \
-  -destination 'generic/platform=iOS Simulator' \
-  build \
-  CODE_SIGNING_ALLOWED=NO
-```
-
-## Contract
-
-- Canonical contract: [`docs/api-contract.md`](../../docs/api-contract.md)
-- Shared protocol: [`packages/protocol`](../protocol)
-- Fixtures: [`contracts/v1`](../../contracts/v1)
-
-Next: run the [iOS merchant example](../../examples/ios/README.md) with your app’s normal customer-login flow.
+Next: use the [API contract](../../docs/api-contract.md) when implementing the backend JWT endpoint.

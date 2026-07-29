@@ -108,6 +108,15 @@ message, `RECONCILED` is the only terminal state.
 | RT-2 | Every realtime-driven state change must converge through an authorised transcript or conversation refetch. | Refetch applies current server authority and ordering. | Realtime hint adapters; accepted-row reconciler. | Local unread, conversation, or message state diverges from the server. |
 | RT-3 | Reconciliation must tolerate ordinary disconnects, missed hints, app suspension, and process restart without weakening owner checks or resending accepted work. | Realtime connectivity is not a correctness dependency. | Accepted-row reconciler; session and identity coordinator; realtime hint adapters. | A closed stream permanently stops convergence or triggers a duplicate send. |
 
+## Push invariants
+
+| ID | Statement | Why it exists | What code owns it | Typical failure if violated |
+| --- | --- | --- | --- | --- |
+| PU-1 | Push provider must match the native runtime: APNs on iOS and FCM on Android. React Native and Flutter must delegate to that native core instead of creating another token lifecycle. | A framework bridge cannot safely infer or translate provider credentials and owner state. | Host push adapter; framework bridge; native push registry. | An iOS FCM token is submitted as APNs, or JavaScript/Dart becomes a second source of truth. |
+| PU-2 | The current token intent and every rotation must be registered only under current owner authority and retained in native protected storage until registration or explicit owner retirement reconciles. | Provider tokens rotate and transport can fail across process or network boundaries. | Session and identity coordinator; native push registry; protected token store. | A rotated token is lost, or a token is associated with the wrong customer. |
+| PU-3 | Registration, unregistration, provider, permission, and notification-posting failures are push-only failures. They must not change session, identity, transcript, Messenger, or logout authority. | Optional notification delivery cannot become a prerequisite for customer support or account isolation. | Native push registry; host push adapter; bridge error mapping. | Chat stops because Firebase/APNs is unavailable, or logout is skipped after unregister fails. |
+| PU-4 | An Onlo push contains identifiers only as a refetch hint. The SDK must validate its declared shape, re-authorize, and refetch before display or navigation. | Push delivery is unauthenticated, duplicable, delayed, and may cross an account transition. | Native push payload handler; transcript convergence; authorised navigation. | Stale or forged payload data opens content without current authority. |
+
 ## Conversation observation invariants
 
 | ID | Statement | Why it exists | What code owns it | Typical failure if violated |

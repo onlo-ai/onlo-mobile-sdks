@@ -2,11 +2,14 @@
 
 Run the repository’s Flutter host against the local plugin and one local native core per platform. The example covers anonymous and identified login, native Support presentation, logout, push forwarding, and deep links.
 
+> **Push-provider dependencies are not included.** Basic chat works without them, but push notifications do not. Android requires your own Firebase project, Android app configuration, FCM plugin, and service-account credentials; iOS requires an Apple Developer account, push-enabled App ID, APNs plugin callbacks, and an APNs authentication key. Follow the official [Firebase Android setup](https://firebase.google.com/docs/android/setup), [FCM credential setup](https://firebase.google.com/docs/cloud-messaging/send/v1-api#provide-credentials-manually), and [Apple APNs setup](https://developer.apple.com/documentation/UserNotifications/registering-your-app-with-apns) before testing push.
+
 ## Prerequisites
 
 - [ ] Flutter 3.27+, Dart 3.6+, and the iOS/Android toolchains for the host you want to run.
 - [ ] A public test Mobile SDK key.
 - [ ] For identified login, an authenticated Operator-backend URL.
+- [ ] For push, the external Firebase/FCM setup on Android or Apple/APNs setup on iOS described above.
 
 ## Concepts
 
@@ -62,7 +65,7 @@ Run the repository’s Flutter host against the local plugin and one local nativ
 ## Add push for a release build
 
 The example does not install a Firebase/APNs plugin because the host app owns
-that choice. Connect your existing plugin to `forwardPushTokenToOnlo` after
+that choice. Without that external provider setup, push cannot work. Connect your existing plugin to `forwardPushTokenToOnlo` after
 `OnloSessionState.anonymousReady` or `OnloSessionState.identifiedReady` and on every token refresh. Ask for
 permission from a clear customer action, not during `Onlo.initialize`.
 

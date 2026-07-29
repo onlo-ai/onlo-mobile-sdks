@@ -1,45 +1,74 @@
 # Onlo React Native SDK
 
-Add Onlo’s native support messenger to a React Native app. JavaScript calls a typed facade; the iOS and Android cores own credentials, sessions, offline messages, push, and UI.
+Add Onlo’s ready-made native support Messenger to a React Native app. Get the basic flow working first: **install → initialize → open Messenger → send a test message**. Add signed-in identity and push afterward.
+
+> **Want working code first?** Start with the [runnable React Native example](../../examples/react-native/README.md). It uses the local bridge and native SDKs from this repository and demonstrates initialization, customer login, Messenger presentation, logout, and push-forwarding hooks.
+
+> **Package availability:** version `0.3.2` is prepared in this repository, but the public package is not published yet. Install only a version marked as available in **Onlo Dashboard → WebChat → Install → Mobile app**; otherwise, run the repository example.
+
+React Native is a typed facade. The iOS and Android Onlo cores own credentials, sessions, offline messages, push registration, and UI.
 
 ## Prerequisites
 
 - [ ] React Native 0.79 or newer, React 19 or newer, and Node.js 20 or newer.
-- [ ] A native iOS 15+ and/or Android API 24+ project. Expo Go is not supported; use a development or release build.
-- [ ] A public Mobile SDK key from Onlo Dashboard.
-- [ ] For signed-in support, an authenticated backend endpoint that returns a fresh Onlo user JWT.
+- [ ] An iOS 15+ and/or Android API 24+ native host. Expo Go is not supported; use a development or release build.
+- [ ] An Onlo account with **Owner** or **Admin** access to **WebChat → Install → Mobile app**.
+- [ ] A host-owned Support button or route.
+- [ ] For identified customers, a backend endpoint authenticated by your app.
+- [ ] For push, APNs credentials for iOS and/or a Firebase project for Android.
 
 ## Concepts
 
-| Term | Meaning |
-| --- | --- |
-| SDK key | Public key that selects your Onlo organisation/app integration. It is safe in app configuration and is not customer identity. |
-| User JWT | Short-lived proof minted by your backend for the customer already signed in to your app. JavaScript passes it directly to native code. |
-| Native core | Onlo’s iOS or Android SDK. It owns protected state, retries, transcript, push, permissions, and messenger UI. |
-| Facade | `@onlo-ai/react-native`; it validates typed inputs and forwards calls/events without recreating native state in JavaScript. |
+| Item | Purpose | Where it belongs |
+| --- | --- | --- |
+| Public SDK key | Connects the app to one Onlo Mobile SDK integration | App configuration; it is not a secret or customer identity |
+| Identity secret | Signs short-lived customer JWTs | Backend secret manager only; never JavaScript, app config, or source |
+| User JWT | Proves the identity of the customer already signed in to your app | Created by your backend, held briefly in memory, then passed to native Onlo |
+| Native core | Owns protected state, retries, transcript, push, permissions, and Messenger UI | Resolved automatically by `@onlo-ai/react-native` |
+| Push token | APNs token on iOS or FCM registration token on Android | Forward from your push library to native Onlo; never store or log it in JavaScript |
 
-Never store a user JWT or Onlo session data in AsyncStorage, Redux, Zustand, app files, or logs.
+Never store Onlo JWTs, session state, push tokens, customer data, or messages in AsyncStorage, Redux, Zustand, app files, or logs.
 
-## Step 1: Install the package
+## 1. Quickstart: connect and test Onlo
+
+### Create the React Native integration
+
+1. In Onlo Dashboard, open **WebChat**.
+
+   Expected result: the WebChat channel settings are visible.
+
+2. Select **Install → Mobile app**.
+
+   Expected result: the Mobile SDK setup page opens.
+
+3. Choose **React Native**.
+
+   Expected result: Onlo shows the npm and initialization snippets for the bridge.
+
+4. Select **Generate key**, then copy the public SDK key.
+
+   Expected result: the integration has a public key that is safe to include in app configuration.
+
+### Install the package
 
 ```bash
-npm install @onlo-ai/react-native@0.3.0
+npm install @onlo-ai/react-native@0.3.2
 cd ios && pod install
 ```
 
-The package resolves `OnloSDK` 0.3.0 on iOS and `ai.onlo:onlo-android-sdk:0.3.0` on Android. Do not add either native core manually.
+The package resolves `OnloSDK` 0.3.2 on iOS and `ai.onlo:onlo-android-sdk:0.3.2` on Android. Do not add either native core manually.
 
-Expected result: this import resolves in TypeScript and both native projects build:
+Expected result: the import resolves and both native hosts build:
 
 ```ts
 import {Onlo} from '@onlo-ai/react-native';
 ```
 
-> Expo: create a development build after installing the package. Expo Go cannot load custom native modules.
+> Expo: create a development build after installation. Expo Go cannot load custom native modules.
 
-## Step 2: Initialize once
+### Initialize and connect anonymously
 
-Initialize near the root of the app. Keep the rest of the app usable if Support is temporarily unavailable.
+Initialize near the root of the app, then select the anonymous login path:
 
 ```tsx
 import React, {useEffect} from 'react';
@@ -47,36 +76,97 @@ import {Onlo} from '@onlo-ai/react-native';
 
 export function App() {
   useEffect(() => {
-    void Onlo.setLogLevel(__DEV__ ? 'verbose' : 'off')
-      .then(() => Onlo.initialize({sdkKey: '<YOUR_PUBLIC_SDK_KEY>'}))
-      .catch(() => {
-        // Show a safe "Support unavailable" state if needed.
+    async function connectOnlo() {
+      // Paste the public key generated by the Mobile app setup page.
+      await Onlo.initialize({
+        sdkKey: '<YOUR_PUBLIC_MOBILE_SDK_KEY>',
       });
+
+      // Create or resume this installation's anonymous support session.
+      await Onlo.loginUnidentifiedUser();
+    }
+
+    void connectOnlo();
   }, []);
 
   return <YourAppRoutes />;
 }
 ```
 
-Expected result: native code restores protected state without presenting UI or requesting permissions.
+| Added line | What it does |
+| --- | --- |
+| `Onlo.initialize({sdkKey})` | Selects the Onlo integration and starts protected native state restoration; it does not show UI or ask for permissions |
+| `loginUnidentifiedUser()` | Creates or resumes an installation-scoped anonymous session without email, phone, or customer ID |
+| `useEffect(..., [])` | Starts the one-time connection when the root component mounts |
+| `void connectOnlo()` | Starts the promise from the effect; production code should also show a safe Support-unavailable state when it rejects |
 
-## Step 3: Choose a login path
+### Open Messenger
 
-Call one login method after your app knows whether the current customer is signed in.
+Call `present` from your app’s Support button after anonymous login completes:
 
-### Anonymous customer
+```tsx
+import {Button} from 'react-native';
 
-```ts
-await Onlo.loginUnidentifiedUser();
+<Button
+  title="Support"
+  onPress={() => void Onlo.present()}
+/>
 ```
 
-Expected result: Support uses an installation-scoped anonymous session with no customer identifier.
+Expected result: tapping Support opens the native Onlo Messenger. Onlo does not add a launcher automatically.
 
-### Signed-in customer
+### Verify the connection
+
+1. Tap your app’s Support button.
+
+   Expected result: the native Onlo Messenger opens; React Native does not render a parallel chat screen.
+
+2. Send an anonymous test message to your workspace.
+
+   Expected result: the message reaches the same WebChat AI and support pipeline as the website widget.
+
+3. Return to **WebChat → Install → Mobile app → React Native** in Onlo Dashboard.
+
+   Expected result: Onlo automatically updates the integration status after receiving the SDK connection. Use the displayed status or SDK error code to confirm whether setup succeeded.
+
+## 2. Verify signed-in customer identity
+
+Identified login starts with your app’s existing authentication. Customers do not enter an Onlo OTP or sign in a second time.
+
+### Generate and store the identity secret
+
+1. On the React Native Mobile SDK setup page, open **Identity verification** and select **Generate secret**.
+
+   Expected result: Onlo creates the secret used to sign mobile identity proofs.
+
+2. Copy the secret directly into your backend secret manager.
+
+   Expected result: the secret is available only to trusted server code. Never return it to JavaScript or place it in app configuration, source control, CI logs, or analytics.
+
+3. Add an authenticated backend endpoint that derives the current customer from your app session and signs a short-lived JWT with `HS256`.
+
+   Expected result: the app receives a fresh `userJwt`, not the identity secret.
+
+Replace these placeholders before your backend signs the JWT:
+
+```jsonc
+{
+  "aud": "onlo-messenger",
+  "sub": "<stable-customer-id>",
+  "iat": "<current-unix-seconds>",
+  "exp": "<iat-plus-no-more-than-300-seconds>",
+  "name": "<optional-customer-name>",
+  "customAttributes": {
+    "plan": "<optional-plan>"
+  }
+}
+```
+
+Use an immutable, opaque customer ID for `sub`. `iat` and `exp` are numeric Unix seconds, and the lifetime must not exceed five minutes; see the [complete JWT claim contract](../../docs/api-contract.md#operator-user-jwt).
+
+### Log in the identified customer
 
 ```ts
-// Your endpoint authenticates the existing app session. Your backend derives
-// the stable customer ID and signs a short-lived Onlo JWT.
 const response = await fetch('https://your-api.example.com/onlo/user-jwt', {
   method: 'POST',
   credentials: 'include',
@@ -85,17 +175,113 @@ const response = await fetch('https://your-api.example.com/onlo/user-jwt', {
 if (!response.ok) throw new Error('Could not prepare Support');
 const {userJwt} = (await response.json()) as {userJwt: string};
 
-// Pass it directly to native Onlo. Do not decode, save, or log it.
+// Pass it directly to native Onlo. Do not decode, persist, or log it.
 await Onlo.loginIdentifiedUser({userJwt});
 ```
 
-Expected result: the native session is attached to the customer already authenticated by your app. There is no Onlo OTP or second login.
+Expected result: Onlo verifies the backend signature and associates the native installation with the identified contact for `sub`.
 
-Your backend must use an immutable, opaque customer ID for the JWT `sub`. See the [exact claim rules](../../docs/api-contract.md#operator-user-jwt).
+### Test identity continuity
 
-## Step 4: Present Support
+1. Sign in to your app with a test account, fetch a fresh JWT, and call `loginIdentifiedUser`.
+2. Open Messenger and send a test message.
+3. Disable Support and await `Onlo.logout()` before completing app logout.
+4. Sign in again with the same app credentials, mint a new JWT with the same stable `sub`, and call `loginIdentifiedUser` again.
+5. Check Onlo Dashboard.
 
-Subscribe to native state, enable your Support button when ready, and remove the subscription on unmount:
+Expected result: Onlo resolves the same identified contact after the second login. A different app customer must use a different stable `sub`.
+
+## 3. Enable push notifications
+
+React Native uses the provider for the current native runtime:
+
+| Runtime | Provider sent to Onlo | Dashboard credential |
+| --- | --- | --- |
+| iOS | `apns` with the hexadecimal APNs device token | APNs `.p8`, Key ID, Team ID, Bundle ID, and environment |
+| Android | `fcm` with the FCM registration token | Firebase service-account JSON and Android application ID |
+
+Onlo does not install a push-provider library or ask for notification permission. Use your existing library, ask from a clear customer action, and forward the current token only after `anonymousReady` or `identifiedReady`.
+
+### Configure the Android runtime with FCM
+
+1. Add a matching Android app to your Firebase project and follow Firebase’s [Android project setup](https://firebase.google.com/docs/android/setup).
+2. Place `google-services.json` in `android/app/`, apply the Google Services plugin, and install your Firebase messaging library.
+3. In Onlo Dashboard, expand **Mobile Features & App Controls**, enable **Push notifications → FCM**, and enter the Android application ID.
+4. In Firebase Console, open **Project settings → Service accounts → Generate new private key**. Follow Firebase’s [service-account instructions](https://firebase.google.com/docs/admin/setup#initialize_the_sdk_in_non-google_environments).
+5. Paste the complete service-account JSON into Onlo Dashboard and select **Save FCM**.
+
+Expected result: the dashboard status becomes **FCM ready**. The service-account JSON remains in Onlo Dashboard and is never bundled into the app.
+
+### Configure the iOS runtime with APNs
+
+1. Add the **Push Notifications** capability to the iOS app target and enable APNs for its App ID. Follow Apple’s [APNs registration guide](https://developer.apple.com/documentation/usernotifications/registering-your-app-with-apns).
+2. In Onlo Dashboard, enable **Push notifications → APNs** and enter the Bundle ID and Team ID.
+3. Create and download an APNs `.p8` key by following Apple’s [private-key guide](https://developer.apple.com/help/account/keys/create-a-private-key/).
+4. Enter the Key ID, Team ID, `.p8` contents, and matching Sandbox/Production environment, then select **Validate and save APNs**.
+
+Expected result: the dashboard shows the APNs ready state. The `.p8` credential remains in Onlo Dashboard and is never bundled into the app.
+
+### Forward the device push token
+
+The following example assumes your push library can return the native APNs token on iOS and the FCM registration token on Android:
+
+```ts
+import {Platform} from 'react-native';
+import {Onlo} from '@onlo-ai/react-native';
+
+const token = Platform.OS === 'ios'
+  ? await pushProvider.getAPNSToken() // Hexadecimal APNs token.
+  : await pushProvider.getFCMToken();
+
+if (token) {
+  await Onlo.setPushToken({
+    provider: Platform.OS === 'ios' ? 'apns' : 'fcm',
+    token,
+  });
+}
+```
+
+Forward every later token rotation. On iOS, fetch the current APNs token again after native registration/foreground recovery; do not pass an iOS FCM token to Onlo as `apns`.
+
+Expected result: the current anonymous or identified native installation is registered with the matching provider.
+
+When the customer taps an Onlo notification, wait for a ready state and forward the three routing values:
+
+```ts
+const result = await Onlo.handlePushNotification({
+  conversationId: data.conversationId,
+  messageId: data.messageId,
+  notificationType: 'message_available',
+});
+```
+
+Expected result: native code re-authorizes and refreshes the conversation before navigation. Route `notOnlo` through the app’s normal notification handler; retry `deferred` after foreground/network recovery without persisting the payload in JavaScript.
+
+### Build and test each installation
+
+1. Rebuild the native app; push does not work in Expo Go. Use a signed physical iPhone for APNs and a physical or Google Play-enabled Android device for FCM.
+
+   Expected result: the provider returns a current token and the app forwards it after Onlo readiness.
+
+2. In the Mobile SDK dashboard, open **Installations**.
+
+   Expected result: each test device appears and the installation count increases.
+
+3. Select one device, choose **Send to selected installation**, and keep the default five-second safety delay or select another available delay.
+
+   Expected result: Onlo schedules the test only for the selected iOS or Android installation.
+
+4. Wait for the selected delay and tap the delivered notification.
+
+   Expected result: the notification reaches the selected device and the authorized native Messenger route opens.
+
+Push-token or provider errors are push-only failures. They must not interrupt Messenger, transcript synchronization, login, or logout.
+
+## 4. Control Messenger presentation
+
+The quickstart opens Messenger directly. In production, observe native readiness before enabling the Support button. Onlo provides the complete native Messenger UI on both platforms and reuses the supported WebChat greeting, colors, bot identity, FAQs, Help Center content, voice controls, and image-upload settings.
+
+Observe native state and enable your host-owned Support button:
 
 ```tsx
 import React, {useEffect, useState} from 'react';
@@ -122,136 +308,64 @@ export function SupportButton() {
 }
 ```
 
-Expected result: tapping the host-owned button opens the contained native messenger. Onlo does not add a floating launcher or render chat in JavaScript.
+| Added line | What it does |
+| --- | --- |
+| `Onlo.observeState(setState)` | Subscribes to token-free state emitted by the native core |
+| `anonymousReady` / `identifiedReady` | Ensures Messenger opens only after the selected session is ready |
+| `Onlo.present()` | Opens the contained native Messenger; it does not render chat in JavaScript |
+| `subscription.remove()` | Detaches the native listener when the React component unmounts |
 
-Use full-screen presentation only when your navigation design requires it:
+Expected result: iOS and Android customers get the same configured support experience without a custom React Native chat screen. Onlo does not insert a launcher; your app controls where and when Support opens.
 
-```ts
-await Onlo.present({presentationMode: 'fullScreen'});
-```
+## Logout and account switching
 
-## Step 5: Handle logout and account switching
-
-Disable Support, await Onlo logout, then finish your app’s account transition:
+Disable Support before app logout, then wait for Onlo logout to finish:
 
 ```ts
 async function logoutCustomer() {
   setSupportEnabled(false);
-
-  try {
-    await Onlo.logout();
-  } finally {
-    await merchantAuth.logout();
-  }
+  await Onlo.logout();
+  await merchantAuth.logout();
 }
 ```
 
-Expected result: the old native owner partition is blocked before another customer can use Support. If `Onlo.logout()` fails or native state becomes `logoutPending`, keep Support disabled until recovery completes.
-
-## Step 6: Add optional features
-
-### Unread badge
-
-```ts
-useEffect(() => {
-  const subscription = Onlo.observeUnreadCount(count => {
-    // null means anonymous, logout, or account switch.
-    setSupportBadge(count ?? 0);
-  });
-  return () => subscription.remove();
-}, []);
-```
-
-Expected result: identified customers see the exact server unread total and all account-boundary states clear it.
-
-### Push notifications
-
-Onlo does not install a push-provider library or ask for permission. Use your
-app's existing APNs/FCM library, ask from a customer action, and forward the
-current native token after anonymous or identified readiness plus every later token rotation:
-
-```ts
-import {Platform} from 'react-native';
-
-await Onlo.setPushToken({
-  provider: Platform.OS === 'ios' ? 'apns' : 'fcm',
-  token,
-});
-```
-
-When a customer taps an Onlo notification, forward the three v1 routing values:
-
-```ts
-const result = await Onlo.handlePushNotification({
-  conversationId: data.conversationId,
-  messageId: data.messageId,
-  notificationType: 'message_available',
-});
-```
-
-Expected result: native code re-authorises the current customer and conversation before navigation. Handle `notOnlo` with your app’s normal notification router and `deferred` without forcing a stale screen open.
-
-For a background or cold-start tap, wait until `observeState` reports
-`anonymousReady` or `identifiedReady` before forwarding the payload. If the native result is
-`deferred` because the network is unavailable, retry from the next foreground
-recovery. Keep only the one transient callback value; do not persist push
-payloads, tokens, or customer state in JavaScript.
-
-Treat token and provider errors as push-only failures. The active chat session,
-Messenger UI, transcript synchronization, and logout remain usable; forward
-the current token again to re-register that installation.
-
-### Deep links and known conversations
-
-```ts
-await Onlo.openConversation(conversationId);
-```
-
-Expected result: native code presents the conversation only after ownership validation and transcript refresh.
-
-Images, camera, voice, themes, FAQs, and Help Center content are native and Dashboard-controlled. Do not build a parallel JavaScript composer or transcript store.
+If native state becomes `logoutPending`, keep Support disabled until recovery completes. User A’s messages, queued sends, unread state, and push association must remain inaccessible before User B can use Onlo.
 
 ## API summary
 
-| Task | API |
+| Task | React Native API |
 | --- | --- |
 | Initialize | `Onlo.initialize({sdkKey})` |
 | Anonymous login | `Onlo.loginUnidentifiedUser()` |
 | Identified login | `Onlo.loginIdentifiedUser({userJwt})` |
-| Present/dismiss | `Onlo.present(options?)`, `Onlo.dismiss()` |
-| Open conversation | `Onlo.openConversation(conversationId)` |
+| Present Messenger | `Onlo.present(options?)` |
 | Logout | `Onlo.logout()` |
-| Push | `Onlo.setPushToken(options)`, `Onlo.handlePushNotification(payload)` |
-| Observe | `observeState`, `observeIdentityState`, `observeConnectionState`, `observeUnreadCount` |
-| Safe diagnostics | `Onlo.setLogLevel('off' | 'error' | 'info' | 'verbose')` |
+| Register push | `Onlo.setPushToken({provider, token})` |
+| Route a push tap | `Onlo.handlePushNotification(payload)` |
+| Observe state/unread | `Onlo.observeState(...)`, `Onlo.observeUnreadCount(...)` |
 
 ## Success criteria
 
-- iOS and Android builds contain exactly one matching native Onlo core.
-- Anonymous and identified login both reach a ready state.
-- The messenger opens only from a host-owned action and is rendered natively.
-- JavaScript never signs, stores, logs, or decodes the user JWT.
-- Logout finishes, or Support remains disabled while native logout recovery is pending, before an account switch.
+- The anonymous test message updates the React Native integration status in Onlo Dashboard.
+- A server-signed JWT resolves the same contact after logout and login with the same stable `sub`.
+- Each enabled provider shows ready, its test installation appears, and a selected-device test reaches that runtime.
+- The native Messenger opens from a host-owned action and reflects shared WebChat settings on iOS and Android.
+- JavaScript never signs, decodes, stores, or logs identity proofs, native state, push tokens, customer data, or message content.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Native module is unavailable | The app is running in Expo Go or was not rebuilt after installation | Use a development/release build, run `pod install` for iOS, and rebuild both native apps |
-| iOS reports duplicate Onlo symbols | `OnloSDK` was added separately | Remove the manual SwiftPM/CocoaPods core; the npm package already resolves it |
-| Android reports duplicate classes | The Maven core was added separately | Remove the manual `ai.onlo:onlo-android-sdk` dependency |
-| Identified login fails | Backend JWT is invalid or expired | Fetch a fresh JWT and verify the contract claims; do not modify it in JavaScript |
-| Support button never enables | Initialization/login failed or state is still restoring | Observe `OnloSessionState` and inspect only typed safe errors |
-| Old badge remains after logout | Host retained derived UI state | Treat `null` from `observeUnreadCount` as an immediate badge clear |
+| Native module is unavailable | The app is running in Expo Go or was not rebuilt | Use a development/release build, run `pod install` for iOS, and rebuild both native hosts |
+| Duplicate iOS symbols or Android classes | A native Onlo core was added manually beside the wrapper | Remove the manual core; the npm package already resolves it |
+| Dashboard does not confirm the connection | The package, public key, rebuild, or anonymous login is incomplete | Verify the generated public key, reach a ready state, open Messenger, and send one test message |
+| Identified login fails | The backend JWT is expired, signed by the wrong secret, or has invalid claims | Mint a fresh HS256 JWT with the exact audience, stable `sub`, and maximum five-minute lifetime |
+| Push setup is ready but no installation appears | The app forwarded the wrong device push token or did so before login finished | Use the APNs token on iOS or the FCM token on Android, then call `setPushToken` after login completes |
+| Notification tap does not open Messenger | The payload was forwarded before native restoration or failed ownership validation | Wait for a ready state and handle `deferred`/`notOnlo` without forcing navigation |
+| Old Support state appears during account switching | The host did not await native logout | Disable Support and complete `Onlo.logout()` before enabling another customer |
 
 ## Run the example
 
-See the [React Native host example](../../examples/react-native/README.md) for local iOS and Android builds.
+Use the [React Native host example](../../examples/react-native/README.md) to test both native runtimes against this repository.
 
-## Repository development
-
-Local examples replace published dependencies with one sibling native core per platform. Android uses the sibling Gradle project; iOS uses `OnloReactNative` plus one root-level local `OnloSDK` pod. Never add both the local and published core.
-
-For protocol details and advanced behavior, see the [complete integration guide](../../docs/integration-guide.md) and [API contract](../../docs/api-contract.md).
-
-Next: run the [React Native example](../../examples/react-native/README.md) on each native platform you support.
+Next: use the [API contract](../../docs/api-contract.md) when implementing the backend JWT endpoint.

@@ -1,28 +1,52 @@
 # Onlo Android SDK
 
-Add Onlo’s native support messenger to an Android app. The normal integration is **install → initialize → login → present → logout**.
+Add Onlo’s ready-made support Messenger to an Android app. Get the basic flow working first: **install → initialize → open Messenger → send a test message**. Add signed-in identity and FCM afterward.
+
+> **Want working code first?** Start with the [runnable Android example](../../examples/android/README.md). It uses the SDK source in this repository and demonstrates initialization, anonymous and signed-in login, Messenger presentation, logout, and FCM forwarding.
+
+> **Package availability:** version `0.3.2` is prepared in this repository, but the public package is not published yet. Install only a version marked as available in **Onlo Dashboard → WebChat → Install → Mobile app**; otherwise, run the repository example.
 
 ## Prerequisites
 
 - [ ] Android API 24 or newer, compile SDK 35, Java 17, and a Kotlin 2.0-compatible host.
-- [ ] A public Mobile SDK key from Onlo Dashboard.
+- [ ] An Onlo account with **Owner** or **Admin** access to **WebChat → Install → Mobile app**.
 - [ ] A host-owned Support button or route.
-- [ ] For signed-in support, an authenticated backend endpoint that returns a fresh Onlo user JWT.
+- [ ] For identified customers, a backend endpoint authenticated by your app.
+- [ ] For push, a Firebase project containing an Android app with the same application ID as your build.
 
 ## Concepts
 
-| Term | Meaning |
-| --- | --- |
-| SDK key | Public key that selects your Onlo organisation/app integration. It is safe to include in the app, but it is not customer identity. |
-| User JWT | Short-lived identity proof created by your backend after the customer signs in to your app. The Android app passes it directly to Onlo. |
-| `OnloClient` | Application-scoped native client that owns the protected session, offline outbox, transcript, unread state, and push registration. |
-| `OnloMessenger` | Native messenger UI that your Activity presents from a host-controlled action. |
+| Item | Purpose | Where it belongs |
+| --- | --- | --- |
+| Public SDK key | Connects the app to one Onlo Mobile SDK integration | App configuration; it is not a secret or customer identity |
+| Identity secret | Signs short-lived customer JWTs | Backend secret manager only; never the APK, source, or `BuildConfig` |
+| User JWT | Proves the identity of the customer already signed in to your app | Created by your backend, held briefly in memory, then passed to Onlo |
+| FCM service-account JSON | Lets Onlo send Android notifications | Onlo Dashboard only; never the app or repository |
+| FCM registration token | Identifies one app installation for push | Forward directly from Firebase to Onlo; never log it |
 
-Do not put the user-JWT signing secret in the Android app, `BuildConfig`, resources, or source control.
+## 1. Quickstart: connect and test Onlo
 
-## Step 1: Install the SDK
+### Create the Android integration
 
-Add Maven Central and the SDK to the app module:
+1. In Onlo Dashboard, open **WebChat**.
+
+   Expected result: the WebChat channel settings are visible.
+
+2. Select **Install → Mobile app**.
+
+   Expected result: the Mobile SDK setup page opens.
+
+3. Choose **Android**.
+
+   Expected result: Onlo shows the Android package and initialization snippets.
+
+4. Select **Generate key**, then copy the public SDK key.
+
+   Expected result: the integration has a public key that is safe to include in app configuration.
+
+### Install the SDK
+
+Add Maven Central and the Onlo dependency to the app module:
 
 ```kotlin
 // app/build.gradle.kts
@@ -32,7 +56,7 @@ repositories {
 }
 
 dependencies {
-    implementation("ai.onlo:onlo-android-sdk:0.3.0")
+    implementation("ai.onlo:onlo-android-sdk:0.3.2")
 }
 ```
 
@@ -46,41 +70,9 @@ Sync Gradle.
 
 Expected result: `import ai.onlo.sdk.Onlo` and `import ai.onlo.sdk.messenger.OnloMessenger` resolve.
 
-## Step 2: Add the public SDK key
+### Initialize and connect anonymously
 
-Expose a different public key for each build environment:
-
-```kotlin
-// app/build.gradle.kts
-android {
-    buildFeatures {
-        buildConfig = true
-    }
-
-    buildTypes {
-        debug {
-            buildConfigField(
-                "String",
-                "ONLO_SDK_KEY",
-                "\"<YOUR_TEST_PUBLIC_SDK_KEY>\"",
-            )
-        }
-        release {
-            buildConfigField(
-                "String",
-                "ONLO_SDK_KEY",
-                "\"<YOUR_PRODUCTION_PUBLIC_SDK_KEY>\"",
-            )
-        }
-    }
-}
-```
-
-Expected result: `BuildConfig.ONLO_SDK_KEY` contains only a public integration key. Never place a signing secret, user JWT, or customer attribute in `BuildConfig`.
-
-## Step 3: Initialize once
-
-Initialize from your `Application` so lifecycle recovery is installed before a notification or Activity uses Onlo:
+Expose only the public key through your normal build configuration, then initialize once from `Application.onCreate()`:
 
 ```kotlin
 import ai.onlo.sdk.Onlo
@@ -89,12 +81,14 @@ import android.app.Application
 class MerchantApplication : Application() {
     override fun onCreate() {
         super.onCreate()
-        Onlo.initialize(this, BuildConfig.ONLO_SDK_KEY)
+
+        // Paste the public key generated by the Mobile app setup page.
+        Onlo.initialize(this, "<YOUR_PUBLIC_MOBILE_SDK_KEY>")
     }
 }
 ```
 
-Register the `Application` if your app does not already have one:
+Register the application class:
 
 ```xml
 <application
@@ -102,13 +96,7 @@ Register the `Application` if your app does not already have one:
     ... />
 ```
 
-Expected result: Onlo begins restoring protected state in the background. Initialization does not show UI or ask for permissions.
-
-## Step 4: Choose a login path
-
-Run login from a coroutine after your app knows whether the customer is signed in.
-
-### Anonymous customer
+When the app is ready to offer anonymous support, select the anonymous login path:
 
 ```kotlin
 lifecycleScope.launch {
@@ -116,28 +104,219 @@ lifecycleScope.launch {
 }
 ```
 
-Expected result: Support uses an installation-scoped anonymous session. No email, phone number, or customer ID is required.
+| Added line | What it does |
+| --- | --- |
+| `Onlo.initialize(...)` | Selects the Onlo integration and starts protected native session restoration; it does not show UI or ask for permissions |
+| `Onlo.instance()` | Returns the single application-scoped SDK client created during initialization |
+| `loginUnidentifiedUser()` | Creates or resumes an installation-scoped anonymous session without email, phone, or customer ID |
+| `lifecycleScope.launch` | Runs the suspend login call without blocking the Android main thread |
 
-### Signed-in customer
+### Open Messenger
+
+Call `present` from your app’s Support button in the active Activity:
+
+```kotlin
+supportButton.setOnClickListener {
+    OnloMessenger.present(this@MainActivity, Onlo.instance())
+}
+```
+
+Expected result: tapping Support opens Onlo’s native Messenger. Onlo does not add a launcher automatically.
+
+### Verify the connection
+
+1. Tap your app’s Support button.
+
+   Expected result: the native Onlo Messenger opens.
+
+2. Send an anonymous test message to your workspace.
+
+   Expected result: the message reaches the same WebChat AI and support pipeline as the website widget.
+
+3. Return to **WebChat → Install → Mobile app → Android** in Onlo Dashboard.
+
+   Expected result: Onlo automatically updates the integration status after receiving the SDK connection. Use the displayed status or SDK error code to confirm whether setup succeeded.
+
+## 2. Verify signed-in customer identity
+
+Identified login starts with your app’s existing authentication. Customers do not enter an Onlo OTP or sign in a second time.
+
+### Generate and store the identity secret
+
+1. On the Android Mobile SDK setup page, open **Identity verification** and select **Generate secret**.
+
+   Expected result: Onlo creates the secret used to sign mobile identity proofs.
+
+2. Copy the secret directly into your backend secret manager.
+
+   Expected result: the secret is available only to trusted server code. Never return it to the app or place it in source control, resources, `BuildConfig`, CI logs, or analytics.
+
+3. Add an authenticated backend endpoint that derives the current customer from your app session and signs a short-lived JWT with `HS256`.
+
+   Expected result: the app receives a fresh `userJwt`, not the identity secret.
+
+Replace these placeholders before your backend signs the JWT:
+
+```jsonc
+{
+  "aud": "onlo-messenger",
+  "sub": "<stable-customer-id>",
+  "iat": "<current-unix-seconds>",
+  "exp": "<iat-plus-no-more-than-300-seconds>",
+  "name": "<optional-customer-name>",
+  "customAttributes": {
+    "plan": "<optional-plan>"
+  }
+}
+```
+
+Use an immutable, opaque customer ID for `sub`. `iat` and `exp` are numeric Unix seconds, and the lifetime must not exceed five minutes; see the [complete JWT claim contract](../../docs/api-contract.md#operator-user-jwt).
+
+### Log in the identified customer
 
 ```kotlin
 lifecycleScope.launch {
-    // This endpoint authenticates the existing app session. Your backend
-    // derives the stable customer ID and signs a short-lived Onlo JWT.
+    // Your backend authenticates the current app session and signs the JWT.
     val userJwt = merchantBackend.fetchOnloUserJwt()
 
-    // Pass it directly to Onlo. Do not decode, save, or log it.
+    // Pass it directly to Onlo. Do not decode, persist, or log it.
     Onlo.instance().loginIdentifiedUser(userJwt)
 }
 ```
 
-Expected result: the current installation is attached to the verified customer. There is no Onlo OTP or second login.
+Expected result: Onlo verifies the backend signature and associates the installation with the identified contact for `sub`.
 
-Your backend must derive the JWT `sub` from its authenticated session. Use an immutable, opaque customer ID—not an email address or phone number. See the [exact JWT claim rules](../../docs/api-contract.md#operator-user-jwt).
+### Test identity continuity
 
-## Step 5: Enable and present Support
+1. Sign in to your app with a test account, fetch a fresh JWT, and call `loginIdentifiedUser`.
+2. Open Messenger and send a test message.
+3. Disable Support and await `Onlo.instance().logout()` before completing app logout.
+4. Sign in again with the same app credentials, mint a new JWT with the same stable `sub`, and call `loginIdentifiedUser` again.
+5. Check Onlo Dashboard.
 
-Observe state and enable the host button only when the session is ready:
+Expected result: Onlo resolves the same identified contact after the second login. A different app customer must use a different stable `sub`.
+
+## 3. Enable FCM push notifications
+
+Android uses Firebase Cloud Messaging. The Firebase SDK obtains the device token, but your app must explicitly forward that token to Onlo.
+
+### Configure Firebase and Onlo Dashboard
+
+1. Add an Android app to the matching Firebase project using the same application ID as the installed build, for example `ai.onlo.example`.
+
+   Expected result: Firebase has the exact Android target that will receive notifications. Follow Firebase’s [Android project setup](https://firebase.google.com/docs/android/setup).
+
+2. Download `google-services.json` and place it in the app-module directory, normally `app/google-services.json`.
+
+   Expected result: the Google Services Gradle plugin can configure the matching Firebase app. Keep environment-specific copies out of public source control.
+
+3. Apply the Google Services plugin and add Firebase Messaging by following Firebase’s current setup instructions.
+
+   ```kotlin
+   // app/build.gradle.kts
+   plugins {
+       id("com.google.gms.google-services")
+   }
+
+   dependencies {
+       implementation("com.google.firebase:firebase-messaging:24.1.2")
+   }
+   ```
+
+   Expected result: `FirebaseMessagingService` and `FirebaseMessaging` resolve. This is the version exercised by the repository’s Android host example.
+
+4. In Onlo Dashboard, expand **Mobile Features & App Controls**, enable **Push notifications**, then enable **FCM**.
+
+   Expected result: the Android app identity and FCM credential fields become available.
+
+5. Enter the Android application ID exactly as it appears in the installed build.
+
+   Expected result: the Onlo target matches the Firebase Android app.
+
+6. In Firebase Console, open **Project settings → Service accounts → Generate new private key** and securely download the JSON credential. See Firebase’s [service-account instructions](https://firebase.google.com/docs/admin/setup#initialize_the_sdk_in_non-google_environments).
+
+   Expected result: you have the server credential for the same Firebase project.
+
+7. Paste the complete service-account JSON into the Onlo FCM credential field and select **Save FCM**.
+
+   Expected result: the dashboard status becomes **FCM ready**. The private JSON remains in Onlo Dashboard and is never bundled into the APK.
+
+### Forward the FCM token
+
+Forward every rotated token from your Firebase service:
+
+```kotlin
+import ai.onlo.sdk.Onlo
+import ai.onlo.sdk.protocol.PushProvider
+import com.google.firebase.messaging.FirebaseMessagingService
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+
+class OnloFirebaseMessagingService : FirebaseMessagingService() {
+    private val serviceScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    override fun onNewToken(token: String) {
+        serviceScope.launch {
+            Onlo.instance().registerPushToken(PushProvider.FCM, token)
+        }
+    }
+}
+```
+
+Register the service in `AndroidManifest.xml`:
+
+```xml
+<service
+    android:name=".OnloFirebaseMessagingService"
+    android:exported="false">
+    <intent-filter>
+        <action android:name="com.google.firebase.MESSAGING_EVENT" />
+    </intent-filter>
+</service>
+```
+
+After anonymous or identified readiness, also forward the current token. This covers a token created before the Onlo session was ready:
+
+```kotlin
+FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
+    lifecycleScope.launch {
+        Onlo.instance().registerPushToken(PushProvider.FCM, token)
+    }
+}
+```
+
+On Android 13 and newer, declare `POST_NOTIFICATIONS` and request it only after a clear customer action such as **Enable support notifications**. Onlo initialization must not trigger a permission prompt.
+
+Expected result: the current anonymous or identified installation is registered with Onlo, and later FCM token rotations replace it safely.
+
+### Build and test an installation
+
+1. Build and install the APK on a physical device or Google Play-enabled emulator, then enable support notifications in the app.
+
+   Expected result: the app obtains an FCM token and forwards it after Onlo reaches a ready state.
+
+2. In the Mobile SDK dashboard, open **Installations**.
+
+   Expected result: the test device appears and the installation count increases; a clean test integration normally shows `1`.
+
+3. Select the device, choose **Send to selected installation**, and keep the default five-second safety delay or select another available delay.
+
+   Expected result: Onlo schedules the test only for the selected installation.
+
+4. Keep the app in the required foreground/background state for your test and wait for the selected delay.
+
+   Expected result: the notification arrives on the device. Test tap routing with the [Android example](../../examples/android/README.md#enable-fcm) before release.
+
+Push-token or provider errors are push-only failures. They must not interrupt Messenger, transcript synchronization, login, or logout.
+
+## 4. Control Messenger presentation
+
+The quickstart opens Messenger directly. In production, observe readiness before enabling the Support button. Onlo provides the complete native Messenger UI and reuses the supported WebChat greeting, colors, bot identity, FAQs, Help Center content, voice controls, and image-upload settings.
+
+Observe readiness and enable your host-owned Support button:
 
 ```kotlin
 import ai.onlo.sdk.OnloPhase
@@ -150,7 +329,7 @@ lifecycleScope.launch {
 }
 ```
 
-Present from the current Activity:
+Open Messenger from the active Activity:
 
 ```kotlin
 supportButton.setOnClickListener {
@@ -158,146 +337,62 @@ supportButton.setOnClickListener {
 }
 ```
 
-Expected result: tapping Support opens the contained native messenger inside the current Activity. Onlo never adds a floating button, overlay, or Activity to the host app.
+| Added line | What it does |
+| --- | --- |
+| `state.collect` | Observes token-free native lifecycle state |
+| `ANONYMOUS_READY` / `IDENTIFIED_READY` | Ensures Messenger opens only after the selected session is ready |
+| `OnloMessenger.present(...)` | Opens Onlo’s native contained Messenger from the current Activity |
 
-To intentionally use the full Activity content area:
+Expected result: customers get the same configured support experience without a custom Android chat screen. Onlo does not insert a launcher; your app controls where and when Support opens.
 
-```kotlin
-OnloMessenger.present(
-    activity = this,
-    options = OnloMessengerOptions(
-        presentationMode = OnloMessengerPresentationMode.FULL_SCREEN,
-    ),
-)
-```
+## Logout and account switching
 
-## Step 6: Handle logout and account switching
-
-Disable Support first, then await Onlo before activating a different customer:
+Disable Support before app logout, then wait for Onlo logout to finish:
 
 ```kotlin
 lifecycleScope.launch {
     supportButton.isEnabled = false
-
-    when (Onlo.instance().logout()) {
-        LogoutOutcome.Completed,
-        LogoutOutcome.AlreadyAnonymous -> merchantAuth.finishLogout()
-        is LogoutOutcome.Pending -> {
-            // Keep Support disabled. Native recovery will retry safely.
-            merchantAuth.finishLogout()
-        }
-    }
+    Onlo.instance().logout()
+    merchantAuth.finishLogout()
 }
 ```
 
-Expected result: the previous customer’s transcript, outbox, unread state, and push association are blocked before another customer can use Onlo. If logout is pending, keep Support disabled for the next account.
+If logout remains pending, keep Support disabled until native recovery completes. User A’s messages, queued sends, unread state, and push association must remain inaccessible before User B can use Onlo.
 
-## Step 7: Add optional features
+## API summary
 
-Complete the basic send/receive flow before enabling optional features.
-
-### Unread badge
-
-```kotlin
-lifecycleScope.launch {
-    Onlo.instance().unreadCount.collect { count ->
-        // null means anonymous, logout, or account switch.
-        updateSupportBadge(count ?: 0)
-    }
-}
-```
-
-Expected result: identified customers see the exact server unread total; anonymous and logged-out states clear the badge.
-
-### FCM push
-
-1. Add Firebase Messaging to the host app. Request Android 13+ notification
-   permission only after the customer selects an action such as **Enable
-   support notifications**; initialization must not prompt.
-
-   Expected result: the host receives an FCM registration token. Onlo does not force Firebase on chat-only apps.
-
-2. Upload the matching FCM HTTP v1 service-account credential in Onlo Dashboard. Keep it server-side.
-
-   Expected result: Onlo can send notifications for this app without embedding provider credentials in the APK.
-
-3. Forward every rotated token from `FirebaseMessagingService.onNewToken`:
-
-   ```kotlin
-   Onlo.instance().registerPushToken(PushProvider.FCM, fcmToken)
-   ```
-
-   Expected result: the native client registers for the installation's current anonymous or identified session, or safely retries after session readiness.
-
-4. After anonymous or identified login/restoration, also fetch and forward the current
-   token. This covers a token callback that happened before the process or
-   customer session was ready:
-
-   ```kotlin
-   FirebaseMessaging.getInstance().token.addOnSuccessListener { currentToken ->
-       lifecycleScope.launch {
-           Onlo.instance().registerPushToken(PushProvider.FCM, currentToken)
-       }
-   }
-   ```
-
-5. When a customer taps a contract-shaped Onlo notification, forward only `conversationId`, `messageId`, and `notificationType` to `handlePushPayload`.
-
-   Expected result: Onlo re-authorises and refreshes the conversation before
-   your Activity opens it. If the result is `NoActiveSession` or
-   `RefetchFailed`, keep one bounded native tap in the Activity and retry after
-   `ANONYMOUS_READY` or `IDENTIFIED_READY`; never open the unverified route directly. See the
-   [Android example service and tap routing](../../examples/android/README.md#enable-fcm).
-
-Invalid tokens, registration failures, and FCM errors return a push-only outcome. They do not change the active session, interrupt Messenger, or block chat/logout; obtain the current token and register the installation again.
-
-### Images and voice
-
-The Onlo Dashboard controls whether images and voice are available. The SDK uses the system photo picker, requests camera or microphone permission only after the customer selects that action, and keeps sending/retry behavior native.
-
-Expected result: disabling a feature in Dashboard removes its control after configuration refresh; the host does not need a second composer implementation.
-
-## Safe diagnostics
-
-```kotlin
-Onlo.setLogLevel(
-    if (BuildConfig.DEBUG) OnloLogLevel.VERBOSE else OnloLogLevel.OFF,
-)
-```
-
-Logs contain only safe codes, request IDs, SDK/runtime versions, and durations. Never log SDK keys, JWTs, customer fields, message text, push tokens, or attachment URLs.
+| Task | Android API |
+| --- | --- |
+| Initialize | `Onlo.initialize(context, sdkKey)` |
+| Anonymous login | `Onlo.instance().loginUnidentifiedUser()` |
+| Identified login | `Onlo.instance().loginIdentifiedUser(userJwt)` |
+| Present Messenger | `OnloMessenger.present(activity, Onlo.instance())` |
+| Logout | `Onlo.instance().logout()` |
+| Register FCM | `Onlo.instance().registerPushToken(PushProvider.FCM, token)` |
+| Observe state/unread | `Onlo.instance().state`, `Onlo.instance().unreadCount` |
 
 ## Success criteria
 
-- The app builds with one `ai.onlo:onlo-android-sdk` dependency.
-- Anonymous and identified sessions both reach a ready state.
-- Support opens only from a host-owned button or route.
-- A signed-in customer’s JWT is created only by the authenticated backend and is never stored by the app.
-- Logout completes or remains safely pending with Support disabled before an account switch.
+- The anonymous test message updates the Android integration status in Onlo Dashboard.
+- A server-signed JWT resolves the same contact after logout and login with the same stable `sub`.
+- FCM shows **FCM ready**, the test installation appears, and a selected-device test reaches the device.
+- The native Messenger opens from a host-owned action and reflects shared WebChat settings.
+- No identity secret, JWT, provider credential, push token, customer data, or message content is stored or logged by the host app.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| `Onlo.instance()` throws `onlo_not_initialized` | `Onlo.initialize` did not run first | Initialize from `Application.onCreate()` and register that Application in the manifest |
-| Support remains disabled | Protected state is restoring or login failed | Observe `state`; verify the public key and inspect only safe SDK error codes |
-| Identified login fails | JWT is invalid or expired | Request a fresh backend JWT and verify the contract claims; never modify it in the app |
-| Messenger opens from the wrong place | Presentation was not triggered by the active Activity | Call `OnloMessenger.present(this, Onlo.instance())` from the current Activity’s Support action |
-| Next customer cannot open Support | Previous logout is pending | Keep Support disabled and allow native foreground/network recovery to finish the boundary |
-| Push arrives but does not navigate | Payload, active identity, or conversation ownership failed validation | Forward only the three v1 routing fields after a user tap and handle non-navigation outcomes safely |
+| `Onlo.instance()` throws `onlo_not_initialized` | The custom `Application` did not run | Register it in the manifest and initialize from `onCreate()` |
+| Dashboard does not confirm the connection | The package, public key, network, or anonymous login is incomplete | Verify the generated public key, reach a ready state, open Messenger, and send one test message |
+| Identified login fails | The backend JWT is expired, signed by the wrong secret, or has invalid claims | Mint a fresh HS256 JWT with the exact audience, stable `sub`, and maximum five-minute lifetime |
+| FCM does not become ready | The service-account JSON or application ID belongs to a different Firebase app | Match the Onlo Android target, Firebase project, and installed application ID |
+| Installation count stays at zero | The host has not forwarded a current token after Onlo readiness | Request permission, fetch the current FCM token, and call `registerPushToken` |
+| Test push does not arrive | Device support, permission, provider setup, or notification handling is incomplete | Use a physical/Google Play-enabled device, verify `google-services.json`, and follow the example service/tap routing |
+| Next customer cannot open Support | Previous logout is pending | Keep Support disabled until Onlo logout finishes |
 
 ## Run the example
 
-Use the [Android host example](../../examples/android/README.md) to test the same sequence against this repository’s local SDK project.
+Use the [Android host example](../../examples/android/README.md) to test anonymous login, identified login, FCM registration, notification taps, Messenger, and logout against this repository.
 
-## Repository verification
-
-From the repository root:
-
-```bash
-packages/android/gradlew -p packages/android testDebugUnitTest assembleRelease
-```
-
-For deeper integration, push, media, environment, and release checks, use the [complete integration guide](../../docs/integration-guide.md) and [development and go-live guide](../../docs/development-and-go-live-guide.md).
-
-Next: run the [Android example](../../examples/android/README.md) with your test integration.
+Next: use the [API contract](../../docs/api-contract.md) when implementing the backend JWT endpoint.

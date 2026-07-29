@@ -52,6 +52,20 @@ stateDiagram-v2
 
 The local database is partitioned by anonymous installation generation or verified contact scope. On logout, identified messages, read state, pending user-bound work, and credentials become inaccessible before another app account may use the messenger.
 
+## Push ownership
+
+Push follows the native runtime, not the framework used to build the host app.
+
+| Runtime | Provider | SDK responsibility | Host-app responsibility |
+| --- | --- | --- | --- |
+| iOS, including React Native and Flutter on iOS | APNs | Protect and reconcile the APNs token intent, register or unregister it under the current owner, validate the Onlo hint, re-authorize, and refetch before navigation. | Configure APNs, request notification permission, obtain the hexadecimal APNs device token, and forward every token rotation. |
+| Android, including React Native and Flutter on Android | FCM | Protect and reconcile the FCM token intent, register or unregister it under the current owner, validate the Onlo hint, re-authorize, and refetch before navigation. | Configure Firebase/FCM, request notification permission where required, obtain the FCM registration token, and forward every token rotation. |
+
+React Native and Flutter do not implement a second push lifecycle. Their iOS
+bridges delegate to the iOS core and accept APNs; their Android bridges delegate
+to the Android core and accept FCM. A provider error is isolated to push and
+must not change session, identity, transcript, Messenger, or logout authority.
+
 ## Configuration behavior
 
 `GET /api/sdk/v1/config` is bearer-authenticated and uses schema `1`, optional `If-None-Match`, and `ETag`/`304` conditional refresh. The v1 `MobileConfig` projection defines compatible appearance, features, content, security policy, and unsupported settings; unknown additive fields are ignored. Keep the last-known-good config offline, refresh on `config_changed`, foreground, and network recovery, and follow the envelope retry directive. The Operator’s host app controls messenger placement.
