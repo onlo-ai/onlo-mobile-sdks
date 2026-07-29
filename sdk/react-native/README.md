@@ -1,11 +1,19 @@
-# `@onlo/react-native`
+# Legacy React Native prototype — do not integrate
 
-This directory contains the React Native prototype moved from the Onlo server repository. It is source material for the native-bridge implementation; it is **not yet a publishable SDK**.
+This directory is an archived migration reference from the former pure-TypeScript implementation. It is not the Onlo React Native SDK and must not be linked, copied, or used as a runtime fallback.
 
-Do not use its old pure-TypeScript API or its AsyncStorage fallback as a production integration. The approved public API, identity model, supported media, native security requirements, and configuration behavior are defined in this repository:
+To integrate React Native:
 
-- [Mobile integration guide](../../docs/integration-guide.md)
-- [v1 API contract](../../docs/api-contract.md)
-- [Client delivery plan](../../docs/delivery-plan.md)
+1. Open the supported [`@onlo-ai/react-native` guide](../../packages/react-native/README.md).
 
-The release package name is `@onlo/react-native`. The finished package will be a thin facade over native iOS and Android SDK cores, rather than a separate JavaScript session/outbox implementation.
+   Expected result: you install the public package that delegates session, secure storage, offline work, push, and UI to native iOS/Android cores.
+
+2. Follow its **install → initialize → login → present → logout** sequence.
+
+   Expected result: JavaScript remains a typed facade and contains no credential, transcript, or outbox source of truth.
+
+3. Use the [React Native example](../../examples/react-native/README.md) for a local host build.
+
+   Expected result: the app links exactly one supported native core on each platform.
+
+The canonical behavior is defined by the [mobile integration guide](../../docs/integration-guide.md) and [v1 API contract](../../docs/api-contract.md).

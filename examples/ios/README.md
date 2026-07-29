@@ -2,6 +2,14 @@
 
 Embed `SupportView` in the merchant’s existing iOS app. The app supplies a public SDK key and obtains a short-lived proof from its own authenticated backend; every other session, storage, retry, and messenger concern belongs to `OnloSDK`.
 
+## Prerequisites
+
+- [ ] An iOS 15+ app target with `packages/ios` added as a local Swift Package during development.
+- [ ] A public SDK key issued for the merchant’s iOS integration.
+- [ ] An existing merchant-backend endpoint that returns a fresh contract-valid user JWT for the app’s currently authenticated customer.
+- [ ] For push, an Apple Developer App ID with Push Notifications enabled and
+      a signed physical device.
+
 ## Concepts
 
 | Item | Merchant iOS app responsibility | Never put here |
@@ -11,13 +19,7 @@ Embed `SupportView` in the merchant’s existing iOS app. The app supplies a pub
 | `Support` action | Choose where to present the messenger. | A global launcher or an Onlo-controlled app route. |
 | Logout | Await SDK logout before allowing a different merchant account to use support. | Direct manipulation of Onlo credential/storage state. |
 
-## Prerequisites
-
-- [ ] An iOS 15+ app target with `packages/ios` added as a local Swift Package during development.
-- [ ] A public SDK key issued for the merchant’s iOS integration.
-- [ ] An existing merchant-backend endpoint that returns a fresh contract-valid user JWT for the app’s currently authenticated customer.
-
-## Integrate
+## Run the example step by step
 
 1. In Xcode, select the blue app project icon, select the app target, open **Package Dependencies**, click **+**, choose **Add Local…**, select `../../packages/ios`, and add the `OnloSDK` product.
 
@@ -40,15 +42,30 @@ Embed `SupportView` in the merchant’s existing iOS app. The app supplies a pub
 
    Expected result: after the merchant’s own login succeeds, the app passes a fresh JWT directly to `identify(userJwt:)`. The app neither signs nor persists it.
 
-4. On merchant-app logout or account switch, await `OnloSDK.logout()` through the provided view before starting support for another customer.
+4. Run the app, select **Connect signed-in customer**, and then select **Support**.
+
+   Expected result: the callback fetches a fresh user JWT and the example presents the native messenger from the host-controlled view.
+
+5. On merchant-app logout or account switch, await `OnloSDK.logout()` through the provided view before starting support for another customer.
 
    Expected result: old Onlo state is inaccessible before another customer can use the messenger.
+
+6. Copy [`OnloExampleApp.swift`](OnloExample/OnloExampleApp.swift) push
+   callbacks into the app delegate, then select **Enable support notifications**
+   after anonymous or signed-in Support is ready.
+
+   Expected result: the app asks at that moment, forwards the current and
+   rotated APNs token, and retains one cold-start notification tap until native
+   customer authorization can complete. The `.p8` provider key remains only in
+   Onlo Dashboard.
 
 ## Success criteria
 
 - The app initializes with only the public SDK key.
 - The merchant backend, not the app, mints the user JWT after customer authentication.
 - The SDK handles protected state and messenger UI; the host controls presentation.
+- Notification permission is requested only from the host action, and a tapped
+  route opens only after native customer authorization.
 - A second customer cannot use support until the prior SDK logout completes or remains safely pending.
 
 ## Troubleshooting

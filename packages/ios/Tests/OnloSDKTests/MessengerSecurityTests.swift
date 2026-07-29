@@ -135,7 +135,7 @@ final class MessengerSecurityTests: XCTestCase {
         XCTAssertEqual(requestCount, 1)
     }
 
-    func testAnonymousHistoricalPushIsDeferredAndNeverPersistsTranscript() async throws {
+    func testAnonymousPushAuthorisesAndPersistsItsConversationTranscript() async throws {
         let store = InMemoryOwnerScopedStore()
         let credentialStore = InMemoryCredentialStore()
         let sdk = OnloSDK(
@@ -155,11 +155,11 @@ final class MessengerSecurityTests: XCTestCase {
             messageId: "message-history",
             notificationType: .messageAvailable
         ))
-        XCTAssertEqual(result, .deferred)
+        XCTAssertEqual(result, .handled(.messenger(conversationId: "conversation-history")))
         let protectedState = try await credentialStore.loadState()
         let scope = try XCTUnwrap(protectedState.credential?.ownerScope)
         let persistedTranscript = try await store.transcript(conversationId: "conversation-history", for: scope)
-        XCTAssertNil(persistedTranscript)
+        XCTAssertEqual(persistedTranscript?.conversation.id, "conversation-history")
     }
 
     func testOfflineComposerDurablyQueuesTextForRestoredOwner() async throws {
@@ -217,7 +217,7 @@ final class MessengerSecurityTests: XCTestCase {
         await sdk.unregisterMessengerPresentationInvalidator(registration)
     }
 
-    func testAPNsTokenReceivedAnonymouslyRegistersAfterIdentify() async throws {
+    func testAPNsTokenRegistersForAnonymousAndReregistersAfterIdentify() async throws {
         let transport = IdentityBoundaryTransport()
         let sdk = OnloSDK(
             credentialStore: InMemoryCredentialStore(),
@@ -232,13 +232,17 @@ final class MessengerSecurityTests: XCTestCase {
             apiBaseURL: URL(string: "https://sdk.example.test")!
         ))
         let queued = try await sdk.setAPNsPushToken(Data(repeating: 0xAB, count: 32))
-        XCTAssertEqual(queued, .pendingRetry)
+        XCTAssertEqual(queued, .registered)
         let anonymousPushRequests = await transport.pushRequestCount()
-        XCTAssertEqual(anonymousPushRequests, 0)
+        XCTAssertEqual(anonymousPushRequests, 1)
 
         _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
+        let identifiedRegistrationCompleted = await waitUntil {
+            await transport.pushRequestCount() == 2
+        }
+        XCTAssertTrue(identifiedRegistrationCompleted)
         let identifiedPushRequests = await transport.pushRequestCount()
-        XCTAssertEqual(identifiedPushRequests, 1)
+        XCTAssertEqual(identifiedPushRequests, 2)
     }
 
     func testUnreadIsHiddenForAnonymousAndPublishedFromIdentifiedTotal() async throws {
@@ -412,7 +416,7 @@ final class MessengerSecurityTests: XCTestCase {
         XCTAssertEqual(finalRequestCount, 2)
     }
 
-    func testNormalOwnerFreshBearerIntentUsesOneResumeThenOnePush() async throws {
+    func testNormalSessionRecoveryConsumesPushFreshBearerGateWithoutExtraResume() async throws {
         let owner = OwnerScope(kind: .identified)
         let credentials = InMemoryCredentialStore(StoredSessionCredential(installationId: "installation-1", generation: 1, proposedCredential: "credential-1", identityClass: .identified, ownerScope: owner))
         let push = InMemoryPushIntentStore()
@@ -420,13 +424,38 @@ final class MessengerSecurityTests: XCTestCase {
         try await push.save(ProtectedPushIntent(ownerScope: owner, action: .register, token: String(repeating: "a", count: 64), requiresFreshBearer: true))
         let sdk = OnloSDK(credentialStore: credentials, pushIntentStore: push, ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host")
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        let pushRecovered = await waitUntil {
+            let paths = await transport.paths()
+            guard paths.filter({ $0 == "/api/sdk/v1/push-token" }).count == 1 else { return false }
+            do {
+                return try await push.load()?.requiresFreshBearer == false
+            } catch {
+                return false
+            }
+        }
+        XCTAssertTrue(pushRecovered)
         let paths = await transport.paths()
-        XCTAssertEqual(paths.filter { $0 == "/api/sdk/v1/session" }.count, 2) // restore + exactly one fresh-bearer Resume
+        XCTAssertEqual(paths.filter { $0 == "/api/sdk/v1/session" }.count, 1)
         XCTAssertEqual(paths.filter { $0 == "/api/sdk/v1/push-token" }.count, 1)
         let storedPushIntent = try await push.load()
         let pushIntent = try XCTUnwrap(storedPushIntent)
         XCTAssertFalse(pushIntent.requiresFreshBearer)
     }
+}
+
+private func waitUntil(
+    timeoutNanoseconds: UInt64 = 2_000_000_000,
+    pollIntervalNanoseconds: UInt64 = 10_000_000,
+    condition: @escaping @Sendable () async -> Bool
+) async -> Bool {
+    var elapsed: UInt64 = 0
+    while !(await condition()) {
+        guard elapsed < timeoutNanoseconds else { return false }
+        let interval = min(pollIntervalNanoseconds, timeoutNanoseconds - elapsed)
+        try? await Task.sleep(nanoseconds: interval)
+        elapsed += interval
+    }
+    return true
 }
 
 private actor PersistentInboxTransport: OnloHTTPTransport {

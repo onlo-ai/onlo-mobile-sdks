@@ -138,7 +138,7 @@ requirements.
 
 ## Notifications and images
 
-The host app asks for notification permission only from a customer-triggered flow. The SDK registers the APNs or FCM token after permission is granted and removes its association on logout. Push is a wake-up hint: opening a notification always re-syncs the authorised conversation from Onlo.
+The host app asks for notification permission only from a customer-triggered flow. After either anonymous or identified state is ready, it forwards the provider's current token and every rotation. Push is a wake-up hint: opening a notification always re-syncs the conversation under the installation's current authorization. Registration or provider failure affects push only; it never blocks chat, Messenger, transcript synchronization, login, logout, or account switching. Provider credentials and test-device status live under **Channels → WebChat → Install → Mobile SDK**, not in the app.
 
 The first release supports image attachments only: JPEG, PNG, or WebP, with up to five images per message. A customer may select a source image up to 25 MiB; the SDK preserves aspect ratio, never crops, and normalizes it to no more than 8 MiB, a 4096-pixel edge, and 16 megapixels before upload. Camera and photo-library permissions are requested only after the customer selects the corresponding action. PDFs, text documents, audio, and arbitrary files are not advertised.
 
@@ -170,7 +170,7 @@ placement and already owns the authenticated customer profile.
 | Allowed web domains | Exact iOS bundle ID or Android application ID, plus target attestation policy |
 | Browser-local session state | Keychain/Keystore credentials and an encrypted native SQLite outbox |
 | Browser placement and automatic triggers | Host-owned Support button, tab, or route calls `present()` |
-| Foreground stream and optional browser sound | Foreground stream plus APNs/FCM for identified customers |
+| Foreground stream and optional browser sound | Foreground stream plus APNs/FCM for anonymous and identified customers |
 
 The WebChat HMAC secret and Mobile identity secret are intentionally different.
 The backend may reuse its authenticated customer lookup, but it must mint the
@@ -198,7 +198,7 @@ Mobile JWT with the Mobile secret and documented claims.
 
    Expected result: the native messenger uses the shared AI pipeline and prevents old-account state from crossing an account switch.
 
-6. Configure APNs/FCM and pass the device token only after host permission and identified login.
+6. Configure APNs/FCM and pass the device token only after host permission and either anonymous or identified readiness.
 
    Expected result: customer-visible replies can wake the native app without exposing message content in the payload.
 
@@ -225,7 +225,7 @@ Mobile JWT with the Mobile secret and documented claims.
 | Session cannot be established | The key is unknown/disabled, the app identifier does not match its target, the client is incompatible, or Mobile remains release-gated. | Record only the safe error code. Verify the platform-specific key and exact bundle/application ID in **WebChat → Install → Install for Mobile**. `sdk_not_available` requires an Onlo release-state change; `target_disabled` requires an active target. |
 | `sdk_not_available` during bootstrap | The server integration has not been released from internal availability. | Onlo must complete public release before external apps can connect. |
 | Identity login is rejected | The Operator backend JWT violates the Mobile identity contract or was minted with the wrong secret. | Mint a fresh HS256 JWT with `aud: onlo-messenger`, a stable non-empty `sub`, numeric `iat`/`exp`, and a lifetime no longer than five minutes. Use the dashboard Mobile identity verifier with synthetic data; never log or persist the JWT. |
-| Push does not arrive | The provider credential, target environment, customer identity, permission, or device-token registration is incomplete. | Test on a physical device. Match APNs sandbox/production or the FCM project to the registered target, log in an identified customer, obtain host-app permission, then call `setAPNsPushToken`, Android `registerPushToken`, or the wrapper `setPushToken`. Logout intentionally unregisters the association. |
+| Push does not arrive | The provider credential, target environment, conversation authorization, permission, or device-token registration is incomplete. | Test on a physical device. Match APNs sandbox/production or the FCM project to the registered target, establish either anonymous or identified readiness, obtain host-app permission, then call `setAPNsPushToken`, Android `registerPushToken`, or the wrapper `setPushToken`. Re-register that installation after a token or provider failure. |
 | First Support open is slow | Initialization, protected-state restoration, session exchange, configuration, and the first transcript fetch have not completed. | Initialize at app startup and complete the selected login flow after host authentication. Present Support only after the SDK is ready. There is no `preload()` API or guaranteed first-open latency; measure the safe operation timings before optimizing. |
 | Customer sees another account’s history | The host did not call `logout()` before an account switch. | Call and await `Onlo.logout()` as part of the app logout flow before logging in the next customer. |
 | Settings appear stale | A conditional refresh has not yet converged. | Keep the last-known-good config and refresh with the documented ETag flow; never add a host-side endpoint. |

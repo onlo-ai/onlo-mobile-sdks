@@ -11,9 +11,8 @@ struct SupportView: View {
     let sdkKey: String
     let fetchOnloUserJwt: OnloUserJwtProvider
 
-    @State private var sdk = OnloSDK()
-    @State private var presenter: OnloMessengerPresenter?
     @State private var status = "Preparing support"
+    @State private var supportReady = false
     @State private var isIdentified = false
 
     init(sdkKey: String, fetchOnloUserJwt: @escaping OnloUserJwtProvider) {
@@ -27,13 +26,18 @@ struct SupportView: View {
             Button("Connect signed-in customer") {
                 Task { await identifyCurrentMerchantCustomer() }
             }
-            .disabled(presenter == nil || isIdentified)
+            .disabled(!supportReady || isIdentified)
             Button("Support") { presentMessenger() }
-                .disabled(presenter == nil)
+                .disabled(!supportReady)
+            Button("Enable support notifications") {
+                (UIApplication.shared.delegate as? OnloExampleAppDelegate)?
+                    .requestSupportNotificationPermission()
+            }
+            .disabled(!isIdentified)
             Button("Log out of support") {
                 Task { await logoutFromSupport() }
             }
-            .disabled(presenter == nil || !isIdentified)
+            .disabled(!supportReady || !isIdentified)
         }
         .padding()
         .task { await initialize() }
@@ -42,8 +46,8 @@ struct SupportView: View {
     @MainActor
     private func initialize() async {
         do {
-            _ = try await sdk.initialize(apiKey: sdkKey)
-            presenter = OnloMessengerPresenter(sdk: sdk)
+            _ = try await Onlo.initialize(apiKey: sdkKey)
+            supportReady = true
             status = "Support ready"
         } catch {
             status = "Support is unavailable"
@@ -54,7 +58,7 @@ struct SupportView: View {
     private func identifyCurrentMerchantCustomer() async {
         do {
             let userJwt = try await fetchOnloUserJwt()
-            _ = try await sdk.identify(userJwt: userJwt)
+            _ = try await Onlo.loginIdentifiedUser(userJwt: userJwt)
             isIdentified = true
             status = "Signed-in support ready"
         } catch {
@@ -64,25 +68,20 @@ struct SupportView: View {
 
     @MainActor
     private func presentMessenger() {
-        guard let presenter, let host = UIApplication.shared.topOnloViewController else { return }
-        Task { try? await presenter.present(from: host) }
+        guard let host = UIApplication.shared.topOnloViewController else { return }
+        Task { try? await Onlo.present(from: host) }
     }
 
     @MainActor
     private func logoutFromSupport() async {
         do {
-            _ = try await sdk.logout()
+            (UIApplication.shared.delegate as? OnloExampleAppDelegate)?
+                .clearPendingSupportNotification()
+            _ = try await Onlo.logout()
             isIdentified = false
             status = "Support logged out"
         } catch {
             status = "Support logout is pending"
         }
-    }
-}
-
-private extension UIApplication {
-    var topOnloViewController: UIViewController? {
-        connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }
-            .first?.rootViewController
     }
 }

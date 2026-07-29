@@ -84,6 +84,15 @@ internal class PushRegistry(
         activeAuthority = authority
     }
 
+    /**
+     * Drops only the retiring owner's local push work after the server session
+     * transition becomes the authoritative registration boundary.
+     */
+    suspend fun discardOwner(ownerScopeId: String) = mutex.withLock {
+        if (activeAuthority?.ownerScopeId == ownerScopeId) activeAuthority = null
+        if (store.load()?.ownerScopeId == ownerScopeId) store.clear()
+    }
+
     suspend fun hasPendingUnregister(ownerScopeId: String): Boolean = mutex.withLock {
         store.load()?.let { it.ownerScopeId == ownerScopeId && it.pendingUnregister } == true
     }

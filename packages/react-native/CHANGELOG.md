@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- Clarified production push integration for current-token registration,
+  token rotation, customer-triggered permission, and deferred cold-start taps.
+- Enabled the native bridge's existing push calls for both anonymous and
+  identified sessions with push-only failure isolation.
+- Kept the React Native API and native bridge contract unchanged.
+
 ## 0.2.0
 
 - Added the optional `presentationMode` setting for contained and full-screen

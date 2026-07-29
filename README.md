@@ -1,134 +1,135 @@
 # Onlo Mobile SDKs
 
-This is the client-only workspace for Onlo’s native mobile messenger. It reuses the Onlo WebChat AI pipeline; it does not contain or change the Onlo server, database, AI pipeline, or Operator backend.
+Add Onlo’s native support messenger to an iOS, Android, React Native, or Flutter app. Every SDK follows the same flow: **install → initialize → choose a login mode → present → logout**.
 
-## Development status
+## Choose your SDK
 
-| Area | Role | Current state |
+| Your app | Start here | Package |
 | --- | --- | --- |
-| `packages/protocol` | Versioned client/server types and fixtures | v1 route types, redacted fixtures, and lifecycle scenarios are in place |
-| `packages/ios` | Native Swift SDK | Public SwiftPM/CocoaPods package; current source version is `0.2.0`. |
-| `packages/android` | Native Kotlin SDK | Public Maven Central package; current source version is `0.2.0`. |
-| `packages/react-native` | `@onlo-ai/react-native` package | Public npm package over the native cores; current source version is `0.2.0`. |
-| `packages/flutter` | `onlo_flutter` package | Public pub.dev package over the native cores; current source version is `0.2.0`. |
-| `sdk/react-native` | Legacy prototype migration reference | Excluded from root workspaces and never a supported runtime fallback. |
-| `conformance` | Cross-client lifecycle and protocol checks | Redacted v1 fixtures and lifecycle scenarios; platform runners pending |
-| `examples` | Host-app integration samples | Merchant-facing Android, iOS, React Native, and Flutter examples, plus a separate SDK-team-only synthetic merchant-backend simulator. |
+| iOS (SwiftUI or UIKit) | [iOS step-by-step guide](packages/ios/README.md) | `OnloSDK` `0.3.0` |
+| Android (Kotlin) | [Android step-by-step guide](packages/android/README.md) | `ai.onlo:onlo-android-sdk:0.3.0` |
+| React Native | [React Native step-by-step guide](packages/react-native/README.md) | `@onlo-ai/react-native@0.3.0` |
+| Flutter | [Flutter step-by-step guide](packages/flutter/README.md) | `onlo_flutter 0.3.0` |
 
-> The complete v1 contract is [canonical](docs/api-contract.md). Local
-> implementation uses redacted fixtures and synthetic test data.
-
-Public distribution does not replace the platform qualification and device
-evidence required for each release.
-
-## Publication identities
-
-| Surface | Versioned identity | Distribution |
-| --- | --- | --- |
-| iOS | `OnloSDK` `0.2.0` | SwiftPM repository tag and CocoaPods |
-| Android | `ai.onlo:onlo-android-sdk:0.2.0` | Maven Central |
-| React Native | `@onlo-ai/react-native@0.2.0` | npm |
-| Flutter | `onlo_flutter 0.2.0` | pub.dev |
-
-All four use the same coordinated release version. Historical `0.1.0`
-qualification evidence remains in the
-[release manifest](docs/release-conformance-0.1.0.md).
-
-[`VERSION`](VERSION) is the canonical release version. Gradle generates the
-Android runtime value from it; `npm run generate:version` generates the Swift
-runtime constant because SwiftPM does not expose the package tag to source.
-CocoaPods and registry manifests read or are checked against the same version;
-`npm run check:versions` rejects drift.
+React Native and Flutter display the same native messenger as the iOS and Android SDKs. Do not add a native SDK separately when using a framework package.
 
 ## Prerequisites
 
-- [ ] Work from the local `dev` integration branch; `main` is the protected release branch.
-- [ ] Use the approved v1 wire contract in [docs/api-contract.md](docs/api-contract.md) and [packages/protocol](packages/protocol/src/index.ts).
-- [ ] Keep the Onlo server repository and Operator backend out of scope for this workspace.
-- [ ] Obtain a short-lived user JWT from an Operator backend when testing identified flows; never add it, a signing secret, a chat token, or customer data to this repository.
+- [ ] Create or select a Mobile SDK integration in Onlo Dashboard.
+- [ ] Copy its public SDK key. This key may be included in the app; it is not a secret.
+- [ ] Decide whether customers will use support anonymously, as signed-in users, or both.
+- [ ] For signed-in users, add an authenticated endpoint to your backend that returns a fresh Onlo user JWT.
+- [ ] Choose a screen or button in your app that will open Support. Onlo does not add a launcher automatically.
 
 ## Concepts
 
-| Term | Meaning |
+| Value | Created by | Used by | Storage rule |
+| --- | --- | --- | --- |
+| Public SDK key | Onlo Dashboard | App calls `initialize` | Safe in app configuration; never use it as customer identity |
+| User JWT | Your authenticated backend | App calls `loginIdentifiedUser` | Pass directly to the SDK; never create, decode, log, or persist it in the app |
+| Signing secret | Onlo Dashboard / your backend configuration | Your backend signs the user JWT | Server-only; never ship it in an app, repository, or build setting |
+
+There is no Onlo OTP or second customer login. Your app authenticates the customer once; your backend then proves that identity to Onlo.
+
+## Integration steps
+
+1. Open the guide for your platform and install its package.
+
+   Expected result: the Onlo import resolves and the host app builds.
+
+2. Initialize Onlo once with the public SDK key.
+
+   ```text
+   initialize(public SDK key)
+   ```
+
+   Expected result: the SDK restores or creates protected native session state without presenting UI or requesting permissions.
+
+3. Choose one login path for the current customer.
+
+   | Customer state | App action |
+   | --- | --- |
+   | Not signed in | Call `loginUnidentifiedUser()` |
+   | Signed in | Fetch a fresh JWT from your backend, then call `loginIdentifiedUser(...)` |
+
+   Expected result: Support is ready for the correct anonymous installation or verified customer.
+
+4. Add a host-owned Support button and call `present()` from its tap handler.
+
+   Expected result: the native Onlo messenger opens only when your app requests it.
+
+5. When your customer signs out or switches accounts, disable Support and await `logout()` before enabling it for the next customer.
+
+   Expected result: the previous customer’s messages, queued sends, unread state, and push association are inaccessible before another customer can use Onlo.
+
+6. After the basic chat flow works, configure optional push, images, voice, unread badges, and deep-link routing from the platform guide.
+
+   Expected result: each optional feature is added independently without changing the login flow.
+
+## How identified login works
+
+```mermaid
+sequenceDiagram
+    participant C as Customer
+    participant A as Your app
+    participant B as Your backend
+    participant O as Onlo SDK
+    C->>A: Signs in to your app
+    A->>B: Requests Onlo identity with app auth
+    B->>B: Derives stable customer ID and signs short-lived JWT
+    B-->>A: Returns userJwt
+    A->>O: loginIdentifiedUser(userJwt)
+    O-->>A: Identified Support is ready
+```
+
+The JWT must use the customer’s stable, opaque ID as `sub`; do not use a mutable email address or phone number as the primary identity. The exact claim rules are in the [API contract](docs/api-contract.md#operator-user-jwt).
+
+## What the SDK handles
+
+| Your app controls | Onlo SDK controls |
 | --- | --- |
-| SDK key | A public Operator/app integration key. It is not customer identity or a signing secret. |
-| User JWT | A short-lived proof minted by the Operator backend after its own customer login. The SDK exchanges it but never signs or persists it. |
-| Native core | The iOS or Android implementation that owns secure storage, durable outbox, lifecycle, permissions, transport, and messenger UI. |
-| Framework bridge | The React Native or Flutter facade over the native core. It must not duplicate session, storage, outbox, transport, push, or UI logic. |
-| Conformance | Shared scenarios that prove every client has the same server-visible lifecycle and account-boundary behavior. |
-| Release origin | Production is `https://onlo.ai`; staging/review receives an exact release-configured HTTPS origin. The SDK never guesses one. |
-
-## Workspace layout
-
-```text
-docs/              Product, integration, architecture, and v1 API contract
-contracts/v1/      Language-neutral request and response examples
-packages/protocol/ Shared TypeScript contract types
-packages/ios/      Native iOS core foundation
-packages/android/  Native Android core foundation
-packages/react-native/ Canonical @onlo-ai/react-native facade
-packages/flutter/  Canonical onlo_flutter facade
-sdk/react-native/  Legacy reference only; excluded from root workspaces
-conformance/       Cross-SDK lifecycle and protocol scenarios
-examples/          Local host foundations (no keys, JWTs, or signing code)
-examples/merchant-backend/ SDK-team-only synthetic Merchant authentication/JWT simulator
-examples/ios-local-e2e/ SDK-team-only installable iPhone Simulator E2E host
-```
-
-## Development sequence
-
-1. Read the canonical contract and select the build origin → production uses `https://onlo.ai`; staging/review injects its exact HTTPS origin through release configuration.
-2. Implement and test native behavior with redacted fixtures and mock transport → no live customer data, credentials, or attachment URLs are required.
-3. Verify the implemented React Native and Flutter native adapters in real host builds → JavaScript and Dart remain free of credentials and identified state.
-4. Run shared manifest checks, then platform conformance when native toolchains are available → public-service E2E uses an enabled testing target and synthetic data.
-
-The canonical public host API is documented in the [integration guide](docs/integration-guide.md). It includes `initialize({ sdkKey })`, `loginUnidentifiedUser()`, `loginIdentifiedUser({ userJwt })`, host-controlled `present()`, and awaited `logout()`.
-
-## Safety rules
-
-- Reuse the existing WebChat AI pipeline; do not create a mobile-only AI pipeline.
-- Store rotating credentials only in native protected storage. Do not use AsyncStorage, plain files, JavaScript/Dart state, or logs for credentials or identified data.
-- Retain one stable `clientMessageId` across every retry. Do not drop queued messages to make room.
-- Revoke and partition User A’s state before User B can access the SDK after logout or account switch.
-- The v1 contract limits images to JPEG, PNG, or WebP, 8 MiB each, and five per message.
-- Do not commit, push, publish, deploy, release, or modify GitHub settings without explicit approval.
-
-## Local checks
-
-```bash
-npm run typecheck
-npm run test:protocol-fixtures
-npm run test:conformance
-npm run test:hygiene
-npm run check:hygiene
-```
-
-The shared commands validate types, fixtures, conformance manifests, and repository hygiene; they do not replace native/device evidence. Package-specific commands and exact current gates are in the [development and go-live guide](docs/development-and-go-live-guide.md). The legacy React Native prototype is not a supported package or fallback.
-
-Merchant app integration needs only the [iOS merchant example](examples/ios/README.md): a public SDK key, the merchant backend’s authenticated JWT callback, and a host-owned Support action. The separate [merchant-backend simulator](examples/merchant-backend/README.md) is SDK-team local test infrastructure, not part of that integration.
+| Public SDK key selection | Protected credential storage |
+| Anonymous or identified login choice | Session restoration and token refresh |
+| Backend JWT request | Durable offline outbox and retries |
+| Where and when Support opens | Native messenger UI and configuration |
+| Account logout ordering | Transcript, unread, media, and push ownership boundaries |
 
 ## Success criteria
 
-- iOS and Android implement the same confirmed v1 flows and pass shared conformance scenarios.
-- React Native and Flutter delegate all secure/session/outbox/UI behavior to the native core on the active OS.
-- An Operator app presents the messenger from a host-owned entry point and never ships a signing secret.
-- Logout and account switching make old identified history, outbox rows, credentials, read state, and push associations inaccessible before another account can use the messenger.
+- The app builds with exactly one Onlo package/native core per platform.
+- Anonymous or identified login completes without blocking the rest of the app.
+- The messenger opens from a button or route owned by the host app.
+- No signing secret, user JWT, chat token, message text, or attachment URL is stored or logged by the host.
+- Logout finishes, or remains safely pending with Support disabled, before another customer uses Onlo.
 
 ## Troubleshooting
 
-| Symptom | Cause | Action |
+| Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| A wire flow is described but has no exact fixture or type | The contract needs reconciliation | Stop only that narrow flow and report the exact discrepancy; do not invent fields. |
-| The moved React Native code appears to work | Its legacy endpoint and AsyncStorage behavior are still present | Use it only as historical reference; implement the approved native bridge instead. |
-| A platform requires its own session or outbox code | The framework boundary is being crossed | Put state ownership in the iOS/Android core and expose a typed bridge method/event. |
+| The package imports but Support never becomes ready | Initialization or login did not complete | Check the public SDK key and inspect only the SDK’s safe error code |
+| Identified login fails | The backend returned an expired or invalid JWT | Request a new JWT; verify `HS256`, `aud: onlo-messenger`, stable `sub`, and a lifetime of at most five minutes |
+| A second customer sees stale Support state | Account switching did not await Onlo logout | Disable Support before host logout and do not enable it for the next account until Onlo logout completes |
+| React Native or Flutter has duplicate native symbols | A native core was added manually beside the wrapper | Remove the extra native dependency; the framework package already resolves it |
+| Push works in a simulator-only test but not on a device | Provider setup is incomplete | Follow the platform push steps and validate APNs/FCM delivery on a real supported device |
 
-## Related docs
+## For contributors
 
-- [Contributor quick start](CONTRIBUTING.md)
-- [Integration guide](docs/integration-guide.md)
-- [Development and go-live guide](docs/development-and-go-live-guide.md)
-- [v1 API contract](docs/api-contract.md)
-- [Client contract gap review](docs/client-contract-gaps.md)
+This repository also contains the protocol contract, native cores, framework bridges, examples, and conformance fixtures. Start with [CONTRIBUTING.md](CONTRIBUTING.md), then read the [development and go-live guide](docs/development-and-go-live-guide.md).
+
+| Path | Purpose |
+| --- | --- |
+| `packages/ios`, `packages/android` | Native SDKs that own session, secure storage, outbox, lifecycle, push, permissions, and UI |
+| `packages/react-native`, `packages/flutter` | Thin typed bridges over the native SDKs |
+| `examples` | Runnable host integrations with safe placeholder configuration |
+| `contracts/v1`, `packages/protocol` | Canonical language-neutral fixtures and shared protocol types |
+| `conformance` | Cross-SDK lifecycle and protocol scenarios |
+| `sdk/react-native` | Legacy prototype reference only; never use it as a production fallback |
+
+## Related documentation
+
+- [Complete mobile integration guide](docs/integration-guide.md)
+- [API contract](docs/api-contract.md)
 - [Architecture](docs/architecture.md)
-- [Four-client delivery plan](docs/delivery-plan.md)
-- [Conformance scope](conformance/README.md)
+- [Development and go-live guide](docs/development-and-go-live-guide.md)
+
+Next: choose your platform guide and complete the basic chat flow before adding optional features.

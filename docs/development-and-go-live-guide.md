@@ -216,7 +216,7 @@ correctly; it does not need a separate server implementation.
 | Session and conversation responses follow the canonical v1 envelope | ✅ Verified | Successful local E2E exchange |
 | Dashboard appearance and shared behavior project into config with revision, ETag, and refetch hint | ✅ Server verified | Projection, conditional-fetch, and `config_changed` contract tests |
 | Identified read acknowledgement and cross-device unread convergence | ✅ Server verified | Contact-scoped unread calculation, monotonic acknowledgement, and refetch contract tests |
-| Identified push registration and authorized notification routing | ✅ Server verified | Credential isolation, payload authorization, routing, and provider-classifier tests; physical delivery remains a client/environment gate |
+| Anonymous and identified push registration with authorized notification routing | ✅ Server verified | Installation/conversation authorization, credential isolation, failure containment, routing, and provider-classifier tests; physical delivery remains a client/environment gate |
 | Production release state, target keys, and credential configuration | ⏳ Pending production setup | Environment-specific, not SDK-specific |
 
 The verified rows apply to iOS, Android, React Native, and Flutter clients that
@@ -254,11 +254,11 @@ Flutter.
 #### Push and device evidence
 
 - [ ] Register the platform device token after notification permission is
-      granted for an identified session.
+      granted for an anonymous and an identified session.
 - [ ] Receive an agent-reply notification while the app is backgrounded on a
       physical device.
 - [ ] Open the authorized conversation when the notification is tapped.
-- [ ] Confirm logout and account switching remove or rotate push registration.
+- [ ] Confirm logout and account switching clear server authorization even when provider registration/unregistration fails.
 - [ ] Test the minimum supported OS and a current OS on physical devices.
 
 #### Release quality

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+
+- Push registration and authorized notification routing now work for both
+  anonymous and identified customer sessions.
+
+### Fixed
+
+- iOS retains one user-tapped Onlo notification during session restoration and
+  retries it after either customer session is ready.
+- Native examples request notification permission from a customer action,
+  refresh the current provider token after login/restoration, and keep a
+  cold-start tap until native authorization can finish.
+- Invalid tokens and registration/provider failures remain isolated from chat,
+  Messenger, transcript synchronization, logout, and account switching.
+- Push registration no longer holds Android lifecycle/session locking or delays
+  iOS session completion; stale iOS token-rotation responses are fenced.
+- iOS pending-identify recovery clears the prior anonymous push intent without
+  allowing protected-store failures to abort session recovery.
+
+### Compatibility
+
+- No public API or wire-protocol changes.
+- Existing 0.2.x integrations remain compatible.
+
 ## 0.2.0
 
 ### Added

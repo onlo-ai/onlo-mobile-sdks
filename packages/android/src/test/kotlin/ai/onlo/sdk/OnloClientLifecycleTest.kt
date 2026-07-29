@@ -831,7 +831,7 @@ class OnloClientLifecycleTest {
     }
 
     @Test
-    fun `restoration resumes then unlinks push before sending a fresh logout`() = runBlocking {
+    fun `restoration logs out without waiting for push cleanup`() = runBlocking {
         val old = protectedAnonymous().copy(logoutPending = true)
         val credentials = FakeCredentials().apply { state = ProtectedSessionState(old, ai.onlo.sdk.security.PendingSessionTransition.Logout(old.installationId, "old-logout", old.generation, old.credential, "unused")) }
         val transport = PushRecoveryTransport(unlinkSucceeds = true)
@@ -839,14 +839,14 @@ class OnloClientLifecycleTest {
         val tokenStore = MemoryPushStore(StoredPushToken(OwnerScope.Anonymous(old.ownerScopeId).storageKey(), "fcm", registered = true, pendingUnregister = true))
         val client = OnloClient(OnloConfiguration("public-sdk-key", "ai.onlo.fixture"), credentials, FakeOutbox(), OnloSessionApi(transport, requests), SafeLogger { _: SafeLogEvent -> }, CoroutineScope(Dispatchers.Unconfined), pushRegistry = PushRegistry(tokenStore, OnloPushApi(transport, requests)))
         client.startRestoration()
-        assertEquals(listOf("resume", "unregister", "logout"), transport.order)
-        assertEquals("Bearer resumed-bearer", transport.pushAuthorization)
+        assertEquals(listOf("logout"), transport.order)
+        assertEquals(null, transport.pushAuthorization)
         assertEquals(OnloPhase.ANONYMOUS_READY, client.state.value.phase)
         assertEquals(null, tokenStore.value)
     }
 
     @Test
-    fun `unresolved restored unlink stops before logout and remains blocked`() = runBlocking {
+    fun `provider unlink failure cannot block a restored logout`() = runBlocking {
         val old = protectedAnonymous().copy(logoutPending = true)
         val credentials = FakeCredentials().apply { state = ProtectedSessionState(old, ai.onlo.sdk.security.PendingSessionTransition.Logout(old.installationId, "old-logout", old.generation, old.credential, "unused")) }
         val transport = PushRecoveryTransport(unlinkSucceeds = false)
@@ -854,13 +854,13 @@ class OnloClientLifecycleTest {
         val tokenStore = MemoryPushStore(StoredPushToken(OwnerScope.Anonymous(old.ownerScopeId).storageKey(), "fcm", registered = true, pendingUnregister = true))
         val client = OnloClient(OnloConfiguration("public-sdk-key", "ai.onlo.fixture"), credentials, FakeOutbox(), OnloSessionApi(transport, requests), SafeLogger { _: SafeLogEvent -> }, CoroutineScope(Dispatchers.Unconfined), pushRegistry = PushRegistry(tokenStore, OnloPushApi(transport, requests)))
         client.startRestoration()
-        assertEquals(listOf("resume", "unregister"), transport.order)
-        assertEquals(OnloPhase.LOGOUT_PENDING, client.state.value.phase)
-        assertEquals(true, credentials.session?.logoutPending)
+        assertEquals(listOf("logout"), transport.order)
+        assertEquals(OnloPhase.ANONYMOUS_READY, client.state.value.phase)
+        assertEquals(false, credentials.session?.logoutPending)
     }
 
     @Test
-    fun `anonymous session queues token locally without a server push association`() = runBlocking {
+    fun `anonymous and identified sessions register their own push association`() = runBlocking {
         val transport = IdentityPushTransport()
         val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
         val credentials = FakeCredentials()
@@ -868,26 +868,30 @@ class OnloClientLifecycleTest {
         val client = OnloClient(OnloConfiguration("public-sdk-key", "ai.onlo.fixture"), credentials, FakeOutbox(), OnloSessionApi(transport, requests), SafeLogger { _: SafeLogEvent -> }, CoroutineScope(Dispatchers.Unconfined), pushRegistry = PushRegistry(store, OnloPushApi(transport, requests)))
         client.loginUnidentifiedUser()
         assertEquals(
-            PushRegistrationOutcome.QueuedForReconciliation,
+            PushRegistrationOutcome.Registered,
             client.registerPushToken(PushProvider.FCM, "synthetic-fcm-token"),
         )
-        assertEquals(null, store.value)
-        assertTrue(transport.order.isEmpty())
-        client.loginIdentifiedUser("header.payload.signature")
+        assertEquals(true, store.value?.registered)
         assertEquals(listOf("register"), transport.order)
+        client.loginIdentifiedUser("header.payload.signature")
+        assertEquals(
+            PushRegistrationOutcome.Registered,
+            client.registerPushToken(PushProvider.FCM, "synthetic-fcm-token"),
+        )
+        assertEquals(listOf("register", "register"), transport.order)
         assertEquals(true, store.value?.registered)
     }
 
     @Test
-    fun `mismatched protected push owner cannot drive pending logout traffic`() = runBlocking {
+    fun `mismatched protected push owner cannot block or drive logout traffic`() = runBlocking {
         val old = protectedAnonymous().copy(logoutPending = true)
         val credentials = FakeCredentials().apply { state = ProtectedSessionState(old, ai.onlo.sdk.security.PendingSessionTransition.Logout(old.installationId, "logout", old.generation, old.credential, "next")) }
         val transport = RetryPushTransport(); val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
         val store = MemoryPushStore(StoredPushToken(OwnerScope.Anonymous("different").storageKey(), "fcm", true, true))
         val client = OnloClient(OnloConfiguration("public-sdk-key", "ai.onlo.fixture"), credentials, FakeOutbox(), OnloSessionApi(transport, requests), SafeLogger { _: SafeLogEvent -> }, CoroutineScope(Dispatchers.Unconfined), pushRegistry = PushRegistry(store, OnloPushApi(transport, requests)))
         client.startRestoration()
-        assertTrue(transport.order.isEmpty())
-        assertEquals(OnloPhase.LOGOUT_PENDING, client.state.value.phase)
+        assertEquals(listOf("logout"), transport.order)
+        assertEquals(OnloPhase.ANONYMOUS_READY, client.state.value.phase)
         assertEquals(MessengerPresentationIntent.HIDDEN, client.presentationIntent.value)
     }
 

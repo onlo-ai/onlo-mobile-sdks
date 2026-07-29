@@ -372,20 +372,11 @@ public class OnloClient internal constructor(
      */
     public suspend fun logout(): LogoutOutcome = operationMutex.withLock {
         val stored = loadProtectedSession() ?: return@withLock LogoutOutcome.AlreadyAnonymous
-        val registry = pushRegistry
-        val storedOwnerKey = stored.ownerScope().storageKey()
-        if (stored.logoutPending && registry?.hasPendingUnregister(storedOwnerKey) == true) {
-            if (registry.requiresFreshBearer(storedOwnerKey) && registry.needsFreshBearerNow(storedOwnerKey)) {
-                resumeForPendingPushUnlink(stored)
-                return@withLock if (state.value.phase == OnloPhase.LOGOUT_PENDING) LogoutOutcome.Pending("push_unlink_pending") else LogoutOutcome.Completed
-            }
-            val authority = blockedOwnerAuthority(stored)
-            if (authority != null) {
-                val outcome = registry.reconcileUnregister(authority, freshBearer = false)
-                if (outcome !is PushRegistrationOutcome.Unregistered && outcome !is PushRegistrationOutcome.NoToken) {
-                    return@withLock LogoutOutcome.Pending("push_unlink_pending")
-                }
-            } else return@withLock LogoutOutcome.Pending("push_unlink_pending")
+        if (stored.logoutPending && pendingTransition is PendingSessionTransition.Resume) {
+            resumeForPendingLogout(stored)
+            return@withLock if (state.value.phase == OnloPhase.LOGOUT_PENDING) {
+                LogoutOutcome.Pending("logout_pending")
+            } else LogoutOutcome.Completed
         }
         logoutLocked(stored)
     }
@@ -396,53 +387,68 @@ public class OnloClient internal constructor(
         token: String,
         notificationPreference: ai.onlo.sdk.protocol.NotificationPreference? = null,
         locale: String? = null,
-    ): PushRegistrationOutcome = operationMutex.withLock {
-        val registry = pushRegistry ?: return@withLock PushRegistrationOutcome.NoActiveSession
-        if (provider != ai.onlo.sdk.protocol.PushProvider.FCM) {
-            return@withLock PushRegistrationOutcome.UnsupportedProvider
+    ): PushRegistrationOutcome {
+        val registrationAuthority = operationMutex.withLock {
+            val registry = pushRegistry ?: return PushRegistrationOutcome.NoActiveSession
+            if (provider != ai.onlo.sdk.protocol.PushProvider.FCM) {
+                return PushRegistrationOutcome.UnsupportedProvider
+            }
+            if (token.isBlank()) return PushRegistrationOutcome.InvalidToken
+            pendingPushRegistration = PendingPushRegistration(provider, token, notificationPreference, locale)
+            val authority = currentPushAuthority()
+                ?: return PushRegistrationOutcome.QueuedForReconciliation
+            registry to authority
         }
-        if (token.isBlank()) return@withLock PushRegistrationOutcome.InvalidToken
-        pendingPushRegistration = PendingPushRegistration(provider, token, notificationPreference, locale)
-        if (protectedSession?.identityClass != IdentityClass.IDENTIFIED ||
-            state.value.phase != OnloPhase.IDENTIFIED_READY
-        ) return@withLock PushRegistrationOutcome.QueuedForReconciliation
-        registry.register(currentPushAuthority(), provider, token, notificationPreference, locale)
+        val (registry, authority) = registrationAuthority
+        try {
+            return registry.register(authority, provider, token, notificationPreference, locale)
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (_: Throwable) {
+            return PushRegistrationOutcome.TerminalServerFailure
+        }
     }
 
     /** FCM services pass their data map here; this emits no intent until the transcript authorises it. */
     public suspend fun handlePushPayload(payload: Map<String, String>): PushPayloadOutcome {
-        val capture = operationMutex.withLock {
-            val registry = pushRegistry ?: return PushPayloadOutcome.NotOnlo
-            val authority = currentPushAuthority()
-            val protected = protectedSession
-            val session = inMemorySession
-            val persistence = if (authority != null && protected != null && session != null) {
-                persistenceAuthority(authority.owner, protected, session, configSessionVersion)
-            } else null
-            PushPayloadCapture(registry, authority, persistence)
+        return try {
+            val capture = operationMutex.withLock {
+                val registry = pushRegistry ?: return PushPayloadOutcome.NotOnlo
+                val authority = currentPushAuthority()
+                val protected = protectedSession
+                val session = inMemorySession
+                val persistence = if (authority != null && protected != null && session != null) {
+                    persistenceAuthority(authority.owner, protected, session, configSessionVersion)
+                } else null
+                PushPayloadCapture(registry, authority, persistence)
+            }
+            capture.registry.handlePayload(payload, capture.authority, { authority, conversationId, messageId ->
+                val api = widgetChatApi ?: return@handlePayload false
+                val persistenceAuthority = capture.persistenceAuthority ?: return@handlePayload false
+                val expectedSessionId = persistenceAuthority.sessionId
+                val convergence = TranscriptConvergence(api, outboxStore)
+                val transcript = convergence.fetchAfterFullSync(
+                    authority.owner,
+                    authority.chatToken,
+                    conversationId,
+                    null,
+                    expectedSessionId,
+                    isAuthorised = { operationMutex.withLock { currentPushAuthority() == authority } },
+                    commit = { value ->
+                        outboxStore.replaceTranscriptIfAuthorised(
+                            persistenceAuthority,
+                            conversationId,
+                            convergence.encodeTranscript(value),
+                        )
+                    },
+                )
+                transcript.messages.any { it.id == messageId }
+            }) { authority -> operationMutex.withLock { currentPushAuthority() == authority } }
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (_: Throwable) {
+            PushPayloadOutcome.RefetchFailed
         }
-        return capture.registry.handlePayload(payload, capture.authority, { authority, conversationId, messageId ->
-            val api = widgetChatApi ?: return@handlePayload false
-            val persistenceAuthority = capture.persistenceAuthority ?: return@handlePayload false
-            val expectedSessionId = persistenceAuthority.sessionId
-            val convergence = TranscriptConvergence(api, outboxStore)
-            val transcript = convergence.fetchAfterFullSync(
-                authority.owner,
-                authority.chatToken,
-                conversationId,
-                null,
-                expectedSessionId,
-                isAuthorised = { operationMutex.withLock { currentPushAuthority() == authority } },
-                commit = { value ->
-                    outboxStore.replaceTranscriptIfAuthorised(
-                        persistenceAuthority,
-                        conversationId,
-                        convergence.encodeTranscript(value),
-                    )
-                },
-            )
-            transcript.messages.any { it.id == messageId }
-        }) { authority -> operationMutex.withLock { currentPushAuthority() == authority } }
     }
 
     /** Refetches with current bearer authority before allowing a targeted native presentation. */
@@ -717,7 +723,6 @@ public class OnloClient internal constructor(
         }
         requireRetryPrerequisite(pending, hostSuppliedJwt = false)
         val oldOwner = stored.ownerScope()
-        val oldPushAuthority = currentPushAuthority()
         outboxStore.blockOwner(oldOwner)
         mutablePresentation.value = MessengerPresentationIntent.HIDDEN
         mutablePresentationTarget.value = MessengerPresentationTarget.Inbox
@@ -727,14 +732,14 @@ public class OnloClient internal constructor(
         pushRegistry?.activateAuthority(null)
         invalidateConfigSession()
         val blocked = stored.copy(logoutPending = true)
-        // This must be durable before unregister can suspend: server Logout is still unsent.
+        // This must be durable before the server Logout can suspend.
         persist(blocked, pending)
         mutableState.value = OnloState(OnloPhase.LOGOUT_PENDING, OnloIdentityState.UNKNOWN)
-        val pushOutcome = pushRegistry?.retireOwner(oldPushAuthority)
-        if (pushOutcome != null && pushOutcome !is PushRegistrationOutcome.Unregistered && pushOutcome !is PushRegistrationOutcome.NoToken) {
-            // Never discard the only old-session bearer while unlink remains uncertain.
-            mutableState.value = OnloState(OnloPhase.LOGOUT_PENDING, OnloIdentityState.UNKNOWN, "push_unlink_pending")
-            return LogoutOutcome.Pending("push_unlink_pending")
+        try {
+            pushRegistry?.discardOwner(oldOwner.storageKey())
+        } catch (_: Throwable) {
+            // Push cleanup is best effort. The session transition atomically
+            // clears the server registration and remains the security boundary.
         }
         inMemorySession = null
 
@@ -1100,11 +1105,8 @@ public class OnloClient internal constructor(
     private suspend fun restoreOrBootstrap() = operationMutex.withLock {
         val stored = loadProtectedSession()
         if (stored?.logoutPending == true) {
-            val storedOwnerKey = stored.ownerScope().storageKey()
-            if (pushRegistry?.needsFreshBearerNow(storedOwnerKey) == true) {
-                resumeForPendingPushUnlink(stored)
-            } else if (pushRegistry?.hasPendingUnregister(storedOwnerKey) == true) {
-                mutableState.value = OnloState(OnloPhase.LOGOUT_PENDING, OnloIdentityState.UNKNOWN, "push_unlink_pending")
+            if (pendingTransition is PendingSessionTransition.Resume) {
+                resumeForPendingLogout(stored)
             } else {
                 logoutLocked(stored, allowRetryablePending = false)
             }
@@ -1113,8 +1115,8 @@ public class OnloClient internal constructor(
         }
     }
 
-    /** The prior Logout was never sent: push unlink returned before its session exchange. */
-    private suspend fun resumeForPendingPushUnlink(stored: ProtectedSession) {
+    /** Completes a legacy pending Resume, then continues the session Logout. */
+    private suspend fun resumeForPendingLogout(stored: ProtectedSession) {
         val resume = PendingSessionTransition.Resume(
             installationId = stored.installationId, transitionId = newUuid(), expectedGeneration = stored.generation,
             presentedCredential = stored.credential, proposedCredential = newCredential(),
@@ -1123,16 +1125,16 @@ public class OnloClient internal constructor(
         val result = exchange(resume.toOperation(), resume.installationId)
         if (result.identityClass != stored.identityClass) throw OnloException.InvalidProtocol
         val rotated = stored.copy(credential = result.proposedCredential, generation = result.generation, logoutPending = true)
-        // The Resume is complete; only the protected pending-unlink record proves recovery work.
+        // The Resume is complete; the authoritative Logout below clears the
+        // server registration together with the old customer association.
         persist(rotated, null)
         protectedSession = rotated
         inMemorySession = InMemorySession(result.sessionId, result.chatToken)
-        val outcome = checkNotNull(pushRegistry).reconcileUnregister(PushAuthority(rotated.ownerScope(), result.chatToken), freshBearer = true)
-        if (outcome !is PushRegistrationOutcome.Unregistered && outcome !is PushRegistrationOutcome.NoToken) {
-            mutableState.value = OnloState(OnloPhase.LOGOUT_PENDING, OnloIdentityState.UNKNOWN, "push_unlink_pending")
-            return
+        try {
+            pushRegistry?.discardOwner(rotated.ownerScope().storageKey())
+        } catch (_: Throwable) {
+            // Local push cleanup is best effort and cannot block logout.
         }
-        // The old bearer has performed its only allowed task. Create a fresh Logout transition.
         logoutLocked(rotated, allowRetryablePending = false)
     }
 
@@ -1198,16 +1200,22 @@ public class OnloClient internal constructor(
         outboxStore.activateAuthority(
             persistenceAuthority(next.ownerScope(), next, nextSession, configSessionVersion),
         )
+        if (previousOwner != null && previousOwner != next.ownerScope()) {
+            try {
+                pushRegistry?.discardOwner(previousOwner.storageKey())
+            } catch (_: Throwable) {
+                // The server session transition already cleared the old
+                // registration. A local push-store failure cannot block chat.
+            }
+        }
         pushRegistry?.activateAuthority(
-            if (next.identityClass == IdentityClass.IDENTIFIED) {
-                PushAuthority(
-                    owner = next.ownerScope(),
-                    chatToken = nextSession.chatToken,
-                    sessionGeneration = next.generation,
-                    sessionId = nextSession.sessionId,
-                    bearerVersion = configSessionVersion,
-                )
-            } else null,
+            PushAuthority(
+                owner = next.ownerScope(),
+                chatToken = nextSession.chatToken,
+                sessionGeneration = next.generation,
+                sessionId = nextSession.sessionId,
+                bearerVersion = configSessionVersion,
+            ),
         )
         mutableState.value = when (result.identityClass) {
             IdentityClass.ANONYMOUS -> OnloState(OnloPhase.ANONYMOUS_READY, OnloIdentityState.ANONYMOUS)
@@ -1229,11 +1237,8 @@ public class OnloClient internal constructor(
             )
         }
         if (refreshConfigAfterSession) scheduleConfigRefresh(result.chatToken, configSessionVersion)
-        if (result.identityClass == IdentityClass.ANONYMOUS) {
-            mutableUnreadCount.value = null
-        } else {
-            schedulePendingPushRegistration()
-        }
+        if (result.identityClass == IdentityClass.ANONYMOUS) mutableUnreadCount.value = null
+        schedulePendingPushRegistration()
     }
 
     /** Called with [operationMutex] held. Ownership never depends on [Job.isActive]. */
@@ -1451,13 +1456,19 @@ public class OnloClient internal constructor(
         val registry = pushRegistry ?: return
         val authority = currentPushAuthority() ?: return
         scope.launch {
-            registry.register(
-                authority,
-                pending.provider,
-                pending.token,
-                pending.notificationPreference,
-                pending.locale,
-            )
+            try {
+                registry.register(
+                    authority,
+                    pending.provider,
+                    pending.token,
+                    pending.notificationPreference,
+                    pending.locale,
+                )
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Throwable) {
+                // Push recovery is isolated from session, chat, and UI state.
+            }
         }
     }
 
@@ -1537,8 +1548,14 @@ public class OnloClient internal constructor(
     private fun reconcilePushFromLifecycle() {
         val registry = pushRegistry ?: return
         scope.launch {
-            val authority = operationMutex.withLock { currentPushAuthority() }
-            registry.reconcileEligible(authority)
+            try {
+                val authority = operationMutex.withLock { currentPushAuthority() }
+                registry.reconcileEligible(authority)
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Throwable) {
+                // A later token refresh or lifecycle recovery may retry push.
+            }
         }
     }
 
@@ -1666,7 +1683,11 @@ public class OnloClient internal constructor(
     private fun currentPushAuthority(): PushAuthority? {
         val protected = protectedSession ?: return null
         val session = inMemorySession ?: return null
-        if (protected.logoutPending || protected.identityClass != IdentityClass.IDENTIFIED) return null
+        if (protected.logoutPending || state.value.phase !in setOf(
+                OnloPhase.ANONYMOUS_READY,
+                OnloPhase.IDENTIFIED_READY,
+            )
+        ) return null
         return PushAuthority(
             owner = protected.ownerScope(),
             chatToken = session.chatToken,

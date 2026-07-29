@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+- Fixed user-tapped notifications arriving during restoration so one bounded
+  native tap is retried after either anonymous or identified readiness.
+- Added anonymous-session APNs registration and tap authorization.
+- Isolated invalid tokens and registration/provider failures from chat,
+  Messenger, transcript synchronization, logout, and account switching.
+- Moved APNs reconciliation off session completion, fenced stale token-rotation
+  responses, and cleared anonymous push intent during pending-identify recovery.
+- Kept the existing public API and v1 notification payload unchanged.
+
 ## 0.2.0
 
 - Added contained and full-screen Messenger presentation support and native

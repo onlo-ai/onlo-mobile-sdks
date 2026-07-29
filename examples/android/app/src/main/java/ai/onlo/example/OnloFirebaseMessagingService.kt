@@ -18,9 +18,14 @@ class OnloFirebaseMessagingService : FirebaseMessagingService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onNewToken(token: String) {
+        if (!SupportNotificationPreference.isEnabled(this)) return
         val client = (application as? MerchantApplication)?.onloClient ?: return
         serviceScope.launch {
-            client.registerPushToken(PushProvider.FCM, token)
+            try {
+                client.registerPushToken(PushProvider.FCM, token)
+            } catch (_: Exception) {
+                // Token rotation is best effort; chat and Messenger remain live.
+            }
         }
     }
 
@@ -34,7 +39,11 @@ class OnloFirebaseMessagingService : FirebaseMessagingService() {
 
         val conversationId = payload["conversationId"]?.takeIf(String::isNotBlank) ?: return
         val messageId = payload["messageId"]?.takeIf(String::isNotBlank) ?: return
-        postNotification(conversationId, messageId)
+        try {
+            postNotification(conversationId, messageId)
+        } catch (_: RuntimeException) {
+            // OS notification failures must not terminate the host process.
+        }
     }
 
     private fun postNotification(conversationId: String, messageId: String) {

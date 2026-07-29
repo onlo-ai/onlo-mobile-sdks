@@ -1,64 +1,98 @@
-# Android local host
+# Android example app
 
-`app/` is a minimal Android application that uses the sibling native core by a local Gradle project dependency. It builds a host-owned Support button; no key, JWT, endpoint override, signing code, customer data, or generated dependency is checked in.
+Run a small Android host against the sibling Onlo SDK. The example demonstrates anonymous login, backend-proven identified login, a host-owned Support button, logout, FCM forwarding, and account-safe navigation.
 
-## Run foundation
+## Prerequisites
 
-1. Complete the Android tool setup in the [go-live guide](../../docs/development-and-go-live-guide.md#tool-and-account-setup).
+- [ ] JDK 17, Android API 35, and build-tools 35.0.0.
+- [ ] A public test Mobile SDK key.
+- [ ] For identified login, a test account on an authenticated Operator-backend endpoint.
+- [ ] For FCM testing, a Firebase project and a Google Play-enabled emulator or physical device.
 
-   Expected result: JDK 17 and Android API 35/build-tools 35.0.0 are installed after explicit licence acceptance.
+## Concepts
 
-2. If `local.properties` does not exist, copy `local.properties.example` to `local.properties`; otherwise add the `ONLO_SDK_KEY` line from the example without replacing your existing `sdk.dir`. Keep `ONLO_USE_DEVELOPMENT_ORIGIN=false` to use production `https://onlo.ai`; enable it only for an approved Debug origin.
+| File | Purpose | May contain |
+| --- | --- | --- |
+| `local.properties` | Machine-local build and test configuration | Android SDK path, public test key, authenticated backend URL |
+| `MerchantApplication.kt` | Initializes one native Onlo client | Public SDK key only |
+| `MainActivity.kt` | Demonstrates login, Support, logout, and tap routing | Safe UI state; never JWT persistence |
+| `OnloFirebaseMessagingService.kt` | Forwards tokens and creates host notifications | FCM token in memory; never provider credentials |
 
-   Expected result: the ignored file contains the machine-local Android SDK
-   path, public test integration key, and authenticated Operator-backend URL,
-   with no signing secret or JWT.
+## Run the basic flow
 
-3. Open `examples/android` in Android Studio, or run `../../packages/android/gradlew -p . :app:assembleDebug` from this directory.
+1. Complete the Android setup in the [go-live guide](../../docs/development-and-go-live-guide.md#tool-and-account-setup).
 
-   Expected result: the local host compiles against `../../packages/android`, initializes in the background, and enables Support only in an anonymous or identified ready state.
+   Expected result: `java -version` reports Java 17 and Android API/build-tools 35 are installed after licence acceptance.
 
-4. Use **Continue anonymously**, or enter a synthetic host login code and use
-   **Complete host login**.
+2. Copy `local.properties.example` to `local.properties`. If that file already exists, add only the example’s `ONLO_*` lines and preserve the existing `sdk.dir`.
 
-   Expected result: identified login obtains a short-lived JWT from the
-   Operator backend and passes it directly to native Core. Support presents the
-   native picker/camera, push/deep-link forwarding re-authorises natively, and
-   logout completes before account switching.
+   Expected result: the ignored file contains an Android SDK path, public test key, and authenticated backend URL. It contains no signing secret or saved JWT.
+
+3. Keep `ONLO_USE_DEVELOPMENT_ORIGIN=false` for production `https://onlo.ai`. Enable it only for an approved Debug origin.
+
+   Expected result: the host never guesses or ships a staging hostname.
+
+4. Open `examples/android` in Android Studio, or build from this directory:
+
+   ```bash
+   ../../packages/android/gradlew -p . :app:assembleDebug
+   ```
+
+   Expected result: the app compiles against `../../packages/android` and initializes Onlo in `MerchantApplication`.
+
+5. Run the app and select **Continue anonymously**.
+
+   Expected result: the Support button enables for an anonymous native session and opens the messenger.
+
+6. Enter a synthetic host login code and select **Complete host login**.
+
+   Expected result: the example backend returns a short-lived JWT, Android passes it directly to native Core, and identified Support becomes ready.
+
+7. Select **Log out / switch account** before using another test account.
+
+   Expected result: the old transcript, outbox, unread state, and push association are blocked before the next account uses Support.
 
 ## Enable FCM
 
-1. Register `ai.onlo.example` in the merchant's Firebase project and place its
-   downloaded `google-services.json` in `app/`.
+1. Register `ai.onlo.example` in the merchant’s Firebase project and place the downloaded `google-services.json` in `app/`.
 
-   Expected result: the conditional Google Services plugin configures the
-   example. The file contains project identifiers, belongs to the merchant
-   host, and is not committed by this repository.
+   Expected result: the conditional Google Services plugin configures this host. Keep the file out of source control.
 
-2. Upload the corresponding FCM HTTP v1 service-account JSON to the Mobile
-   target in Onlo Dashboard. Never add the service-account JSON to the app.
+2. Upload the corresponding FCM HTTP v1 service-account JSON to the Mobile target in Onlo Dashboard. Never add it to the app.
 
-   Expected result: Onlo server can send for this merchant application while
-   the private provider credential remains server-side.
+   Expected result: Onlo can send for the example while the private provider credential remains server-side.
 
-3. Run on a Google Play-enabled emulator or device and grant notification
-   permission.
+3. Start anonymous or signed-in Support, select **Enable support notifications**, and grant notification
+   permission on a Google Play-enabled emulator or physical device.
 
-   Expected result: `MerchantApplication` initializes Core before an FCM
-   callback; `OnloFirebaseMessagingService` forwards rotated registration
-   tokens and posts contract-shaped `message_available` notifications.
+   Expected result: the example fetches the current FCM token after anonymous
+   or identified readiness, `OnloFirebaseMessagingService` forwards later rotations, and no
+   permission prompt appears during SDK initialization.
 
 4. Tap an Onlo notification.
 
-   Expected result: `MainActivity` forwards only the three routing fields to
-   Core. Core refetches the transcript and opens the conversation only for the
-   current owner.
+   Expected result: `MainActivity` retains one cold-start tap until an
+   anonymous or identified session is ready, forwards only `conversationId`, `messageId`,
+   and `notificationType`, and Core re-authorises the current owner before
+   opening the conversation.
 
-The v0.1 example pins Firebase Messaging `24.1.2` because its registration-token
-callback matches the frozen Onlo server protocol. Firebase Messaging 25.x
-introduces FID targeting and requires a coordinated server/protocol release;
-do not upgrade the host independently. An emulator intent injection validates
-payload forwarding and authority fencing, but only configured FCM HTTP v1
-delivery validates the provider path.
+The example pins Firebase Messaging `24.1.2` because its token callback matches protocol v1. Do not upgrade to a different targeting model without a coordinated server/protocol change.
 
-Call `logout()` before a host account switch. If it returns `Pending`, keep the old partition blocked until native recovery completes. Production uses `https://onlo.ai`; staging/review must be injected by release configuration, never guessed by the host.
+## Success criteria
+
+- Anonymous and identified login both enable the same native Support button.
+- The example never signs, stores, decodes, or logs the user JWT.
+- FCM provider credentials remain in Onlo Dashboard, not the app.
+- Logout completes or safely keeps Support blocked before account switching.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Gradle cannot find the Android SDK | `sdk.dir` is missing or invalid | Preserve/add the correct SDK path in ignored `local.properties` |
+| Support stays disabled | Public key, backend login, or Onlo session setup failed | Check the on-screen safe state and verify only the non-secret local configuration |
+| Identified login fails | Test backend URL/session is missing or JWT expired | Authenticate the example host and request a fresh JWT |
+| FCM callback never runs | Firebase app, Google Services file, or device support is incomplete | Verify `ai.onlo.example`, rebuild, and use a Google Play-enabled device |
+| Notification opens no conversation | Payload or current installation failed native validation | Verify the three v1 fields and test while the authorized anonymous or identified session is active |
+
+Next: use the [Android package guide](../../packages/android/README.md) to move the same lifecycle into your app.

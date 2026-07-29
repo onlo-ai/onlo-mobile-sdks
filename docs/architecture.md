@@ -66,4 +66,5 @@ The local database is partitioned by anonymous installation generation or verifi
 | JWT rejected/expired | Keep anonymous scope; ask host code for a fresh JWT. | No leaked identified history. |
 | Account switch | Revoke/unlink, hide old scope, clear sensitive local state, then optionally bootstrap anonymous. | The next person cannot see the previous person’s conversation. |
 | Push missed or delayed | Treat push as a hint and sync when foregrounded. | Correct current transcript rather than stale notification content. |
+| Push token/provider fails | Return a push-only failure and keep session/transcript authority unchanged. | Chat and Messenger continue; the installation can re-register later. |
 | Settings change while offline | Retain last-known-good config and conditionally refresh on recovery. | No unsupported cache behavior. |

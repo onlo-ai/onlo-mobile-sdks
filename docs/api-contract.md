@@ -217,6 +217,12 @@ FAQ answers are not presented as published FAQ content.
 | Push unregister | `{ action:'unregister' }` → `{ state:'inactive' }`. |
 | Push payload | `{ conversationId, messageId, notificationType:'message_available' }`. Re-authorise/refetch transcript before displaying or navigating. |
 
+Push registration and payload handling apply to both anonymous and identified
+ready sessions. Authorization follows the installation's current conversation
+scope, not its identity class. Invalid tokens, registration/provider failures,
+and delivery errors are push-only failures: they must not change session state,
+interrupt Messenger, affect transcript synchronization, or block support/logout.
+
 ## Implementation rules
 
 - Do not log tokens, JWTs, message text, PII, attachment URLs, or raw push tokens.

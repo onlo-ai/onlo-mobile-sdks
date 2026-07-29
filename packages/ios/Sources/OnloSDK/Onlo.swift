@@ -2,6 +2,17 @@ import Foundation
 
 #if canImport(UIKit)
 import UIKit
+
+@MainActor
+private final class DeferredOnloNotificationTap {
+    let payload: PushNotificationPayload
+    weak var host: UIViewController?
+
+    init(payload: PushNotificationPayload, host: UIViewController) {
+        self.payload = payload
+        self.host = host
+    }
+}
 #endif
 
 /// Customer-facing lifecycle facade for the single Onlo integration owned by
@@ -13,6 +24,10 @@ public enum Onlo {
     #if canImport(UIKit)
     @MainActor
     private static var messenger = OnloMessengerPresenter(sdk: sdk)
+    @MainActor
+    private static var deferredNotificationTap: DeferredOnloNotificationTap?
+    @MainActor
+    private static var deferredNotificationTask: Task<Void, Never>?
     #endif
 
     /// Controls structured, PII-free SDK diagnostics for this process.
@@ -50,7 +65,10 @@ public enum Onlo {
     /// Ends the current Onlo account boundary before another app user starts.
     @discardableResult
     public static func logout() async throws -> SDKState {
-        try await sdk.logout()
+        #if canImport(UIKit)
+        await clearDeferredNotificationTap()
+        #endif
+        return try await sdk.logout()
     }
 
     /// Token-free lifecycle state for enabling or disabling host-owned UI.
@@ -110,13 +128,86 @@ public enum Onlo {
         )
         switch try await sdk.handlePushNotification(payload) {
         case .handled(.messenger(let authorisedConversationId)):
+            clearDeferredNotificationTap()
             try await messenger.present(from: host, conversationId: authorisedConversationId)
             return true
         case .deferred:
+            queueDeferredNotificationTap(payload, from: host)
             return true
         case .notOnlo:
+            clearDeferredNotificationTap()
             return false
         }
+    }
+
+    @MainActor
+    private static func queueDeferredNotificationTap(
+        _ payload: PushNotificationPayload,
+        from host: UIViewController
+    ) {
+        deferredNotificationTap = DeferredOnloNotificationTap(payload: payload, host: host)
+        guard deferredNotificationTask == nil else { return }
+        deferredNotificationTask = Task { @MainActor in
+            let states = await sdk.observeState()
+            for await state in states {
+                guard !Task.isCancelled, deferredNotificationTap != nil else { break }
+                if state == .anonymousReady || state == .identifiedReady {
+                    await retryDeferredNotificationTapWhenHostIsVisible()
+                }
+            }
+            deferredNotificationTask = nil
+        }
+    }
+
+    @MainActor
+    private static func retryDeferredNotificationTapWhenHostIsVisible() async {
+        // A cold-start controller can exist before its scene is attached. Wait
+        // at most five seconds for that host without making any provider or
+        // transcript request until it is actually visible.
+        for _ in 0..<20 {
+            guard !Task.isCancelled,
+                  let pending = deferredNotificationTap else { return }
+            guard let host = pending.host else {
+                clearDeferredNotificationTap()
+                return
+            }
+            if host.viewIfLoaded?.window != nil {
+                await retryDeferredNotificationTap()
+                return
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+    }
+
+    @MainActor
+    private static func retryDeferredNotificationTap() async {
+        guard let deferredNotificationTap else { return }
+        guard let host = deferredNotificationTap.host else {
+            clearDeferredNotificationTap()
+            return
+        }
+        guard host.viewIfLoaded?.window != nil else { return }
+        do {
+            switch try await sdk.handlePushNotification(deferredNotificationTap.payload) {
+            case .handled(.messenger(let authorisedConversationId)):
+                guard self.deferredNotificationTap === deferredNotificationTap else { return }
+                clearDeferredNotificationTap()
+                try await messenger.present(from: host, conversationId: authorisedConversationId)
+            case .deferred:
+                break
+            case .notOnlo:
+                clearDeferredNotificationTap()
+            }
+        } catch {
+            // Keep one bounded native tap for the next lifecycle recovery.
+        }
+    }
+
+    @MainActor
+    private static func clearDeferredNotificationTap() {
+        deferredNotificationTap = nil
+        deferredNotificationTask?.cancel()
+        deferredNotificationTask = nil
     }
 
     /// Applies host restrictions to future messenger presentations. Dashboard

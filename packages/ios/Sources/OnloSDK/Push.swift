@@ -19,8 +19,8 @@ struct ProtectedPushIntent: Codable, Sendable, Equatable {
     /// A process-death-safe prerequisite: a fresh bearer must be obtained
     /// before this intent can be retried. It is never inferred from a token.
     let requiresFreshBearer: Bool
-    /// A completed active registration is retained only to convert it into an
-    /// unregister intent during logout; it is not work to replay.
+    /// A completed active registration is retained to avoid duplicate writes
+    /// while this owner remains current; it is not work to replay.
     let isRegistered: Bool
     /// False means a server prerequisite cannot be supplied by this SDK build
     /// or a `never` directive was received. A new host action is required.
@@ -79,7 +79,13 @@ protocol AuthorityFencedPushIntentStoring: Sendable {
     func activateAuthority(_ authority: PersistenceAuthority) async
     func revokeAuthority(for scope: OwnerScope) async
     func save(_ intent: ProtectedPushIntent, authority: PersistenceAuthority) async throws -> Bool
+    func save(
+        _ intent: ProtectedPushIntent,
+        replacing expected: ProtectedPushIntent,
+        authority: PersistenceAuthority
+    ) async throws -> Bool
     func clear(authority: PersistenceAuthority) async throws -> Bool
+    func clear(replacing expected: ProtectedPushIntent, authority: PersistenceAuthority) async throws -> Bool
 }
 
 /// A single protected record is sufficient because an installation can only
@@ -93,6 +99,10 @@ actor KeychainPushIntentStore: PushIntentStoring, AuthorityFencedPushIntentStori
     private var activeAuthority: PersistenceAuthority?
 
     func load() async throws -> ProtectedPushIntent? {
+        try loadSynchronously()
+    }
+
+    private func loadSynchronously() throws -> ProtectedPushIntent? {
         var query: [String: Any] = baseQuery
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -145,8 +155,27 @@ actor KeychainPushIntentStore: PushIntentStoring, AuthorityFencedPushIntentStori
         return true
     }
 
+    func save(
+        _ intent: ProtectedPushIntent,
+        replacing expected: ProtectedPushIntent,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        guard activeAuthority == authority,
+              intent.ownerScope == authority.ownerScope,
+              try loadSynchronously() == expected else { return false }
+        try saveSynchronously(intent)
+        return true
+    }
+
     func clear(authority: PersistenceAuthority) async throws -> Bool {
         guard activeAuthority == authority else { return false }
+        try clearSynchronously()
+        return true
+    }
+
+    func clear(replacing expected: ProtectedPushIntent, authority: PersistenceAuthority) async throws -> Bool {
+        guard activeAuthority == authority,
+              try loadSynchronously() == expected else { return false }
         try clearSynchronously()
         return true
     }
@@ -171,8 +200,24 @@ actor InMemoryPushIntentStore: PushIntentStoring, AuthorityFencedPushIntentStori
         self.intent = intent
         return true
     }
+    func save(
+        _ intent: ProtectedPushIntent,
+        replacing expected: ProtectedPushIntent,
+        authority: PersistenceAuthority
+    ) async throws -> Bool {
+        guard activeAuthority == authority,
+              intent.ownerScope == authority.ownerScope,
+              self.intent == expected else { return false }
+        self.intent = intent
+        return true
+    }
     func clear(authority: PersistenceAuthority) async throws -> Bool {
         guard activeAuthority == authority else { return false }
+        intent = nil
+        return true
+    }
+    func clear(replacing expected: ProtectedPushIntent, authority: PersistenceAuthority) async throws -> Bool {
+        guard activeAuthority == authority, intent == expected else { return false }
         intent = nil
         return true
     }

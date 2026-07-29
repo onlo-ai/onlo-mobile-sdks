@@ -1729,7 +1729,7 @@ final class OnloSDKTests: XCTestCase {
         XCTAssertEqual(result, .handled(.messenger(conversationId: "conversation-1")))
     }
 
-    func testLogoutUnregistersProtectedAPNsIntentBeforeSessionLogout() async throws {
+    func testLogoutCompletesBeforeAnonymousAPNsReregistration() async throws {
         let pushStore = InMemoryPushIntentStore()
         let transport = MockTransport(responses: [
             sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-1", credential: "credential-1"),
@@ -1737,8 +1737,9 @@ final class OnloSDKTests: XCTestCase {
             sessionResponse(identityClass: "identified", generation: 2, sessionId: "session-2", credential: "credential-2"),
             mobileConfigResponse(),
             pushResponse(),
-            pushInactiveResponse(),
             sessionResponse(identityClass: "anonymous", generation: 2, sessionId: "session-2", credential: "credential-2"),
+            mobileConfigResponse(),
+            pushResponse(),
         ])
         let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), configStore: InMemoryConfigStore(), pushIntentStore: pushStore, ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host")
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
@@ -1746,12 +1747,30 @@ final class OnloSDKTests: XCTestCase {
         _ = try await sdk.setAPNsPushToken(Data(repeating: 0xAB, count: 32))
         let logoutState = try await sdk.logout()
         XCTAssertEqual(logoutState, .anonymousReady)
+        let anonymousPushRegistered = await waitUntil {
+            do {
+                guard let intent = try await pushStore.load() else { return false }
+                return intent.ownerScope.kind == .anonymous && intent.isRegistered
+            } catch {
+                return false
+            }
+        }
+        XCTAssertTrue(anonymousPushRegistered)
         let remainingPushIntent = try await pushStore.load()
-        XCTAssertNil(remainingPushIntent)
+        let anonymousRegistration = try XCTUnwrap(remainingPushIntent)
+        XCTAssertEqual(anonymousRegistration.ownerScope.kind, .anonymous)
+        XCTAssertTrue(anonymousRegistration.isRegistered)
         let requests = await transport.requests()
         let pushRequests = requests.filter { $0.url?.path == "/api/sdk/v1/push-token" }
-        let unregister = try XCTUnwrap(pushRequests.last?.httpBody)
-        XCTAssertEqual(try JSONDecoder().decode(PushTokenRequest.self, from: unregister), .unregister)
+        XCTAssertEqual(pushRequests.count, 2)
+        let registration = try XCTUnwrap(pushRequests.first?.httpBody)
+        guard case .register = try JSONDecoder().decode(PushTokenRequest.self, from: registration) else {
+            return XCTFail("expected the original registration")
+        }
+        let paths = requests.compactMap { $0.url?.path }
+        let lastPushIndex = try XCTUnwrap(paths.lastIndex(of: "/api/sdk/v1/push-token"))
+        let lastSessionIndex = try XCTUnwrap(paths.lastIndex(of: "/api/sdk/v1/session"))
+        XCTAssertGreaterThan(lastPushIndex, lastSessionIndex)
     }
 
     func testProtectedOwnerAIntentCannotBeOverwrittenByOwnerB() async throws {
@@ -1764,7 +1783,7 @@ final class OnloSDKTests: XCTestCase {
         let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), pushIntentStore: pushStore, ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host")
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
         let registration = try await sdk.setAPNsPushToken(Data(repeating: 0xCD, count: 32))
-        XCTAssertEqual(registration, .pendingRetry)
+        XCTAssertEqual(registration, .requiresHostAction)
         let storedPushIntent = try await pushStore.load()
         let retained = try XCTUnwrap(storedPushIntent)
         XCTAssertEqual(retained.action, .unregister)
@@ -1772,35 +1791,42 @@ final class OnloSDKTests: XCTestCase {
         XCTAssertEqual(requests.filter { $0.url?.path == "/api/sdk/v1/push-token" }.count, 0)
     }
 
-    func testPushBackoffKeepsLogoutBoundaryAndForegroundDoesNotRetryEarly() async throws {
+    func testPushProviderFailureDoesNotBlockLogoutOrOwnerCleanup() async throws {
         let credentials = InMemoryCredentialStore()
         let owners = InMemoryOwnerScopedStore()
         let push = InMemoryPushIntentStore()
         let transport = MockTransport(responses: [
             sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-1", credential: "credential-1"), mobileConfigResponse(),
-            sessionResponse(identityClass: "identified", generation: 2, sessionId: "session-2", credential: "credential-2"), mobileConfigResponse(), pushResponse(),
-            sessionFailure(code: "dependency_unavailable", directive: "after_backoff", retryAfterMs: 120_000)
+            sessionResponse(identityClass: "identified", generation: 2, sessionId: "session-2", credential: "credential-2"), mobileConfigResponse(),
+            sessionFailure(code: "dependency_unavailable", directive: "after_backoff", retryAfterMs: 120_000),
+            sessionResponse(identityClass: "anonymous", generation: 3, sessionId: "session-3", credential: "credential-3"),
+            mobileConfigResponse(), pushResponse()
         ])
         let sdk = OnloSDK(credentialStore: credentials, configStore: InMemoryConfigStore(), pushIntentStore: push, ownerStore: owners, transport: transport, hostAppIdentifier: "com.example.host")
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
         _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
         let owner = try await activeOwnerScope(credentials)
-        _ = try await sdk.setAPNsPushToken(Data(repeating: 0xAA, count: 32))
+        let registration = try await sdk.setAPNsPushToken(Data(repeating: 0xAA, count: 32))
+        XCTAssertEqual(registration, .pendingRetry)
         let logoutState = try await sdk.logout()
-        XCTAssertEqual(logoutState, .logoutPending)
-        let requestsBeforeForeground = await transport.requests()
-        let before = requestsBeforeForeground.count
-        try await sdk.refreshConfigurationForForeground()
-        let requestsAfterForeground = await transport.requests()
-        let requestCount = requestsAfterForeground.count
-        XCTAssertEqual(requestCount, before)
+        XCTAssertEqual(logoutState, .anonymousReady)
         await XCTAssertThrowsErrorAsync { try await owners.outboxEntries(for: owner) }
+        let anonymousPushRegistered = await waitUntil {
+            do {
+                guard let intent = try await push.load() else { return false }
+                return intent.ownerScope.kind == .anonymous && intent.isRegistered
+            } catch {
+                return false
+            }
+        }
+        XCTAssertTrue(anonymousPushRegistered)
         let storedPushIntent = try await push.load()
-        let pending = try XCTUnwrap(storedPushIntent)
-        XCTAssertEqual(pending.retryDirective, .afterBackoff)
+        let anonymousRegistration = try XCTUnwrap(storedPushIntent)
+        XCTAssertEqual(anonymousRegistration.ownerScope.kind, .anonymous)
+        XCTAssertTrue(anonymousRegistration.isRegistered)
     }
 
-    func testPersistedLogoutResumeReplaysExactOperationBeforeUnregister() async throws {
+    func testPersistedLogoutResumeReplaysExactOperationBeforeLogout() async throws {
         let owner = OwnerScope(kind: .anonymous)
         let credential = StoredSessionCredential(installationId: "installation-1", generation: 1, proposedCredential: "credential-1", identityClass: .anonymous, ownerScope: owner, logoutPending: true)
         let resume = PendingSessionTransition.resume(transitionId: "resume-transition", installationId: "installation-1", expectedGeneration: 1, presentedCredential: "credential-1", proposedCredential: "credential-2")
@@ -1808,7 +1834,7 @@ final class OnloSDKTests: XCTestCase {
         let push = InMemoryPushIntentStore()
         try await push.save(ProtectedPushIntent(ownerScope: owner, action: .unregister))
         let transport = MockTransport(responses: [
-            sessionResponse(identityClass: "anonymous", generation: 2, sessionId: "session-r", credential: "credential-2"), pushInactiveResponse(),
+            sessionResponse(identityClass: "anonymous", generation: 2, sessionId: "session-r", credential: "credential-2"),
             sessionResponse(identityClass: "anonymous", generation: 3, sessionId: "session-l", credential: "credential-3"), mobileConfigResponse()
         ])
         let sdk = OnloSDK(credentialStore: credentials, pushIntentStore: push, ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host")
@@ -1820,33 +1846,36 @@ final class OnloSDKTests: XCTestCase {
         guard case let .resume(transitionId, _, _, proposedCredential) = decoded.operation else { return XCTFail("expected durable resume") }
         XCTAssertEqual(transitionId, "resume-transition")
         XCTAssertEqual(proposedCredential, "credential-2")
+        XCTAssertEqual(requests.filter { $0.url?.path == "/api/sdk/v1/push-token" }.count, 0)
+        let restoredState = await sdk.currentState()
+        XCTAssertEqual(restoredState, .anonymousReady)
     }
 
-    func testPushTokenRefreshUsesOneResumeThenLeavesRepeatedDirectivePending() async throws {
+    func testPushTokenRefreshDirectiveDoesNotMutateChatSession() async throws {
         let transport = MockTransport(responses: [
             sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-1", credential: "credential-1"), mobileConfigResponse(),
-            sessionResponse(identityClass: "identified", generation: 2, sessionId: "session-2", credential: "credential-2"), mobileConfigResponse(), pushResponse(),
-            sessionFailure(code: "session_expired", directive: "after_token_refresh"),
-            sessionResponse(identityClass: "identified", generation: 3, sessionId: "session-3", credential: "credential-3"),
+            sessionResponse(identityClass: "identified", generation: 2, sessionId: "session-2", credential: "credential-2"), mobileConfigResponse(),
             sessionFailure(code: "session_expired", directive: "after_token_refresh")
         ])
         let push = InMemoryPushIntentStore()
         let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), configStore: InMemoryConfigStore(), pushIntentStore: push, ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host")
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
         _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
-        _ = try await sdk.setAPNsPushToken(Data(repeating: 0xAB, count: 32))
-        let logoutState = try await sdk.logout()
-        XCTAssertEqual(logoutState, .logoutPending)
+        let registration = try await sdk.setAPNsPushToken(Data(repeating: 0xAB, count: 32))
+        XCTAssertEqual(registration, .pendingRetry)
+        let currentState = await sdk.currentState()
+        XCTAssertEqual(currentState, .identifiedReady)
         let paths = await transport.requests().compactMap { $0.url?.path }
-        XCTAssertEqual(paths.filter { $0 == "/api/sdk/v1/session" }.count, 3)
-        XCTAssertEqual(paths.filter { $0 == "/api/sdk/v1/push-token" }.count, 3)
+        XCTAssertEqual(paths.filter { $0 == "/api/sdk/v1/session" }.count, 2)
+        XCTAssertEqual(paths.filter { $0 == "/api/sdk/v1/push-token" }.count, 1)
         let storedPushIntent = try await push.load()
         let pending = try XCTUnwrap(storedPushIntent)
         XCTAssertEqual(pending.retryDirective, .afterTokenRefresh)
-        XCTAssertFalse(pending.automaticallyRetryable)
+        XCTAssertTrue(pending.requiresFreshBearer)
+        XCTAssertTrue(pending.automaticallyRetryable)
     }
 
-    func testGatedPushIntentCausesNoRecoveryTraffic() async throws {
+    func testGatedPushIntentDoesNotPreventSessionLogoutRecovery() async throws {
         let owner = OwnerScope(kind: .anonymous)
         let credential = StoredSessionCredential(installationId: "installation-1", generation: 1, proposedCredential: "credential-1", identityClass: .anonymous, ownerScope: owner, logoutPending: true)
         let push = InMemoryPushIntentStore()
@@ -1856,7 +1885,8 @@ final class OnloSDKTests: XCTestCase {
         _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
         let requests = await transport.requests()
         let requestCount = requests.count
-        XCTAssertEqual(requestCount, 0)
+        XCTAssertEqual(requestCount, 1)
+        XCTAssertEqual(requests.first?.url?.path, "/api/sdk/v1/session")
         let state = await sdk.currentState()
         XCTAssertEqual(state, .logoutPending)
     }
