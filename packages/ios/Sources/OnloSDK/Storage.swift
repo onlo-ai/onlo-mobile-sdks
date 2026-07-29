@@ -820,7 +820,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
     private func replaceTranscriptSynchronously(
         _ transcript: ConversationTranscriptResult,
         for scope: OwnerScope,
-        db: OpaquePointer
+        db: SQLiteConnection
     ) throws {
         guard !(try isBlocked(scope, db: db)) else { throw OnloError.invalidState }
         let previous = try storedTranscript(conversationID: transcript.conversation.id, scope: scope, db: db)
@@ -849,8 +849,8 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         return try storedTranscript(conversationID: conversationId, scope: scope, db: db)
     }
 
-    private func database() async throws -> OpaquePointer {
-        if let connection { return connection.handle }
+    private func database() async throws -> SQLiteConnection {
+        if let connection { return connection }
         let directoryURL = databaseURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
         var directoryValues = URLResourceValues()
@@ -860,8 +860,9 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         #if os(iOS)
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: directoryURL.path)
         #endif
-        var db: OpaquePointer?
-        guard sqlite3_open_v2(databaseURL.path, &db, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let db else { throw OnloError.credentialStore(code: "owner_store_open_failed") }
+        var handle: OpaquePointer?
+        guard sqlite3_open_v2(databaseURL.path, &handle, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK, let handle else { throw OnloError.credentialStore(code: "owner_store_open_failed") }
+        let db = SQLiteConnection(handle: handle)
         do {
             try execute("PRAGMA foreign_keys = ON", values: [], db: db)
             try execute("CREATE TABLE IF NOT EXISTS owner_scopes (scope_id TEXT PRIMARY KEY NOT NULL, scope_kind TEXT NOT NULL, blocked INTEGER NOT NULL CHECK(blocked IN (0, 1)))", values: [], db: db)
@@ -888,10 +889,9 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
             }
             try execute("INSERT INTO outbox_metadata(key, value) VALUES('key_fingerprint', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", values: [keyFingerprint], db: db)
             encryptionKey = loadedKey
-            connection = SQLiteConnection(handle: db)
+            connection = db
             return db
         } catch {
-            sqlite3_close(db)
             throw error
         }
     }
@@ -917,7 +917,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         return actualCode == code
     }
 
-    private func purge(_ scope: OwnerScope, db: OpaquePointer) throws {
+    private func purge(_ scope: OwnerScope, db: SQLiteConnection) throws {
         try transaction(db) {
             try execute("DELETE FROM outbox WHERE scope_id = ?", values: [scope.id.uuidString], db: db)
             try execute("DELETE FROM transcripts WHERE scope_id = ?", values: [scope.id.uuidString], db: db)
@@ -926,7 +926,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         }
     }
 
-    private func purgeAll(db: OpaquePointer) throws {
+    private func purgeAll(db: SQLiteConnection) throws {
         try transaction(db) {
             try execute("DELETE FROM outbox", values: [], db: db)
             try execute("DELETE FROM transcripts", values: [], db: db)
@@ -935,7 +935,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         }
     }
 
-    private func metadataValue(for key: String, db: OpaquePointer) throws -> Data? {
+    private func metadataValue(for key: String, db: SQLiteConnection) throws -> Data? {
         let statement = try statement("SELECT value FROM outbox_metadata WHERE key = ?", db: db)
         defer { sqlite3_finalize(statement) }
         try bind([key], to: statement)
@@ -947,7 +947,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         return value
     }
 
-    private func storedTranscript(conversationID: String, scope: OwnerScope, db: OpaquePointer) throws -> ConversationTranscriptResult? {
+    private func storedTranscript(conversationID: String, scope: OwnerScope, db: SQLiteConnection) throws -> ConversationTranscriptResult? {
         let statement = try statement("SELECT payload FROM transcripts WHERE scope_id = ? AND conversation_id = ?", db: db)
         defer { sqlite3_finalize(statement) }
         try bind([scope.id.uuidString, conversationID], to: statement)
@@ -959,7 +959,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         catch { throw OnloError.credentialStore(code: "transcript_decrypt_failed") }
     }
 
-    private func isBlocked(_ scope: OwnerScope, db: OpaquePointer) throws -> Bool {
+    private func isBlocked(_ scope: OwnerScope, db: SQLiteConnection) throws -> Bool {
         let statement = try statement("SELECT blocked FROM owner_scopes WHERE scope_id = ?", db: db)
         defer { sqlite3_finalize(statement) }
         try bind([scope.id.uuidString], to: statement)
@@ -969,23 +969,23 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
         return sqlite3_column_int(statement, 0) != 0
     }
 
-    private func transaction(_ db: OpaquePointer, _ body: () throws -> Void) throws {
+    private func transaction(_ db: SQLiteConnection, _ body: () throws -> Void) throws {
         try execute("BEGIN IMMEDIATE", values: [], db: db)
         do { try body(); try execute("COMMIT", values: [], db: db) }
         catch { _ = try? execute("ROLLBACK", values: [], db: db); throw error }
     }
 
-    @discardableResult private func execute(_ sql: String, values: [Any?], db: OpaquePointer) throws -> Int32 {
+    @discardableResult private func execute(_ sql: String, values: [Any?], db: SQLiteConnection) throws -> Int32 {
         let statement = try statement(sql, db: db)
         defer { sqlite3_finalize(statement) }
         try bind(values, to: statement)
         guard sqlite3_step(statement) == SQLITE_DONE else { throw sqliteError("owner_store_write_failed", db: db) }
-        return sqlite3_changes(db)
+        return sqlite3_changes(db.handle)
     }
 
-    private func statement(_ sql: String, db: OpaquePointer) throws -> OpaquePointer {
+    private func statement(_ sql: String, db: SQLiteConnection) throws -> OpaquePointer {
         var result: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &result, nil) == SQLITE_OK, let result else { throw sqliteError("owner_store_prepare_failed", db: db) }
+        guard sqlite3_prepare_v2(db.handle, sql, -1, &result, nil) == SQLITE_OK, let result else { throw sqliteError("owner_store_prepare_failed", db: db) }
         return result
     }
 
@@ -1008,7 +1008,7 @@ public actor SQLiteOwnerScopedStore: OwnerScopedPersisting, TranscriptPersisting
 
     private func sqliteText(_ statement: OpaquePointer, _ column: Int32) -> String? { sqlite3_column_text(statement, column).map { String(cString: $0) } }
     private func sqliteData(_ statement: OpaquePointer, _ column: Int32) -> Data? { guard let bytes = sqlite3_column_blob(statement, column) else { return nil }; return Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, column))) }
-    private func sqliteError(_ code: String, db: OpaquePointer) -> OnloError { OnloError.credentialStore(code: code) }
+    private func sqliteError(_ code: String, db: SQLiteConnection) -> OnloError { OnloError.credentialStore(code: code) }
     private static func defaultDatabaseURL() -> URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("OnloSDK", isDirectory: true).appendingPathComponent("outbox.sqlite", isDirectory: false) }
 }
 
