@@ -1,6 +1,6 @@
 {
   "name": "@onlo/protocol",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "private": true,
   "description": "Versioned Onlo Mobile SDK v1 wire-contract types and fixtures.",
   "types": "src/index.ts",

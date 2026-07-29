@@ -1,6 +1,6 @@
 {
   "name": "onlo-mobile-sdks",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "private": true,
   "description": "Onlo native mobile SDK workspace and protocol conformance contracts.",
   "packageManager": "npm@10.9.2",

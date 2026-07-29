@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.2
+
+### Fixed
+
+- Native Messenger now acknowledges rendered replies for installation-authorized
+  anonymous sessions so foreground push notifications are suppressed while the
+  customer is actively viewing the conversation.
+
+### Compatibility
+
+- No public API or wire-protocol changes.
+
+## 0.3.1
+
+### Fixed
+
+- Android Messenger now stays above the software keyboard and treats the IME
+  send action as message submission.
+
+### Compatibility
+
+- No public API or wire-protocol changes.
+
 ## 0.3.0
 
 ### Added

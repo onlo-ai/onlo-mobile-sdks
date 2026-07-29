@@ -15,6 +15,7 @@ import android.view.Gravity
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -38,6 +39,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var supportButton: Button
     private lateinit var notificationsButton: Button
     private lateinit var status: TextView
+    private lateinit var diagnostics: TextView
     private lateinit var loginCode: EditText
     private var hostOperationError: String? = null
     private var pendingPushPayload: Map<String, String>? = null
@@ -55,8 +57,15 @@ class MainActivity : AppCompatActivity() {
             isEnabled = false
         }
         val logoutButton = Button(this).apply { text = "Log out / switch account" }
+        val clearDiagnosticsButton = Button(this).apply { text = "Clear diagnostics" }
         status = TextView(this).apply { text = "Local mock host: SDK key not configured" }
-        setContentView(LinearLayout(this).apply {
+        diagnostics = TextView(this).apply {
+            text = "No FCM diagnostics yet."
+            setTextIsSelectable(true)
+            setPadding(24, 24, 24, 24)
+            setBackgroundColor(0xffeeeeee.toInt())
+        }
+        val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(48, 48, 48, 48)
@@ -67,8 +76,13 @@ class MainActivity : AppCompatActivity() {
             addView(supportButton)
             addView(notificationsButton)
             addView(logoutButton)
-        })
+            addView(TextView(this@MainActivity).apply { text = "FCM diagnostics (safe)" })
+            addView(clearDiagnosticsButton)
+            addView(diagnostics)
+        }
+        setContentView(ScrollView(this).apply { addView(content) })
         supportButton.setOnClickListener { OnloMessenger.present(this, Onlo.instance()) }
+        clearDiagnosticsButton.setOnClickListener { OnloFcmDiagnostics.clear() }
 
         // The public key is supplied by ignored local.properties in this example. It is safe to
         // embed in an app, but a real value does not belong in this shared repository.
@@ -131,6 +145,13 @@ class MainActivity : AppCompatActivity() {
                 status.text = hostOperationError ?: "Native state: ${state.phase.name.lowercase()}"
             }
         }
+        lifecycleScope.launch {
+            OnloFcmDiagnostics.lines.collectLatest { lines ->
+                diagnostics.text = lines.takeIf(List<String>::isNotEmpty)
+                    ?.joinToString("\n")
+                    ?: "No FCM diagnostics yet."
+            }
+        }
         forwardIntent(intent)
     }
 
@@ -153,6 +174,7 @@ class MainActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != NOTIFICATION_PERMISSION_REQUEST) return
         val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+        OnloFcmDiagnostics.info("event=notification_permission_result granted=$granted")
         SupportNotificationPreference.setEnabled(this, granted)
         if (granted) syncCurrentFcmToken()
         else {
@@ -172,6 +194,7 @@ class MainActivity : AppCompatActivity() {
             ActivityCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
         ) {
+            OnloFcmDiagnostics.info("event=notification_permission_requested")
             ActivityCompat.requestPermissions(
                 this,
                 arrayOf(Manifest.permission.POST_NOTIFICATIONS),
@@ -179,19 +202,34 @@ class MainActivity : AppCompatActivity() {
             )
             return
         }
+        OnloFcmDiagnostics.info("event=notification_permission_already_granted")
         SupportNotificationPreference.setEnabled(this, true)
         syncCurrentFcmToken()
     }
 
     private fun syncCurrentFcmToken() {
-        if (!SupportNotificationPreference.isEnabled(this)) return
-        val client = (application as? MerchantApplication)?.onloClient ?: return
+        if (!SupportNotificationPreference.isEnabled(this)) {
+            OnloFcmDiagnostics.info("event=current_token_sync_skipped reason=notifications_disabled")
+            return
+        }
+        val client = (application as? MerchantApplication)?.onloClient
+        if (client == null) {
+            OnloFcmDiagnostics.warn("event=current_token_sync_skipped reason=client_unavailable")
+            return
+        }
+        OnloFcmDiagnostics.info("event=current_token_fetch_started")
         FirebaseMessaging.getInstance().token
             .addOnSuccessListener { token ->
-                if (token.isBlank()) return@addOnSuccessListener
+                if (token.isBlank()) {
+                    OnloFcmDiagnostics.warn("event=current_token_fetch_failed errorClass=blank_token")
+                    return@addOnSuccessListener
+                }
+                OnloFcmDiagnostics.info("event=current_token_fetch_succeeded")
                 lifecycleScope.launch {
                     try {
-                        when (client.registerPushToken(PushProvider.FCM, token)) {
+                        val outcome = client.registerPushToken(PushProvider.FCM, token)
+                        OnloFcmDiagnostics.info("event=current_token_registration_completed outcome=${outcome.javaClass.simpleName}")
+                        when (outcome) {
                             PushRegistrationOutcome.Registered,
                             PushRegistrationOutcome.QueuedForReconciliation -> {
                                 hostOperationError = null
@@ -202,13 +240,15 @@ class MainActivity : AppCompatActivity() {
                                 status.text = hostOperationError
                             }
                         }
-                    } catch (_: Exception) {
+                    } catch (error: Exception) {
+                        OnloFcmDiagnostics.warn("event=current_token_registration_failed errorClass=${error.javaClass.simpleName}")
                         hostOperationError = "Notifications will retry when Support reconnects"
                         status.text = hostOperationError
                     }
                 }
             }
-            .addOnFailureListener {
+            .addOnFailureListener { error ->
+                OnloFcmDiagnostics.warn("event=current_token_fetch_failed errorClass=${error.javaClass.simpleName}")
                 hostOperationError = "Could not prepare support notifications"
                 status.text = hostOperationError
             }
@@ -238,8 +278,11 @@ class MainActivity : AppCompatActivity() {
                 OnloPhase.IDENTIFIED_READY,
             ) || pushRoutingJob?.isActive == true
         ) return
+        OnloFcmDiagnostics.info("event=push_route_started")
         pushRoutingJob = lifecycleScope.launch {
-            when (val outcome = client.handlePushPayload(push)) {
+            val outcome = client.handlePushPayload(push)
+            OnloFcmDiagnostics.info("event=push_route_completed outcome=${outcome.javaClass.simpleName}")
+            when (outcome) {
                 is PushPayloadOutcome.NavigationIntent -> {
                     pendingPushPayload = null
                     OnloMessenger.openConversation(this@MainActivity, outcome.conversationId, client)

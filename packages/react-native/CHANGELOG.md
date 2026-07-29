@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.2
+
+- Included the native foreground-notification suppression fix for anonymous
+  Messenger sessions.
+- Kept the React Native API and bridge contract unchanged.
+
+## 0.3.1
+
+- Included the Android native Messenger keyboard-inset and IME-send fixes.
+- Kept the React Native API and bridge contract unchanged.
+
 ## 0.3.0
 
 - Clarified production push integration for current-token registration,

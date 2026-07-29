@@ -650,7 +650,7 @@ public class OnloClient internal constructor(
         catch (_: ProtocolViolation) { MessengerHelpArticleResult.NotAuthorised }
     }
 
-    /** Native UI calls this only after a freshly fetched transcript is rendered. */
+    /** Native UI calls this only after an authorised transcript is rendered. */
     internal suspend fun acknowledgeRenderedConversation(
         conversationId: String,
         throughMessageId: String,
@@ -661,8 +661,7 @@ public class OnloClient internal constructor(
             val protected = protectedSession ?: return@withLock null
             val api = widgetChatApi ?: return@withLock null
             if (protected.logoutPending ||
-                protected.identityClass != IdentityClass.IDENTIFIED ||
-                state.value.phase != OnloPhase.IDENTIFIED_READY
+                state.value.phase !in setOf(OnloPhase.ANONYMOUS_READY, OnloPhase.IDENTIFIED_READY)
             ) null else {
                 conversationObservationGeneration += 1
                 ConversationOpenAuthority(protected, session.sessionId, session.chatToken, configSessionVersion, api)
@@ -679,23 +678,27 @@ public class OnloClient internal constructor(
             if (matchesMessengerAuthority(capture) &&
                 observation.generation == conversationObservationGeneration
             ) {
+                val identified = capture.session.identityClass == IdentityClass.IDENTIFIED
+                val conversations = if (identified) list.conversations
+                else list.conversations.map { it.copy(unread = false, unreadCount = 0) }
+                val totalUnreadCount = if (identified) list.totalUnreadCount else 0
                 try {
                     outboxStore.replaceConversationListIfAuthorised(
                         persistenceAuthority(capture),
-                        ConversationListCacheCodec.encode(list),
+                        ConversationListCacheCodec.encode(ConversationList(conversations, totalUnreadCount)),
                     )
                 } catch (failure: CancellationException) {
                     throw failure
                 } catch (_: Exception) {
                     // Read acknowledgement remains successful even if its local cache refresh fails.
                 }
-                mutableUnreadCount.value = list.totalUnreadCount
+                mutableUnreadCount.value = if (identified) totalUnreadCount else null
                 messengerInboxCache = MessengerInboxCache(
                     owner = capture.session.ownerScope(),
                     sessionId = capture.sessionId,
                     bearerVersion = capture.version,
-                    conversations = list.conversations,
-                    totalUnreadCount = list.totalUnreadCount,
+                    conversations = conversations,
+                    totalUnreadCount = totalUnreadCount,
                 )
             }
         }

@@ -958,6 +958,40 @@ class OnloClientLifecycleTest {
     }
 
     @Test
+    fun `anonymous rendered reply is acknowledged without exposing unread state`() = runBlocking {
+        val credentials = FakeCredentials().apply {
+            state = ProtectedSessionState(protectedAnonymous(), null)
+        }
+        val transport = OutOfOrderConversationTransport(identityClass = "anonymous")
+        val requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())
+        val client = client(
+            credentials,
+            FakeOutbox(),
+            transport = transport,
+            widgetChatApi = WidgetChatApi(transport, requests),
+        )
+        client.startRestoration()
+        assertEquals(OnloPhase.ANONYMOUS_READY, client.state.value.phase)
+
+        val acknowledgement = async {
+            client.acknowledgeRenderedConversation("conversation-1", "message-1")
+        }
+        transport.firstListStarted.await()
+        transport.releaseFirstList.complete(Unit)
+        acknowledgement.await()
+
+        val inboxRequest = async { client.loadMessengerInbox() }
+        transport.secondListStarted.await()
+        transport.releaseSecondList.complete(Unit)
+        val inbox = inboxRequest.await() as MessengerInboxResult.Ready
+
+        assertEquals(1, transport.readRequests)
+        assertEquals(null, client.unreadCount.value)
+        assertEquals(false, inbox.conversations.single().unread)
+        assertEquals(0, inbox.conversations.single().unreadCount)
+    }
+
+    @Test
     fun `encrypted inbox index remains available after client recreation and an offline refresh`() = runBlocking {
         val credentials = FakeCredentials().apply {
             state = ProtectedSessionState(protectedIdentified(), null)
@@ -1588,7 +1622,9 @@ class OnloClientLifecycleTest {
         }
     }
 
-    private class OutOfOrderConversationTransport : OnloTransport {
+    private class OutOfOrderConversationTransport(
+        private val identityClass: String = "identified",
+    ) : OnloTransport {
         val firstListStarted = CompletableDeferred<Unit>()
         val secondListStarted = CompletableDeferred<Unit>()
         val releaseFirstList = CompletableDeferred<Unit>()
@@ -1604,7 +1640,7 @@ class OnloClientLifecycleTest {
                 return OnloHttpResponse(
                     200,
                     emptyMap(),
-                    """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"synthetic-session","chatToken":"synthetic-chat-token","installationId":"00000000-0000-0000-0000-000000000001","generation":1,"proposedCredential":"$proposed","identityClass":"identified","publicationState":"testing","attestationState":"not_required","configRevision":"fixture","configSchemaVersion":1,"configEtag":"fixture"}}""",
+                    """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"synthetic-session","chatToken":"synthetic-chat-token","installationId":"00000000-0000-0000-0000-000000000001","generation":1,"proposedCredential":"$proposed","identityClass":"$identityClass","publicationState":"testing","attestationState":"not_required","configRevision":"fixture","configSchemaVersion":1,"configEtag":"fixture"}}""",
                 )
             }
             if (request.method == "PUT" && path.endsWith("/read")) {

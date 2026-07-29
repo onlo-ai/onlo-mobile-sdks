@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.2
+
+- Acknowledged replies rendered in anonymous Messenger sessions so the server
+  can suppress their foreground push notifications.
+- Preserved the anonymous contract: no unread count or unread flags are exposed.
+- Kept the Android core API and v1 protocol unchanged.
+
+## 0.3.1
+
+- Kept the Messenger composer above the software keyboard on edge-to-edge
+  Android hosts.
+- Wired the keyboard send action to the same guarded native send path as the
+  visible send button.
+- Kept the Android core API and v1 protocol unchanged.
+
 ## 0.3.0
 
 - Updated the native host example to request notification permission from a

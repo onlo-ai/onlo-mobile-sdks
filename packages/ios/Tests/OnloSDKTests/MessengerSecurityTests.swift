@@ -291,7 +291,10 @@ final class MessengerSecurityTests: XCTestCase {
             appIdentifier: "com.example.host",
             apiBaseURL: URL(string: "https://sdk.example.test")!
         ))
-        _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
+        let initialStates = await sdk.observeFrameworkState()
+        var initialIterator = initialStates.makeAsyncIterator()
+        let initialSnapshot = await initialIterator.next()
+        XCTAssertEqual(initialSnapshot?.state, .anonymousReady)
 
         _ = try await sdk.messengerTranscript(conversationId: "conversation-1")
         let readsBeforeRender = await transport.readRequestCount()
@@ -308,7 +311,7 @@ final class MessengerSecurityTests: XCTestCase {
         let frameworkStates = await sdk.observeFrameworkState()
         var frameworkIterator = frameworkStates.makeAsyncIterator()
         let convergedState = await frameworkIterator.next()
-        XCTAssertEqual(convergedState?.unreadCount, 0)
+        XCTAssertNil(convergedState?.unreadCount)
     }
 
     func testOlderInboxResponseCannotOverwriteNewerObservation() async throws {

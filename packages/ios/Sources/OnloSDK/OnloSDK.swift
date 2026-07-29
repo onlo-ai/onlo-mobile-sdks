@@ -1372,17 +1372,16 @@ public actor OnloSDK {
         }
     }
 
-    /// Called by the native presenter only after it has committed the fetched
-    /// transcript to visible UI. Anonymous sessions intentionally do nothing.
+    /// Called by the native presenter only after it has committed an authorised
+    /// transcript to visible UI.
     func acknowledgeRenderedConversation(
         conversationId: String,
         throughMessageId: String
     ) async throws {
         let startedAt = Date()
         do {
-            guard state == .identifiedReady,
+            guard state == .anonymousReady || state == .identifiedReady,
                   let session = runtimeSession,
-                  session.credential.identityClass == .identified,
                   let requestFactory else { return }
             conversationObservationGeneration &+= 1
             let authority = configAuthority

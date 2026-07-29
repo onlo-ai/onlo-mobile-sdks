@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.2
+
+- Acknowledged replies rendered in anonymous Messenger sessions so the server
+  can suppress their foreground push notifications.
+- Preserved the anonymous contract: no unread count or unread flags are exposed.
+- Kept the iOS public API and v1 protocol unchanged.
+
+## 0.3.1
+
+- Lockstep patch release; no iOS runtime or public API changes.
+
 ## 0.3.0
 
 - Fixed user-tapped notifications arriving during restoration so one bounded

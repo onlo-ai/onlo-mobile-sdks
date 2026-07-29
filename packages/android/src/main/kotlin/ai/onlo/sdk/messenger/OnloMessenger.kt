@@ -47,11 +47,13 @@ import android.text.InputType
 import android.text.TextWatcher
 import android.util.Base64
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowInsets
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -621,7 +623,19 @@ internal class MessengerDialog(
             inputType = InputType.TYPE_CLASS_TEXT or
                 InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or
                 InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            imeOptions = EditorInfo.IME_ACTION_SEND
             background = null
+            setOnEditorActionListener { _, actionId, event ->
+                val enterPressed = event?.keyCode == KeyEvent.KEYCODE_ENTER &&
+                    event.action == KeyEvent.ACTION_DOWN &&
+                    !event.isShiftPressed
+                if (actionId == EditorInfo.IME_ACTION_SEND || enterPressed) {
+                    enqueueComposer()
+                    true
+                } else {
+                    false
+                }
+            }
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(value: CharSequence?, start: Int, count: Int, after: Int) = Unit
                 override fun onTextChanged(value: CharSequence?, start: Int, before: Int, count: Int) {
@@ -710,10 +724,11 @@ internal class MessengerDialog(
         val bottom: Int
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val systemBars = insets.getInsets(WindowInsets.Type.systemBars())
+            val ime = insets.getInsets(WindowInsets.Type.ime())
             left = systemBars.left
             top = systemBars.top
             right = systemBars.right
-            bottom = systemBars.bottom
+            bottom = maxOf(systemBars.bottom, ime.bottom)
         } else {
             @Suppress("DEPRECATION")
             left = insets.systemWindowInsetLeft

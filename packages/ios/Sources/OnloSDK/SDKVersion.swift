@@ -2,5 +2,5 @@
 import Foundation
 
 enum OnloSDKVersion {
-    static let current = "0.3.0"
+    static let current = "0.3.2"
 }

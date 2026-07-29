@@ -1,6 +1,6 @@
 {
   "name": "@onlo-ai/react-native",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "license": "SEE LICENSE IN LICENSE",
   "description": "React Native bridge for the native Onlo mobile SDKs.",
   "homepage": "https://github.com/onlo-ai/onlo-mobile-sdks/tree/main/packages/react-native#readme",

@@ -18,31 +18,51 @@ class OnloFirebaseMessagingService : FirebaseMessagingService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onNewToken(token: String) {
-        if (!SupportNotificationPreference.isEnabled(this)) return
-        val client = (application as? MerchantApplication)?.onloClient ?: return
+        if (!SupportNotificationPreference.isEnabled(this)) {
+            OnloFcmDiagnostics.info("event=rotated_token_skipped reason=notifications_disabled")
+            return
+        }
+        val client = (application as? MerchantApplication)?.onloClient
+        if (client == null) {
+            OnloFcmDiagnostics.warn("event=rotated_token_skipped reason=client_unavailable")
+            return
+        }
+        OnloFcmDiagnostics.info("event=rotated_token_registration_started")
         serviceScope.launch {
             try {
-                client.registerPushToken(PushProvider.FCM, token)
-            } catch (_: Exception) {
-                // Token rotation is best effort; chat and Messenger remain live.
+                val outcome = client.registerPushToken(PushProvider.FCM, token)
+                OnloFcmDiagnostics.info("event=rotated_token_registration_completed outcome=${outcome.javaClass.simpleName}")
+            } catch (error: Exception) {
+                OnloFcmDiagnostics.warn("event=rotated_token_registration_failed errorClass=${error.javaClass.simpleName}")
             }
         }
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
         val payload = message.data
+        OnloFcmDiagnostics.info("event=message_received fieldCount=${payload.size}")
         if (payload.keys != ONLO_PAYLOAD_KEYS ||
             payload["notificationType"] != NOTIFICATION_TYPE
         ) {
+            OnloFcmDiagnostics.warn("event=message_rejected reason=payload_contract fieldCount=${payload.size}")
             return
         }
 
-        val conversationId = payload["conversationId"]?.takeIf(String::isNotBlank) ?: return
-        val messageId = payload["messageId"]?.takeIf(String::isNotBlank) ?: return
+        val conversationId = payload["conversationId"]?.takeIf(String::isNotBlank)
+        if (conversationId == null) {
+            OnloFcmDiagnostics.warn("event=message_rejected reason=conversation_id_missing")
+            return
+        }
+        val messageId = payload["messageId"]?.takeIf(String::isNotBlank)
+        if (messageId == null) {
+            OnloFcmDiagnostics.warn("event=message_rejected reason=message_id_missing")
+            return
+        }
         try {
             postNotification(conversationId, messageId)
-        } catch (_: RuntimeException) {
-            // OS notification failures must not terminate the host process.
+            OnloFcmDiagnostics.info("event=notification_posted")
+        } catch (error: RuntimeException) {
+            OnloFcmDiagnostics.warn("event=notification_post_failed errorClass=${error.javaClass.simpleName}")
         }
     }
 

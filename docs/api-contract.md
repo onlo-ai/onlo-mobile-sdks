@@ -189,14 +189,18 @@ type HelpCenterArticleResult = {
 `accepted` is durable-send acknowledgement. Duplicate acceptance requires transcript sync, never a new message ID. Stream events are only `{type:'ready'}`, `{type:'config_changed',revision}`, `{type:'inbox.conversation',conversationId}`, `{type:'inbox.message',conversationId}`; all require refetch. Widget-route failures are `{ error: string }` rather than v1 envelopes.
 
 For identified sessions, `totalUnreadCount` is the application badge and each
-conversation's `unreadCount` is its row badge. After a transcript has been
-successfully fetched and rendered, acknowledge the latest rendered message with
-`PUT /api/widget/conversations/:id/read` and
-`{throughMessageId}`. The response is a plain `ConversationReadResult`, not a v1
-envelope. Refetch the conversation list after acknowledgement and after either
-inbox stream hint. Anonymous sessions do not acknowledge reads or expose
-persistent unread badges. Logout and account switching clear local unread UI
-immediately.
+conversation's `unreadCount` is its row badge. After either an anonymous or
+identified installation has successfully fetched and rendered a transcript,
+acknowledge the latest rendered message with
+`PUT /api/widget/conversations/:id/read` and `{throughMessageId}`. This lets the
+server suppress a pending notification for a reply already visible to that
+customer.
+
+The response is a plain `ConversationReadResult`, not a v1 envelope. Refetch the
+conversation list after acknowledgement and after either inbox stream hint.
+Anonymous sessions still expose no persistent unread badges; their refetched
+counts are scrubbed by the native SDK. Logout and account switching clear local
+unread UI immediately.
 
 Operator-authored `content.faqs[].answer` values render directly and unchanged
 as FAQ content. Selecting an answered FAQ must not call `POST /api/widget/chat`,

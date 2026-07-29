@@ -215,7 +215,7 @@ correctly; it does not need a separate server implementation.
 | Mobile conversations appear as the separate `mobile` inbox channel | ✅ Verified | Local inbox and database journey |
 | Session and conversation responses follow the canonical v1 envelope | ✅ Verified | Successful local E2E exchange |
 | Dashboard appearance and shared behavior project into config with revision, ETag, and refetch hint | ✅ Server verified | Projection, conditional-fetch, and `config_changed` contract tests |
-| Identified read acknowledgement and cross-device unread convergence | ✅ Server verified | Contact-scoped unread calculation, monotonic acknowledgement, and refetch contract tests |
+| Installation read acknowledgement and cross-device unread convergence | ✅ Server verified | Anonymous/identified ownership checks, foreground-push suppression, contact-scoped unread calculation, monotonic acknowledgement, and refetch contract tests |
 | Anonymous and identified push registration with authorized notification routing | ✅ Server verified | Installation/conversation authorization, credential isolation, failure containment, routing, and provider-classifier tests; physical delivery remains a client/environment gate |
 | Production release state, target keys, and credential configuration | ⏳ Pending production setup | Environment-specific, not SDK-specific |
 
