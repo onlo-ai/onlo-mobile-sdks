@@ -683,7 +683,7 @@ public actor OnloSDK {
         for observer in messengerUpdateObservers.values { observer.yield(update) }
     }
 
-    private func withSerializedTranscriptObservation<Value>(
+    private func withSerializedTranscriptObservation<Value: Sendable>(
         ownerScope: OwnerScope,
         conversationId: String,
         operation: () async throws -> Value

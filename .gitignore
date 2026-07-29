@@ -68,6 +68,8 @@ Pods/
 *.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
 *.xcconfig
+!examples/flutter/ios/Flutter/Debug.xcconfig
+!examples/flutter/ios/Flutter/Release.xcconfig
 .xcode.env.local
 
 # Android / Gradle

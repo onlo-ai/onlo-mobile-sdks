@@ -1,9 +1,9 @@
 PODS:
   - Flutter (1.0.0)
-  - onlo_flutter (0.3.0):
+  - onlo_flutter (0.3.2):
     - Flutter
-    - OnloSDK (= 0.3.0)
-  - OnloSDK (0.3.0)
+    - OnloSDK (= 0.3.2)
+  - OnloSDK (0.3.2)
 
 DEPENDENCIES:
   - Flutter (from `Flutter`)
@@ -20,8 +20,8 @@ EXTERNAL SOURCES:
 
 SPEC CHECKSUMS:
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
-  onlo_flutter: 5cfde02f5771f112f55521e8b53d5a40a44f8115
-  OnloSDK: 7176d7410bf0f607775404067c4f94d7526028cc
+  onlo_flutter: a9d2300083dc43b3f50c31cbc668dd081e526385
+  OnloSDK: ffcfe08105fcb3d41f3db0d2168ab24f6e46fbda
 
 PODFILE CHECKSUM: d0859211387a3892796ef917a6f56275c21fb611
 

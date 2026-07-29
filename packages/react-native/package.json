@@ -63,6 +63,6 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "tsc src/index.ts src/NativeOnloSDK.ts src/react-native-codegen-shim.d.ts --target ES2022 --module commonjs --moduleResolution node --skipLibCheck --outDir /private/tmp/onlo-rn-facade-test && ONLO_FACADE_PATH=/private/tmp/onlo-rn-facade-test/index.js node --test test/*.test.mjs"
+    "test": "tsc src/index.ts src/NativeOnloSDK.ts src/react-native-codegen-shim.d.ts --target ES2022 --module commonjs --moduleResolution node --skipLibCheck --outDir /tmp/onlo-rn-facade-test && ONLO_FACADE_PATH=/tmp/onlo-rn-facade-test/index.js node --test test/*.test.mjs"
   }
 }
