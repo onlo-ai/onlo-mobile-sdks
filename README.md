@@ -11,7 +11,7 @@ Add Onlo’s ready-made support Messenger to an iOS, Android, React Native, or F
 | React Native | [React Native guide](packages/react-native/README.md) | [React Native example](examples/react-native/README.md) |
 | Flutter | [Flutter guide](packages/flutter/README.md) | [Flutter example](examples/flutter/README.md) |
 
-> **Release status:** version `0.3.2` is prepared in this repository, but the public packages are not published yet. Install only a version marked as available in **Onlo Dashboard → WebChat → Install → Mobile app**.
+> **Release status:** version `0.3.3` is prepared in this repository, but the public packages are not published yet. Install only a version marked as available in **Onlo Dashboard → WebChat → Install → Mobile app**.
 
 ## Prerequisites
 

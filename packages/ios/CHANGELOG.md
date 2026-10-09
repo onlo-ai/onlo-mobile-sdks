@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.3
+
+- Replaced an installation whose credential the server rejects during
+  restoration, identify replay, or logout, including transitions 0.3.2 had
+  already retained, instead of waiting in `reauthRequired` or `offlineReady`.
+- Coalesced overlapping session resumes and stopped a failed transition from
+  writing an older credential over a newer one.
+- Shared one `OnloSDK` core per process with the React Native and Flutter
+  bridges.
+- Refreshed an expired chat token once for `present(conversationId:)` and
+  Messenger transcript loads.
+- Kept the iOS public API and v1 protocol unchanged.
+
 ## 0.3.2
 
 - Acknowledged replies rendered in anonymous Messenger sessions so the server

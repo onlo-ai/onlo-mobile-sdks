@@ -35,6 +35,8 @@ type RetryDirective =
 | `after_backoff` | Wait `retryAfterMs` when supplied; otherwise use bounded exponential backoff with jitter. Retry only safe/idempotent work. |
 | `after_full_sync` | Reconcile the authorised transcript/session state, discard the stale local cursor, then retry only the dependent sync operation. |
 
+On `POST /api/sdk/v1/session`, `session_expired` or `session_revoked` answering a Resume, Identify, or Logout means the server will never accept that installation credential again, whatever the directive says. No new Operator JWT can satisfy it, so clients do not retain the transition: they retire the local owner and bootstrap a fresh anonymous installation, and an identified host restores identity with its next `loginIdentifiedUser`. A rejected Logout is complete once that replacement exists.
+
 `ErrorCode` values: `invalid_request`, `invalid_target_key`, `sdk_not_available`, `target_disabled`, `incompatible_client`, `proof_required`, `invalid_proof`, `expired_proof`, `identity_disabled`, `attestation_required`, `invalid_attestation`, `session_expired`, `session_revoked`, `forbidden_principal`, `stale_cursor`, `idempotency_conflict`, `config_unavailable`, `media_unavailable`, `rate_limited`, `dependency_unavailable`.
 
 ## Discovery and supported capabilities

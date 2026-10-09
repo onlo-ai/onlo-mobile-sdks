@@ -19,7 +19,7 @@ private final class DeferredOnloNotificationTap {
 /// a host app. Native/framework adapters may use `OnloSDK` directly when they
 /// need explicit instance ownership.
 public enum Onlo {
-    private static let sdk = OnloSDK()
+    private static let sdk = OnloSDK.shared
 
     #if canImport(UIKit)
     @MainActor

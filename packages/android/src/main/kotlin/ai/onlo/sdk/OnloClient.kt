@@ -8,6 +8,7 @@ import ai.onlo.sdk.protocol.ApiRetry
 import ai.onlo.sdk.protocol.ApiSuccess
 import ai.onlo.sdk.protocol.Capability
 import ai.onlo.sdk.protocol.ChatAttachment
+import ai.onlo.sdk.protocol.ErrorCode
 import ai.onlo.sdk.protocol.IdentityClass
 import ai.onlo.sdk.protocol.PROTOCOL_VERSION
 import ai.onlo.sdk.protocol.ProtocolViolation
@@ -342,7 +343,11 @@ public class OnloClient internal constructor(
         if (stored?.logoutPending == true) throw OnloException.LogoutInProgress
         pendingTransition?.let { pending ->
             if (pending is PendingSessionTransition.Identify) {
-                return@withLock identifyWithPending(stored ?: throw OnloException.PendingTransitionUnavailable, pending, userJwt)
+                return@withLock identifyReplacingRejectedInstallation(
+                    stored ?: throw OnloException.PendingTransitionUnavailable,
+                    pending,
+                    userJwt,
+                )
             }
             restoreOrBootstrapLocked(stored)
             stored = checkNotNull(protectedSession)
@@ -353,17 +358,35 @@ public class OnloClient internal constructor(
         }
         if (stored.identityClass == IdentityClass.IDENTIFIED) {
             if (logoutLocked(checkNotNull(stored)) !is LogoutOutcome.Completed) throw OnloException.LogoutInProgress
-            stored = checkNotNull(protectedSession)
+            // A logout that replaced a rejected installation can complete before its bootstrap does.
+            stored = protectedSession ?: throw OnloException.Unavailable
         }
+        return@withLock identifyReplacingRejectedInstallation(stored, newIdentify(stored), userJwt)
+    }
 
-        val pending = PendingSessionTransition.Identify(
-            installationId = stored.installationId,
-            transitionId = newUuid(),
-            expectedGeneration = stored.generation,
-            presentedCredential = stored.credential,
-            proposedCredential = newCredential(),
-        )
-        return@withLock identifyWithPending(stored, pending, userJwt)
+    private fun newIdentify(stored: ProtectedSession) = PendingSessionTransition.Identify(
+        installationId = stored.installationId,
+        transitionId = newUuid(),
+        expectedGeneration = stored.generation,
+        presentedCredential = stored.credential,
+        proposedCredential = newCredential(),
+    )
+
+    /**
+     * A rejected installation credential cannot be fixed by a fresh host JWT, so replaying the
+     * same Identify would fail forever. Replace the installation once and identify the new one.
+     */
+    private suspend fun identifyReplacingRejectedInstallation(
+        stored: ProtectedSession,
+        pending: PendingSessionTransition.Identify,
+        userJwt: String,
+    ): OnloState = try {
+        identifyWithPending(stored, pending, userJwt)
+    } catch (failure: OnloException.Server) {
+        if (!failure.rejectsInstallationCredential()) throw failure
+        replaceRejectedInstallationLocked(stored)
+        val replacement = checkNotNull(protectedSession)
+        identifyWithPending(replacement, newIdentify(replacement), userJwt)
     }
 
     /**
@@ -452,7 +475,10 @@ public class OnloClient internal constructor(
     }
 
     /** Refetches with current bearer authority before allowing a targeted native presentation. */
-    public suspend fun openConversation(conversationId: String): OpenConversationOutcome {
+    public suspend fun openConversation(conversationId: String): OpenConversationOutcome =
+        openConversation(conversationId, allowTokenRefresh = true)
+
+    private suspend fun openConversation(conversationId: String, allowTokenRefresh: Boolean): OpenConversationOutcome {
         if (conversationId.isBlank()) return OpenConversationOutcome.NotAuthorised
         val capture = operationMutex.withLock {
             val session = inMemorySession ?: return@withLock null
@@ -489,6 +515,14 @@ public class OnloClient internal constructor(
         } catch (failure: CancellationException) {
             currentCoroutineContext().ensureActive()
             OpenConversationOutcome.NoActiveSession
+        }
+        catch (failure: WidgetHttpFailure) {
+            // The 15-minute chat token routinely expires while the host app stays open.
+            if (allowTokenRefresh && failure.status == 401 && refreshMessengerBearer(capture)) {
+                openConversation(conversationId, allowTokenRefresh = false)
+            } else {
+                OpenConversationOutcome.Unavailable
+            }
         }
         catch (_: IOException) { OpenConversationOutcome.Unavailable }
         catch (_: ProtocolViolation) { OpenConversationOutcome.NotAuthorised }
@@ -565,7 +599,13 @@ public class OnloClient internal constructor(
     }
 
     /** SDK messenger-only transcript refresh. It never returns a result for a retired account. */
-    internal suspend fun loadMessengerTranscript(conversationId: String): MessengerTranscriptResult {
+    internal suspend fun loadMessengerTranscript(conversationId: String): MessengerTranscriptResult =
+        loadMessengerTranscript(conversationId, allowTokenRefresh = true)
+
+    private suspend fun loadMessengerTranscript(
+        conversationId: String,
+        allowTokenRefresh: Boolean,
+    ): MessengerTranscriptResult {
         if (conversationId.isBlank()) return MessengerTranscriptResult.NotAuthorised
         val capture = operationMutex.withLock {
             val session = inMemorySession ?: return@withLock null
@@ -595,7 +635,10 @@ public class OnloClient internal constructor(
         } catch (failure: CancellationException) {
             currentCoroutineContext().ensureActive()
             MessengerTranscriptResult.NoActiveSession
-        } catch (_: IOException) {
+        } catch (failure: IOException) {
+            if (allowTokenRefresh && failure is WidgetHttpFailure && failure.status == 401 && refreshMessengerBearer(capture)) {
+                return loadMessengerTranscript(conversationId, allowTokenRefresh = false)
+            }
             mutablePlatformConnected.value = false
             val cached = runCatching { convergence.cached(capture.session.ownerScope(), conversationId, capture.sessionId) }.getOrNull()
             operationMutex.withLock {
@@ -708,6 +751,9 @@ public class OnloClient internal constructor(
         stored: ProtectedSession,
         allowRetryablePending: Boolean = true,
     ): LogoutOutcome {
+        if (pendingTransition?.isUnreplayableCredentialRejection() == true) {
+            return logoutByReplacingRejectedInstallation(stored)
+        }
         val pending = when (val existing = pendingTransition) {
             null -> PendingSessionTransition.Logout(
                 installationId = stored.installationId,
@@ -754,11 +800,27 @@ public class OnloClient internal constructor(
             LogoutOutcome.Completed
         } catch (failure: Throwable) {
             if (failure is CancellationException) throw failure
+            if (failure.rejectsInstallationCredential()) return logoutByReplacingRejectedInstallation(blocked)
             val safeCode = failure.safeCodeOr("logout_pending")
             logger.log(SafeLogEvent(SafeLogCode.LOGOUT_PENDING, configuration.sdkVersion))
             mutableState.value = OnloState(OnloPhase.LOGOUT_PENDING, OnloIdentityState.UNKNOWN, safeCode)
             LogoutOutcome.Pending(safeCode)
         }
+    }
+
+    /**
+     * The server can no longer authenticate this installation, so it has no session left to end.
+     * Purging the owner and starting a fresh anonymous installation is the whole logout; a failed
+     * replacement bootstrap stays pending for lifecycle recovery like a first-launch bootstrap.
+     */
+    private suspend fun logoutByReplacingRejectedInstallation(stored: ProtectedSession): LogoutOutcome {
+        try {
+            replaceRejectedInstallationLocked(stored)
+        } catch (failure: Throwable) {
+            if (failure is CancellationException) throw failure
+            publishFailure(failure, phaseForCurrentScope())
+        }
+        return LogoutOutcome.Completed
     }
 
     /** Requests native messenger presentation; a Compose/View adapter observes this intent. */
@@ -1125,7 +1187,13 @@ public class OnloClient internal constructor(
             presentedCredential = stored.credential, proposedCredential = newCredential(),
         )
         persist(stored, resume)
-        val result = exchange(resume.toOperation(), resume.installationId)
+        val result = try {
+            exchange(resume.toOperation(), resume.installationId)
+        } catch (failure: OnloException.Server) {
+            if (!failure.rejectsInstallationCredential()) throw failure
+            logoutByReplacingRejectedInstallation(stored)
+            return
+        }
         if (result.identityClass != stored.identityClass) throw OnloException.InvalidProtocol
         val rotated = stored.copy(credential = result.proposedCredential, generation = result.generation, logoutPending = true)
         // The Resume is complete; the authoritative Logout below clears the
@@ -1161,13 +1229,23 @@ public class OnloClient internal constructor(
         if (pending is PendingSessionTransition.Identify || pending is PendingSessionTransition.Logout) {
             throw OnloException.PendingTransitionUnavailable
         }
+        if (pending.isUnreplayableCredentialRejection()) {
+            replaceRejectedInstallationLocked(stored, refreshConfigAfterSession)
+            return
+        }
         requirePendingMatchesStoredSession(pending, stored)
         if (!allowRetryablePending && pending.retryDirective != null) {
             throw OnloException.PendingTransitionUnavailable
         }
         requireRetryPrerequisite(pending, hostSuppliedJwt = false)
         persist(stored, pending)
-        val result = exchange(pending.toOperation(), pending.installationId)
+        val result = try {
+            exchange(pending.toOperation(), pending.installationId)
+        } catch (failure: OnloException.Server) {
+            if (stored == null || !failure.rejectsInstallationCredential()) throw failure
+            replaceRejectedInstallationLocked(stored, refreshConfigAfterSession)
+            return
+        }
         val ownerScopeId = when {
             stored == null -> newOpaqueOwnerScopeId()
             stored.identityClass == result.identityClass -> stored.ownerScopeId
@@ -2153,6 +2231,50 @@ public class OnloClient internal constructor(
             throw OnloException.PendingTransitionUnavailable
         }
     }
+
+    /**
+     * The server no longer accepts this installation credential, so no replay of it can succeed.
+     * Fence and purge its owner like any account boundary, forget the installation, and bootstrap
+     * a fresh anonymous one: the state a reinstall produces, without the reinstall. An identified
+     * customer is restored by the host's next `loginIdentifiedUser`.
+     */
+    private suspend fun replaceRejectedInstallationLocked(
+        rejected: ProtectedSession?,
+        refreshConfigAfterSession: Boolean = true,
+    ) {
+        logger.log(SafeLogEvent(SafeLogCode.INSTALLATION_REPLACED, configuration.sdkVersion))
+        mutablePresentation.value = MessengerPresentationIntent.HIDDEN
+        mutablePresentationTarget.value = MessengerPresentationTarget.Inbox
+        mutableUnreadCount.value = null
+        mutablePlatformConnected.value = false
+        identifiedFirstName = null
+        pushRegistry?.activateAuthority(null)
+        invalidateConfigSession()
+        inMemorySession = null
+        rejected?.let { outboxStore.blockAndPurgeOwner(it.ownerScope()) }
+        persist(null, null)
+        if (rejected != null) {
+            try {
+                pushRegistry?.discardOwner(rejected.ownerScope().storageKey())
+            } catch (_: Throwable) {
+                // Local push cleanup is best effort; the server never accepts this installation again.
+            }
+        }
+        restoreOrBootstrapLocked(null, refreshConfigAfterSession = refreshConfigAfterSession)
+    }
+
+    /** `session_expired`/`session_revoked` answer an exchange that presented the installation credential. */
+    private fun Throwable.rejectsInstallationCredential(): Boolean =
+        this is OnloException.Server &&
+            (code == ErrorCode.SESSION_EXPIRED.wireValue || code == ErrorCode.SESSION_REVOKED.wireValue)
+
+    /**
+     * SDK 0.3.2 and earlier kept a rejected Resume/Logout/Bootstrap behind `after_token_refresh`,
+     * which only an Identify can satisfy, so the device could never leave it. Outside Identify the
+     * server sends that directive only as `session_expired`.
+     */
+    private fun PendingSessionTransition.isUnreplayableCredentialRejection(): Boolean =
+        this !is PendingSessionTransition.Identify && retryDirective == RetryDirective.AFTER_TOKEN_REFRESH
 
     /** A decoded envelope is definitive; only contract-authorised session retries are retained. */
     private suspend fun resolveDefinitiveFailure(operation: SessionOperation, retry: ApiRetry) {

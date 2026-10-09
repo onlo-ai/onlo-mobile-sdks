@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.3
+
+- Replaced an installation whose credential the server rejects instead of
+  leaving Resume, Identify, or Logout permanently unavailable, including
+  transitions 0.3.2 had already retained.
+- Refreshed an expired chat token once for `openConversation` and Messenger
+  transcript loads.
+- Logged background SDK failures instead of letting them crash the host app.
+- Kept the Android core API and v1 protocol unchanged.
+
 ## 0.3.2
 
 - Acknowledged replies rendered in anonymous Messenger sessions so the server

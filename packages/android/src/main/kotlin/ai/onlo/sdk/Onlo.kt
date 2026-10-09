@@ -1,6 +1,8 @@
 package ai.onlo.sdk
 
 import ai.onlo.sdk.logging.AndroidSafeLogger
+import ai.onlo.sdk.logging.SafeLogCode
+import ai.onlo.sdk.logging.SafeLogEvent
 import ai.onlo.sdk.security.KeystoreCredentialStore
 import ai.onlo.sdk.config.KeystoreConfigStore
 import ai.onlo.sdk.config.MobileConfigController
@@ -16,6 +18,7 @@ import ai.onlo.sdk.transport.OnloPushApi
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -108,7 +111,19 @@ public object Onlo {
         )
         val transport = OkHttpOnloTransport()
         val requests = ProtocolRequestFactory(origin)
-        val sdkScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val logger = AndroidSafeLogger()
+        // Lifecycle, refresh, and reconciliation work runs in this scope. Each operation publishes
+        // its own session state; an escaped failure must be logged, never crash the host app.
+        val backgroundFailures = CoroutineExceptionHandler { _, failure ->
+            logger.log(
+                SafeLogEvent(
+                    SafeLogCode.BACKGROUND_TASK_FAILED,
+                    configuration.sdkVersion,
+                    detailCode = (failure as? OnloException)?.safeCode ?: failure.javaClass.simpleName,
+                ),
+            )
+        }
+        val sdkScope = CoroutineScope(SupervisorJob() + Dispatchers.IO + backgroundFailures)
         OnloClient(
             configuration = configuration,
             credentialStore = KeystoreCredentialStore(context),
@@ -118,7 +133,7 @@ public object Onlo {
             widgetChatApi = WidgetChatApi(transport, requests),
             foregroundStream = ForegroundStream(transport, requests),
             pushRegistry = PushRegistry(KeystorePushTokenStore(context), OnloPushApi(transport, requests)),
-            logger = AndroidSafeLogger(),
+            logger = logger,
             scope = sdkScope,
             attachmentCacheDir = context.cacheDir,
         ).also {

@@ -18,6 +18,8 @@ internal enum class SafeLogCode {
     SESSION_EXCHANGE_SUCCEEDED,
     SESSION_EXCHANGE_FAILED,
     CREDENTIAL_INVALIDATED,
+    INSTALLATION_REPLACED,
+    BACKGROUND_TASK_FAILED,
     PROTOCOL_REJECTED,
     LOGOUT_PENDING,
 }
@@ -64,6 +66,8 @@ internal fun SafeLogEvent.requiredLevel(): OnloLogLevel = when (code) {
     SafeLogCode.SESSION_EXCHANGE_SUCCEEDED -> OnloLogLevel.INFO
     SafeLogCode.SESSION_EXCHANGE_FAILED,
     SafeLogCode.CREDENTIAL_INVALIDATED,
+    SafeLogCode.INSTALLATION_REPLACED,
+    SafeLogCode.BACKGROUND_TASK_FAILED,
     SafeLogCode.PROTOCOL_REJECTED,
     SafeLogCode.LOGOUT_PENDING -> OnloLogLevel.ERROR
 }
