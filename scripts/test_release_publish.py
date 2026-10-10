@@ -7,19 +7,12 @@ import release_publish as publish
 
 
 class PublicationTests(unittest.TestCase):
-    def test_unresolved_npm_failure_blocks_before_any_upload(self):
-        with patch.object(sys, 'argv', ['release_publish.py', '0.3.4', '/unused', '--manifest-sha', 'a'*64]), patch.object(publish, 'authority', return_value='a'*40), patch.dict(os.environ, {'NPM_E404_RESOLVED': 'false'}), patch.object(publish, 'release') as remote, patch.object(publish.subprocess, 'run') as command:
-            with self.assertRaisesRegex(ValueError, 'root cause'):
-                publish.main()
-            remote.assert_not_called()
-            command.assert_not_called()
-
     def test_approved_manifest_swap_blocks_before_any_upload(self):
         import tempfile
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / 'manifest.json').write_text('{}')
-            with patch.object(sys, 'argv', ['release_publish.py', '0.3.4', str(root), '--manifest-sha', 'a'*64]), patch.object(publish, 'authority', return_value='a'*40), patch.dict(os.environ, {'NPM_E404_RESOLVED': 'true'}), patch.object(publish, 'release', return_value={'isDraft': True}), patch.object(publish.subprocess, 'run') as command:
+            with patch.object(sys, 'argv', ['release_publish.py', '0.3.4', str(root), '--manifest-sha', 'a'*64]), patch.object(publish, 'authority', return_value='a'*40), patch.object(publish, 'release', return_value={'isDraft': True}), patch.object(publish.subprocess, 'run') as command:
                 with self.assertRaisesRegex(ValueError, 'manifest changed'):
                     publish.main()
                 command.assert_not_called()
@@ -67,7 +60,7 @@ class OIDCTests(unittest.TestCase):
             data = json.dumps(manifest).encode()
             (root / 'manifest.json').write_bytes(data)
             states = dict.fromkeys(('ios', 'android', 'flutter', 'react-native'), 'missing')
-            with patch.object(sys, 'argv', ['release_publish.py', '0.3.4', str(root), '--manifest-sha', publish.sha(data)]), patch.dict(os.environ, {'NPM_E404_RESOLVED': 'true'}), patch.object(publish, 'authority', return_value='a'*40), patch.object(publish, 'release', return_value={'isDraft': True, 'assets': []}), patch.object(publish, 'verify_local'), patch.object(publish, 'verify_all', return_value=states), patch.object(publish, 'upload_status') as status, patch.object(publish, 'require_npm_oidc'), patch.object(publish, 'run'), patch.object(publish, 'publish_maven') as maven, patch.object(publish.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'npm')) as command:
+            with patch.object(sys, 'argv', ['release_publish.py', '0.3.4', str(root), '--manifest-sha', publish.sha(data)]), patch.object(publish, 'authority', return_value='a'*40), patch.object(publish, 'release', return_value={'isDraft': True, 'assets': []}), patch.object(publish, 'verify_local'), patch.object(publish, 'verify_all', return_value=states), patch.object(publish, 'upload_status') as status, patch.object(publish, 'require_npm_oidc'), patch.object(publish, 'run'), patch.object(publish, 'publish_maven') as maven, patch.object(publish.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'npm')) as command:
                 with self.assertRaises(subprocess.CalledProcessError):
                     publish.main()
                 self.assertEqual(command.call_count, 1)

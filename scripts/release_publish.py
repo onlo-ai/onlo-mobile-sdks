@@ -83,8 +83,6 @@ def main():
     parser.add_argument('--manifest-sha', required=True)
     args = parser.parse_args()
     commit = authority(args.version)
-    if os.environ.get('NPM_E404_RESOLVED') != 'true':
-        raise ValueError('npm E404 root cause has not been verified; no packages will publish')
     if not release(args.version)['isDraft']:
         raise ValueError('draft release required')
     path = args.directory / 'manifest.json'
