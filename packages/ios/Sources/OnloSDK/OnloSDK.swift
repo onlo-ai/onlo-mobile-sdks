@@ -195,6 +195,20 @@ public actor OnloSDK {
     private var pushRetryTask: Task<Void, Never>?
     private var pushReconciliationID: UUID?
     private var pushReconciliationWakeRequested = false
+    private var pushBearerGateRevision: UInt64 = 0
+    private var pushRejectedBearerContext: UUID?
+
+    private struct PushRecoveryScope: Equatable, Sendable {
+        let registrationRevision: UInt64
+        let gateRevision: UInt64
+        let bearerContext: UUID
+    }
+
+    private var pushRecoveryScope: PushRecoveryScope {
+        PushRecoveryScope(registrationRevision: pushRegistrationRevision,
+                          gateRevision: pushBearerGateRevision,
+                          bearerContext: configAuthority)
+    }
     private var pushRegistrationRevision: UInt64 = 0
     private struct PendingAPNsRegistration: Sendable {
         let token: Data
@@ -1795,8 +1809,11 @@ public actor OnloSDK {
            existing.ownerScope == session.credential.ownerScope,
            existing.action == .register,
            existing.token == value,
-           existing.isRegistered {
-            return .registered
+           existing.notificationPreference == registration.notificationPreference,
+           existing.locale == registration.locale {
+            if existing.isRegistered { return .registered }
+            // Re-registering the same token cannot erase a persisted prerequisite.
+            return try await reconcilePushIntent()
         }
         let intent = ProtectedPushIntent(
             ownerScope: session.credential.ownerScope,
@@ -2011,6 +2028,12 @@ public actor OnloSDK {
                 case .afterTokenRefresh:
                     // Persist the prerequisite without touching session state.
                     // The next normal session success supplies the new bearer.
+                    // A callback scheduled before this rejection cannot supply
+                    // a fresh bearer, even if it executes after persistence.
+                    guard let current = runtimeSession,
+                          persistenceAuthority(for: current, bearerContext: configAuthority) == persistence else { return .pendingRetry }
+                    pushBearerGateRevision &+= 1
+                    pushRejectedBearerContext = bearerAuthority
                     let gated = copiedPushIntent(intent, retryDirective: .afterTokenRefresh, requiresFreshBearer: true)
                     guard let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring,
                           try await pushStore.save(gated, replacing: intent, authority: persistence) else { return .pendingRetry }
@@ -2102,36 +2125,35 @@ public actor OnloSDK {
     }
 
     private func schedulePushReconciliationAfterSessionSuccess() {
-        let expectedRegistrationRevision = pushRegistrationRevision
+        let expected = pushRecoveryScope
         Task { [weak self] in
-            await self?.reconcilePushAfterSessionSuccess(
-                expectedRegistrationRevision: expectedRegistrationRevision
-            )
+            await self?.reconcilePushAfterSessionSuccess(expected: expected)
         }
     }
 
-    private func reconcilePushAfterSessionSuccess(
-        expectedRegistrationRevision: UInt64
-    ) async {
-        await consumePushFreshBearerGateAfterSessionSuccess()
-        guard expectedRegistrationRevision == pushRegistrationRevision else { return }
-        _ = try? await reconcilePushIntent(
-            expectedRegistrationRevision: expectedRegistrationRevision
-        )
-        guard expectedRegistrationRevision == pushRegistrationRevision else { return }
+    private func reconcilePushAfterSessionSuccess(expected: PushRecoveryScope) async {
+        guard expected == pushRecoveryScope else { return }
+        await consumePushFreshBearerGateAfterSessionSuccess(expected: expected)
+        guard expected == pushRecoveryScope else { return }
+        _ = try? await reconcilePushIntent(expectedRegistrationRevision: expected.registrationRevision)
+        guard expected == pushRecoveryScope else { return }
         await registerPendingAPNsAfterSessionReady()
     }
 
-    private func consumePushFreshBearerGateAfterSessionSuccess() async {
-        guard let session = runtimeSession,
+    private func consumePushFreshBearerGateAfterSessionSuccess(expected: PushRecoveryScope) async {
+        guard expected == pushRecoveryScope,
+              pushRejectedBearerContext != expected.bearerContext,
+              let session = runtimeSession,
               state == .anonymousReady || state == .identifiedReady else { return }
         do {
             guard let intent = try await pushIntentStore.load(),
+                  expected == pushRecoveryScope,
                   intent.ownerScope == session.credential.ownerScope,
                   intent.requiresFreshBearer,
                   let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring else { return }
-            let authority = persistenceAuthority(for: session, bearerContext: configAuthority)
-            await pushStore.activateAuthority(authority)
+            // Session establishment already activated this authority. A delayed
+            // callback must never reactivate an obsolete owner/bearer.
+            let authority = persistenceAuthority(for: session, bearerContext: expected.bearerContext)
             _ = try await pushStore.save(
                 copiedPushIntent(intent, retryDirective: nil, requiresFreshBearer: false),
                 replacing: intent,

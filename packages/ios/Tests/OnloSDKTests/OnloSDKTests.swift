@@ -2073,6 +2073,51 @@ final class OnloSDKTests: XCTestCase {
         XCTAssertTrue(pending.automaticallyRetryable)
     }
 
+    func testLateSessionPushCallbackCannotClearNewTokenRefreshGate() async throws {
+        let transport = PushRecoveryTransport(
+            sessions: [
+                sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-1", credential: "credential-1"),
+                sessionResponse(identityClass: "identified", generation: 2, sessionId: "session-2", credential: "credential-2"),
+                sessionResponse(identityClass: "identified", generation: 3, sessionId: "session-3", credential: "credential-3")
+            ],
+            configuration: mobileConfigResponse(),
+            rejection: sessionFailure(code: "session_expired", directive: "after_token_refresh"),
+            pushSuccess: pushResponse()
+        )
+        let unexpectedClear = expectation(description: "old callback must not clear the new bearer prerequisite")
+        unexpectedClear.isInverted = true
+        let push = SuspendedPushCallbackStore(onGateCleared: { unexpectedClear.fulfill() })
+        let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), configStore: InMemoryConfigStore(), pushIntentStore: push, ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host", lifecycleBindingEnabled: false)
+        _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        _ = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
+        let blocked = await waitUntil { await push.isBlocked() }
+        XCTAssertTrue(blocked, "session callback must be suspended before token registration")
+        let registration = try await sdk.setAPNsPushToken(Data(repeating: 0xAB, count: 32))
+        XCTAssertEqual(registration, .pendingRetry)
+        let before = try await push.load()
+        XCTAssertEqual(before?.retryDirective, .afterTokenRefresh)
+        XCTAssertEqual(before?.requiresFreshBearer, true)
+        await push.releaseLoad()
+        await fulfillment(of: [unexpectedClear], timeout: 0.3)
+        let after = try await push.load()
+        XCTAssertEqual(after?.retryDirective, .afterTokenRefresh)
+        XCTAssertEqual(after?.requiresFreshBearer, true)
+        try await sdk.refreshConfigurationForForeground()
+        let duplicate = try await sdk.setAPNsPushToken(Data(repeating: 0xAB, count: 32))
+        XCTAssertEqual(duplicate, .pendingRetry)
+        let stillGated = try await push.load()
+        XCTAssertEqual(stillGated?.requiresFreshBearer, true)
+        let paths = await transport.requests().compactMap { $0.url?.path }
+        XCTAssertEqual(paths.filter { $0 == "/api/sdk/v1/session" }.count, 2)
+        XCTAssertEqual(paths.filter { $0 == "/api/sdk/v1/push-token" }.count, 1)
+        try await sdk.refreshConfigurationForForeground()
+        let registered = await waitUntil { (try? await push.load())?.isRegistered == true }
+        XCTAssertTrue(registered, "a genuinely fresh same-owner bearer must recover push")
+        let finalPaths = await transport.requests().compactMap { $0.url?.path }
+        XCTAssertEqual(finalPaths.filter { $0 == "/api/sdk/v1/session" }.count, 3)
+        XCTAssertEqual(finalPaths.filter { $0 == "/api/sdk/v1/push-token" }.count, 2)
+    }
+
     func testGatedPushIntentDoesNotPreventSessionLogoutRecovery() async throws {
         let owner = OwnerScope(kind: .anonymous)
         let credential = StoredSessionCredential(installationId: "installation-1", generation: 1, proposedCredential: "credential-1", identityClass: .anonymous, ownerScope: owner, logoutPending: true)
@@ -3847,4 +3892,79 @@ private final class TestClock: @unchecked Sendable {
     init(_ date: Date) { self.date = date }
     func now() -> Date { lock.withLock { date } }
     func advance(by milliseconds: Int) { lock.withLock { date = date.addingTimeInterval(Double(milliseconds) / 1_000) } }
+}
+
+/// Hold the old session-success callback until a newer push rejection persists.
+private actor SuspendedPushCallbackStore: PushIntentStoring, AuthorityFencedPushIntentStoring {
+    private let base = InMemoryPushIntentStore()
+    private let onGateCleared: @Sendable () -> Void
+    private var generation = 0
+    private var held: CheckedContinuation<Void, Never>?
+    private var blockOnce = true
+    private var reportedGateClear = false
+    init(onGateCleared: @escaping @Sendable () -> Void) { self.onGateCleared = onGateCleared }
+    func isBlocked() -> Bool { held != nil }
+    func releaseLoad() { held?.resume(); held = nil }
+    func load() async throws -> ProtectedPushIntent? {
+        if generation == 2 && blockOnce {
+            blockOnce = false
+            await withCheckedContinuation { held = $0 }
+        }
+        return try await base.load()
+    }
+    func save(_ intent: ProtectedPushIntent) async throws { try await base.save(intent) }
+    func clear() async throws { try await base.clear() }
+    func activateAuthority(_ authority: PersistenceAuthority) async {
+        generation = authority.sessionGeneration
+        await base.activateAuthority(authority)
+    }
+    func revokeAuthority(for scope: OwnerScope) async { await base.revokeAuthority(for: scope) }
+    func save(_ intent: ProtectedPushIntent, authority: PersistenceAuthority) async throws -> Bool {
+        try await base.save(intent, authority: authority)
+    }
+    func save(_ intent: ProtectedPushIntent, replacing expected: ProtectedPushIntent, authority: PersistenceAuthority) async throws -> Bool {
+        let saved = try await base.save(intent, replacing: expected, authority: authority)
+        if saved && generation == 2 && expected.requiresFreshBearer && !intent.requiresFreshBearer && !reportedGateClear {
+            reportedGateClear = true
+            onGateCleared()
+        }
+        return saved
+    }
+    func clear(authority: PersistenceAuthority) async throws -> Bool { try await base.clear(authority: authority) }
+    func clear(replacing expected: ProtectedPushIntent, authority: PersistenceAuthority) async throws -> Bool {
+        try await base.clear(replacing: expected, authority: authority)
+    }
+}
+
+/// Route concurrent config/push work independently; ordering across endpoints is not a contract.
+private actor PushRecoveryTransport: OnloHTTPTransport {
+    private var sessions: [OnloHTTPResponse]
+    private let configuration: OnloHTTPResponse
+    private let rejection: OnloHTTPResponse
+    private let pushSuccess: OnloHTTPResponse
+    private var captured: [URLRequest] = []
+    private var configCount = 0
+    private var pushCount = 0
+    init(sessions: [OnloHTTPResponse], configuration: OnloHTTPResponse, rejection: OnloHTTPResponse, pushSuccess: OnloHTTPResponse) {
+        self.sessions = sessions; self.configuration = configuration
+        self.rejection = rejection; self.pushSuccess = pushSuccess
+    }
+    func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
+        captured.append(request)
+        switch request.url?.path {
+        case "/api/sdk/v1/session":
+            guard !sessions.isEmpty else { throw OnloError.transport(code: "unexpected_session") }
+            return sessionResponseMatchingRequest(sessions.removeFirst(), request: request)
+        case "/api/sdk/v1/config":
+            configCount += 1
+            return configCount == 4 ? rejection : configuration
+        case "/api/sdk/v1/push-token":
+            pushCount += 1
+            guard pushCount <= 2 else { throw OnloError.transport(code: "unexpected_push_retry") }
+            return pushCount == 1 ? rejection : pushSuccess
+        case "/api/widget/conversations": return emptyInboxResponse()
+        default: throw OnloError.transport(code: "unexpected_request")
+        }
+    }
+    func requests() -> [URLRequest] { captured }
 }

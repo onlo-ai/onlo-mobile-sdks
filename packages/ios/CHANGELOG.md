@@ -2,6 +2,8 @@
 
 ## 0.3.4
 
+- iOS: fence delayed push callbacks; retain refresh gates until a fresh bearer, including repeated token registration.
+
 - Fence targeted recovery to the original owner; retain terminal non-401 behavior and one retry.
 - Add safe native diagnostics without changing bridge error payloads.
 - Fence late iOS refresh success/failure across logout and serialize protected writes.
