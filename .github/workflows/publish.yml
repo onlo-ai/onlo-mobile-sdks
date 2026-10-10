@@ -122,8 +122,9 @@ jobs:
         run: python3 scripts/release_control.py restore "$VERSION" --directory "$RUNNER_TEMP/approved"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: '22'
-          registry-url: https://registry.npmjs.org
+          node-version: '24'
+      - name: Install pinned npm with trusted publishing support
+        run: npm install --global npm@12.2.0 --ignore-scripts --registry=https://registry.npmjs.org/
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
         with:
           flutter-version: '3.44.2'
@@ -134,8 +135,6 @@ jobs:
         run: command -v gpg >/dev/null || brew install gnupg
       - name: Publish missing packages and verify actual registry bytes
         env:
-          NPM_E404_RESOLVED: ${{ vars.NPM_E404_RESOLVED }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
           MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
