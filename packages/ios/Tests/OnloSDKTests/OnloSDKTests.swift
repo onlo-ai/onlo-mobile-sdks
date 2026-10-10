@@ -322,7 +322,7 @@ final class OnloSDKTests: XCTestCase {
         try XCTAssertEqualSessionRequestBodies(sessionRequests[0], sessionRequests[1])
     }
 
-    func testAnonymousLoginReplacesExpiredInstallationAndFencesOldOwner() async throws {
+    func testRejectedResumeReplacesInstallationAndFencesOldOwner() async throws {
         let oldScope = OwnerScope(kind: .anonymous)
         let oldCredential = StoredSessionCredential(
             installationId: "installation-expired",
@@ -351,8 +351,9 @@ final class OnloSDKTests: XCTestCase {
             apiBaseURL: URL(string: "https://sdk.example.test")!
         )
 
+        // A rejected credential is replaced during restoration instead of waiting for a login call.
         let initializedState = try await sdk.initialize(configuration)
-        XCTAssertEqual(initializedState, .reauthRequired)
+        XCTAssertEqual(initializedState, .anonymousReady)
         let loginState = try await sdk.loginUnidentifiedUser()
         XCTAssertEqual(loginState, .anonymousReady)
 
@@ -379,7 +380,7 @@ final class OnloSDKTests: XCTestCase {
         XCTAssertEqual(operations, ["resume", "bootstrap"])
     }
 
-    func testIdentifiedLoginReplacesExpiredInstallationBeforeIdentify() async throws {
+    func testIdentifiedLoginIdentifiesInstallationThatReplacedRejectedCredential() async throws {
         let oldScope = OwnerScope(kind: .identified)
         let oldCredential = StoredSessionCredential(
             installationId: "installation-expired",
@@ -410,7 +411,7 @@ final class OnloSDKTests: XCTestCase {
         )
 
         let initializedState = try await sdk.initialize(configuration)
-        XCTAssertEqual(initializedState, .reauthRequired)
+        XCTAssertEqual(initializedState, .anonymousReady)
         let loginState = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
         XCTAssertEqual(loginState, .identifiedReady)
 
@@ -436,6 +437,199 @@ final class OnloSDKTests: XCTestCase {
             }
         }
         XCTAssertEqual(operations, ["resume", "bootstrap", "identify"])
+    }
+
+    private var rejectionTestConfiguration: OnloSDK.Configuration {
+        OnloSDK.Configuration(
+            sdkKey: "public-key",
+            appIdentifier: "com.example.host",
+            apiBaseURL: URL(string: "https://sdk.example.test")!
+        )
+    }
+
+    private func rejectionTestSDK(credentials: InMemoryCredentialStore, transport: any OnloHTTPTransport) -> OnloSDK {
+        OnloSDK(
+            credentialStore: credentials,
+            configStore: InMemoryConfigStore(),
+            pushIntentStore: InMemoryPushIntentStore(),
+            ownerStore: InMemoryOwnerScopedStore(),
+            transport: transport,
+            hostAppIdentifier: "com.example.host"
+        )
+    }
+
+    func testInitializeReplacesInstallationLeftBehindRejectedCredentialGate() async throws {
+        let rejected = StoredSessionCredential(
+            installationId: "installation-rejected",
+            generation: 5,
+            proposedCredential: "credential-rejected",
+            identityClass: .identified,
+            ownerScope: OwnerScope(kind: .identified)
+        )
+        let credentials = InMemoryCredentialStore()
+        // The protected record SDK 0.3.2 kept after `session_expired` on Resume: no call could replay it.
+        try await credentials.saveState(ProtectedSessionState(
+            credential: rejected,
+            pendingTransition: .resume(
+                transitionId: "resume-rejected",
+                installationId: "installation-rejected",
+                expectedGeneration: 5,
+                presentedCredential: "credential-rejected",
+                proposedCredential: "credential-never-accepted"
+            ),
+            retryGate: .afterTokenRefresh
+        ))
+        let transport = ScriptedSessionTransport(steps: [
+            .success(sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-fresh", credential: "credential-fresh")),
+        ])
+        let sdk = rejectionTestSDK(credentials: credentials, transport: transport)
+
+        let state = try await sdk.initialize(rejectionTestConfiguration)
+
+        XCTAssertEqual(state, .anonymousReady)
+        let protectedState = try await credentials.loadState()
+        let replacement = try XCTUnwrap(protectedState.credential)
+        XCTAssertEqual(replacement.identityClass, .anonymous)
+        XCTAssertNotEqual(replacement.installationId, rejected.installationId)
+        XCTAssertNil(protectedState.pendingTransition)
+        XCTAssertNil(protectedState.retryGate)
+        let sessionRequests = await transport.requests()
+        XCTAssertEqual(sessionOperations(sessionRequests), ["bootstrap"])
+    }
+
+    func testRejectedIdentifyReplayIdentifiesReplacementInstallationWithSameJWT() async throws {
+        let anonymous = StoredSessionCredential(
+            installationId: "installation-1",
+            generation: 2,
+            proposedCredential: "credential-anonymous",
+            identityClass: .anonymous,
+            ownerScope: OwnerScope(kind: .anonymous)
+        )
+        let credentials = InMemoryCredentialStore()
+        try await credentials.saveState(ProtectedSessionState(
+            credential: anonymous,
+            pendingTransition: .identify(
+                transitionId: "identify-lost",
+                installationId: "installation-1",
+                expectedGeneration: 2,
+                presentedCredential: "credential-anonymous",
+                proposedCredential: "credential-identified-lost"
+            ),
+            retryGate: .afterTokenRefresh
+        ))
+        let transport = ScriptedSessionTransport(steps: [
+            .success(sessionFailure(code: "session_expired", directive: "after_token_refresh")),
+            .success(sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-anonymous", credential: "credential-fresh")),
+            .success(sessionResponse(identityClass: "identified", generation: 2, sessionId: "session-identified", credential: "credential-identified")),
+        ])
+        let sdk = rejectionTestSDK(credentials: credentials, transport: transport)
+        let initializedState = try await sdk.initialize(rejectionTestConfiguration)
+        XCTAssertEqual(initializedState, .reauthRequired)
+
+        let state = try await sdk.loginIdentifiedUser(userJwt: "header.payload.signature")
+
+        XCTAssertEqual(state, .identifiedReady)
+        let protectedState = try await credentials.loadState()
+        let identified = try XCTUnwrap(protectedState.credential)
+        XCTAssertEqual(identified.identityClass, .identified)
+        XCTAssertNotEqual(identified.installationId, anonymous.installationId)
+        XCTAssertNil(protectedState.pendingTransition)
+        let sessionRequests = await transport.requests()
+        XCTAssertEqual(sessionOperations(sessionRequests), ["identify", "bootstrap", "identify"])
+    }
+
+    func testRejectedLogoutCompletesByReplacingInstallation() async throws {
+        let identified = StoredSessionCredential(
+            installationId: "installation-1",
+            generation: 3,
+            proposedCredential: "credential-identified",
+            identityClass: .identified,
+            ownerScope: OwnerScope(kind: .identified)
+        )
+        let credentials = InMemoryCredentialStore(identified)
+        let transport = ScriptedSessionTransport(steps: [
+            .success(sessionResponse(identityClass: "identified", generation: 3, sessionId: "session-identified", credential: "credential-rotated")),
+            .success(sessionFailure(code: "session_revoked", directive: "never")),
+            .success(sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-anonymous", credential: "credential-fresh")),
+        ])
+        let sdk = rejectionTestSDK(credentials: credentials, transport: transport)
+        let initializedState = try await sdk.initialize(rejectionTestConfiguration)
+        XCTAssertEqual(initializedState, .identifiedReady)
+
+        let state = try await sdk.logout()
+
+        XCTAssertEqual(state, .anonymousReady)
+        let protectedState = try await credentials.loadState()
+        let replacement = try XCTUnwrap(protectedState.credential)
+        XCTAssertEqual(replacement.identityClass, .anonymous)
+        XCTAssertFalse(replacement.logoutPending)
+        XCTAssertNotEqual(replacement.installationId, identified.installationId)
+        let sessionRequests = await transport.requests()
+        XCTAssertEqual(sessionOperations(sessionRequests), ["resume", "logout", "bootstrap"])
+    }
+
+    func testOverlappingRecoveryCallsShareOneResume() async throws {
+        let stored = StoredSessionCredential(
+            installationId: "installation-1",
+            generation: 3,
+            proposedCredential: "credential-current",
+            identityClass: .anonymous,
+            ownerScope: OwnerScope(kind: .anonymous)
+        )
+        let credentials = InMemoryCredentialStore(stored, pendingTransition: .resume(
+            transitionId: "resume-1",
+            installationId: "installation-1",
+            expectedGeneration: 3,
+            presentedCredential: "credential-current",
+            proposedCredential: "credential-next"
+        ))
+        let transport = GatedSessionTransport(
+            response: sessionResponse(identityClass: "anonymous", generation: 3, sessionId: "session-1", credential: "credential-next")
+        )
+        let sdk = rejectionTestSDK(credentials: credentials, transport: transport)
+        let initializedState = try await sdk.initialize(rejectionTestConfiguration)
+        XCTAssertEqual(initializedState, .offlineReady)
+
+        let first = Task { try await sdk.loginUnidentifiedUser() }
+        let firstInFlight = await waitUntil { await transport.sessionRequestCount == 1 }
+        XCTAssertTrue(firstInFlight)
+        let second = Task { try await sdk.loginUnidentifiedUser() }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await transport.open()
+
+        let firstState = try await first.value
+        let secondState = try await second.value
+        XCTAssertEqual(firstState, .anonymousReady)
+        XCTAssertEqual(secondState, .anonymousReady)
+        // A second rotation of the same credential would be rejected and used to wedge the SDK.
+        let sessionRequests = await transport.sessionRequestCount
+        XCTAssertEqual(sessionRequests, 1)
+    }
+
+    func testOpenConversationRefreshesExpiredChatTokenOnce() async throws {
+        let stored = StoredSessionCredential(
+            installationId: "installation-1",
+            generation: 1,
+            proposedCredential: "credential-1",
+            identityClass: .anonymous,
+            ownerScope: OwnerScope(kind: .anonymous)
+        )
+        let credentials = InMemoryCredentialStore(stored)
+        let transport = ScriptedSessionTransport(steps: [
+            .success(sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-1", credential: "credential-2", chatToken: "token-expired")),
+            .success(OnloHTTPResponse(statusCode: 401, body: Data("{\"error\":\"Invalid session token\"}".utf8))),
+            .success(sessionResponse(identityClass: "anonymous", generation: 1, sessionId: "session-2", credential: "credential-3", chatToken: "token-fresh")),
+            .success(transcriptResponse(conversationId: "conversation-1")),
+        ])
+        let sdk = rejectionTestSDK(credentials: credentials, transport: transport)
+        let initializedState = try await sdk.initialize(rejectionTestConfiguration)
+        XCTAssertEqual(initializedState, .anonymousReady)
+
+        let intent = try await sdk.openConversation("conversation-1")
+
+        XCTAssertEqual(intent, .messenger(conversationId: "conversation-1"))
+        let transcripts = await transport.requests().filter { $0.url?.path == "/api/widget/conversations/conversation-1" }
+        XCTAssertEqual(transcripts.map { $0.value(forHTTPHeaderField: "Authorization") }, ["Bearer token-expired", "Bearer token-fresh"])
     }
 
     func testLogoutLostResponseReplaysExactProtectedPendingTransition() async throws {
@@ -2011,7 +2205,13 @@ final class OnloSDKTests: XCTestCase {
         )
     }
 
-    private func sessionResponse(identityClass: String, generation: Int, sessionId: String, credential: String) -> OnloHTTPResponse {
+    private func sessionResponse(
+        identityClass: String,
+        generation: Int,
+        sessionId: String,
+        credential: String,
+        chatToken: String = "opaque-access-token"
+    ) -> OnloHTTPResponse {
         let json = """
         {
           "requestId": "request-1",
@@ -2021,7 +2221,7 @@ final class OnloSDKTests: XCTestCase {
           "ok": true,
           "result": {
             "sessionId": "\(sessionId)",
-            "chatToken": "opaque-access-token",
+            "chatToken": "\(chatToken)",
             "installationId": "installation-1",
             "generation": \(generation),
             "proposedCredential": "\(credential)",
@@ -3566,6 +3766,44 @@ private actor ScriptedSessionTransport: OnloHTTPTransport {
     }
 
     func requests() -> [URLRequest] { capturedRequests }
+}
+
+private func sessionOperations(_ requests: [URLRequest]) -> [String] {
+    requests.compactMap { request -> String? in
+        guard request.url?.path == "/api/sdk/v1/session",
+              let body = request.httpBody,
+              let decoded = try? JSONDecoder().decode(SessionRequest.self, from: body) else { return nil }
+        switch decoded.operation {
+        case .resume: return "resume"
+        case .bootstrap: return "bootstrap"
+        case .identify: return "identify"
+        case .logout: return "logout"
+        }
+    }
+}
+
+/// Holds every session response until opened, so a second recovery call overlaps the first.
+private actor GatedSessionTransport: OnloHTTPTransport {
+    private let response: OnloHTTPResponse
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    private var isOpen = false
+    private(set) var sessionRequestCount = 0
+
+    init(response: OnloHTTPResponse) { self.response = response }
+
+    func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
+        if request.url?.path == "/api/widget/conversations" { return emptyInboxResponse() }
+        if request.url?.path == "/api/sdk/v1/config" { return delayedMobileConfigResponse() }
+        sessionRequestCount += 1
+        if !isOpen { await withCheckedContinuation { waiting.append($0) } }
+        return sessionResponseMatchingRequest(response, request: request)
+    }
+
+    func open() {
+        isOpen = true
+        waiting.forEach { $0.resume() }
+        waiting.removeAll()
+    }
 }
 
 private func emptyInboxResponse() -> OnloHTTPResponse {

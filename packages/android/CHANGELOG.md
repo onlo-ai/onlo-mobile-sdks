@@ -1,14 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Fence targeted recovery to the original owner; retain terminal non-401 behavior and one retry.
+- Add safe native diagnostics without changing bridge error payloads.
+
 ## 0.3.3
 
-- Add safe native diagnostics for conversation HTTP/network failures and missing presentation hosts; preserve bridge error payloads.
-
-- Targeted native Messenger opens refresh a rejected chat bearer once, using
-  the protected installation credential without asking for another host login.
-- Retries preserve the current owner and stop after a second rejection;
-  account changes and non-401 failures remain blocked.
-- No public API or wire-protocol changes.
+- Replaced an installation whose credential the server rejects instead of
+  leaving Resume, Identify, or Logout permanently unavailable, including
+  transitions 0.3.2 had already retained.
+- Refreshed an expired chat token once for `openConversation` and Messenger
+  transcript loads.
+- Logged background SDK failures instead of letting them crash the host app.
+- Kept the Android core API and v1 protocol unchanged.
 
 ## 0.3.2
 

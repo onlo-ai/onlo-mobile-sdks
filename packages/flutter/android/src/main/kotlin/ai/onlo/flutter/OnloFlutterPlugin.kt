@@ -313,7 +313,8 @@ private data class BridgeFailure(val code: String) : IllegalStateException(code)
 
 private fun MethodCall.optionalString(key: String): String? = (arguments as? Map<*, *>)?.get(key) as? String
 private fun MethodCall.string(key: String): String? = optionalString(key)?.takeIf { it.isNotBlank() }
-private fun MethodCall.hasArgument(key: String): Boolean = (arguments as? Map<*, *>)?.containsKey(key) == true
+/** Dart encodes an omitted optional as `null`; only a non-null value counts as supplied. */
+private fun MethodCall.hasArgument(key: String): Boolean = (arguments as? Map<*, *>)?.get(key) != null
 
 private fun MethodChannel.Result.safeError(code: String) = error(code, "Onlo operation failed ($code).", mapOf("code" to code))
 

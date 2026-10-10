@@ -1,16 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Fence targeted recovery to the original owner; retain terminal non-401 behavior and one retry.
+- Add safe native diagnostics without changing bridge error payloads.
+- Fence late iOS refresh success/failure across logout and serialize protected writes.
+
 ## 0.3.3
 
-- Fence late iOS refresh results across logout; coalesce concurrent refreshes to preserve owner isolation and credential generations.
-
-- Add safe native diagnostics for conversation HTTP/network failures and missing presentation hosts; preserve bridge error payloads.
-
-- Targeted native Messenger opens refresh a rejected chat bearer once, using
-  the protected installation credential without asking for another host login.
-- Retries preserve the current owner and stop after a second rejection;
-  account changes and non-401 failures remain blocked.
-- No public API or wire-protocol changes.
+- Replaced an installation whose credential the server rejects during
+  restoration, identify replay, or logout, including transitions 0.3.2 had
+  already retained, instead of waiting in `reauthRequired` or `offlineReady`.
+- Coalesced overlapping session resumes and stopped a failed transition from
+  writing an older credential over a newer one.
+- Shared one `OnloSDK` core per process with the React Native and Flutter
+  bridges.
+- Refreshed an expired chat token once for `present(conversationId:)` and
+  Messenger transcript loads.
+- Kept the iOS public API and v1 protocol unchanged.
 
 ## 0.3.2
 

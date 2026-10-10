@@ -122,6 +122,9 @@ jobs:
           java-version: "17"
 
       - uses: android-actions/setup-android@v3
+        with:
+          # The current sdkmanager no longer ships the legacy `tools` package the action installs by default.
+          packages: platform-tools
 
       - name: Install Android publication toolchain
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"

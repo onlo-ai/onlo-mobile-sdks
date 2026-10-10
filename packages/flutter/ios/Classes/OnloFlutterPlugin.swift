@@ -8,7 +8,7 @@ import UIKit
 /// session, protected storage, push intent, lifecycle, and UI work stays native.
 @MainActor
 public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
-    private let sdk = OnloSDK()
+    private let sdk = OnloSDK.shared
     private var presenter: OnloMessengerPresenter?
     private weak var hostViewController: UIViewController?
     private var eventSink: FlutterEventSink?
@@ -244,7 +244,10 @@ public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHand
 
 private struct BridgeError: Error { let code: String; var diagnosticCode: String? = nil }
 
-private func arguments(_ call: FlutterMethodCall) -> [String: Any] { call.arguments as? [String: Any] ?? [:] }
+/// Dart encodes an omitted optional as `null`, which arrives as `NSNull`; treat it as absent.
+private func arguments(_ call: FlutterMethodCall) -> [String: Any] {
+    (call.arguments as? [String: Any] ?? [:]).filter { !($0.value is NSNull) }
+}
 private func nonEmpty(_ value: Any?) -> String? {
     guard let string = value as? String, !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
     return string

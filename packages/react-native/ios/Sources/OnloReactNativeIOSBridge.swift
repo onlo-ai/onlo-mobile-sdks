@@ -14,7 +14,7 @@ public final class OnloReactNativeIOSBridge: NSObject {
     public typealias Completion = (NSDictionary?) -> Void
     public typealias ResultCompletion = (NSString?, NSDictionary?) -> Void
 
-    private let sdk = OnloSDK()
+    private let sdk = OnloSDK.shared
     private var presenter: OnloMessengerPresenter?
     private let eventSink: (NSDictionary) -> Void
     private var stateTask: Task<Void, Never>?

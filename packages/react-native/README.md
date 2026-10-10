@@ -56,7 +56,7 @@ npm install @onlo-ai/react-native@0.3.2
 cd ios && pod install
 ```
 
-The package resolves `OnloSDK` 0.3.2 on iOS and `ai.onlo:onlo-android-sdk:0.3.2` on Android. Do not add either native core manually.
+The published 0.3.2 package resolves matching 0.3.2 native cores on iOS and Android. Do not add either native core manually.
 
 Expected result: the import resolves and both native hosts build:
 

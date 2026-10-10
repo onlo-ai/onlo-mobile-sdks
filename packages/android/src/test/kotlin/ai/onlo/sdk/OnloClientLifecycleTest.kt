@@ -1024,6 +1024,137 @@ class OnloClientLifecycleTest {
     }
 
     @Test
+    fun `rejected resume replaces the installation instead of wedging every later login`() = runBlocking {
+        val credentials = FakeCredentials(protectedIdentified())
+        val outbox = FakeOutbox()
+        val transport = ScriptedSessionTransport(
+            SessionStep.Failure("session_expired", RetryDirective.AFTER_TOKEN_REFRESH),
+            SessionStep.Success(IdentityClass.ANONYMOUS),
+        )
+        val client = client(credentials, outbox, transport = transport)
+
+        client.startRestoration()
+
+        assertEquals(OnloPhase.ANONYMOUS_READY, client.state.value.phase)
+        assertEquals(listOf("resume", "bootstrap"), transport.operations)
+        assertEquals(listOf("identified:owner-a"), outbox.blockedAndPurged)
+        assertEquals(IdentityClass.ANONYMOUS, credentials.session?.identityClass)
+        assertTrue(credentials.session?.installationId != protectedIdentified().installationId)
+        assertEquals(null, credentials.state?.pendingTransition)
+    }
+
+    @Test
+    fun `resume wedged behind an unsatisfiable retry gate is replaced without replaying it`() = runBlocking {
+        val stored = protectedIdentified()
+        // The protected record SDK 0.3.2 kept after `session_expired` on Resume.
+        val wedged = ai.onlo.sdk.security.PendingSessionTransition.Resume(
+            installationId = stored.installationId,
+            transitionId = "rejected-resume",
+            expectedGeneration = stored.generation,
+            presentedCredential = stored.credential,
+            proposedCredential = "synthetic-never-accepted",
+            retryDirective = RetryDirective.AFTER_TOKEN_REFRESH,
+        )
+        val credentials = FakeCredentials().apply { state = ProtectedSessionState(stored, wedged) }
+        val transport = ScriptedSessionTransport(SessionStep.Success(IdentityClass.ANONYMOUS))
+        val client = client(credentials, FakeOutbox(), transport = transport)
+
+        client.startRestoration()
+
+        assertEquals(OnloPhase.ANONYMOUS_READY, client.state.value.phase)
+        assertEquals(listOf("bootstrap"), transport.operations)
+        assertEquals(null, credentials.state?.pendingTransition)
+    }
+
+    @Test
+    fun `rejected identify replay identifies a replacement installation with the same jwt`() = runBlocking {
+        val stored = protectedAnonymous()
+        val lost = ai.onlo.sdk.security.PendingSessionTransition.Identify(
+            installationId = stored.installationId,
+            transitionId = "lost-identify",
+            expectedGeneration = stored.generation,
+            presentedCredential = stored.credential,
+            proposedCredential = "synthetic-lost-credential",
+            retryDirective = RetryDirective.AFTER_TOKEN_REFRESH,
+        )
+        val credentials = FakeCredentials().apply { state = ProtectedSessionState(stored, lost) }
+        val transport = ScriptedSessionTransport(
+            SessionStep.Failure("session_expired", RetryDirective.AFTER_TOKEN_REFRESH),
+            SessionStep.Success(IdentityClass.ANONYMOUS),
+            SessionStep.Success(IdentityClass.IDENTIFIED),
+        )
+        val client = client(credentials, FakeOutbox(), transport = transport)
+
+        client.loginIdentifiedUser("header.payload.signature")
+
+        assertEquals(OnloPhase.IDENTIFIED_READY, client.state.value.phase)
+        assertEquals(listOf("identify", "bootstrap", "identify"), transport.operations)
+        assertEquals(IdentityClass.IDENTIFIED, credentials.session?.identityClass)
+        assertEquals(null, credentials.state?.pendingTransition)
+    }
+
+    @Test
+    fun `rejected logout completes by replacing the installation`() = runBlocking {
+        val credentials = FakeCredentials(protectedIdentified())
+        val transport = ScriptedSessionTransport(
+            SessionStep.Failure("session_revoked", RetryDirective.NEVER),
+            SessionStep.Success(IdentityClass.ANONYMOUS),
+        )
+        val client = client(credentials, FakeOutbox(), transport = transport)
+
+        val outcome = client.logout()
+
+        assertEquals(LogoutOutcome.Completed, outcome)
+        assertEquals(OnloPhase.ANONYMOUS_READY, client.state.value.phase)
+        assertEquals(listOf("logout", "bootstrap"), transport.operations)
+        assertEquals(false, credentials.session?.logoutPending)
+    }
+
+    @Test
+    fun `logout wedged behind an unsatisfiable retry gate completes on restoration`() = runBlocking {
+        val stored = protectedIdentified().copy(logoutPending = true)
+        val wedged = ai.onlo.sdk.security.PendingSessionTransition.Logout(
+            installationId = stored.installationId,
+            transitionId = "rejected-logout",
+            expectedGeneration = stored.generation,
+            presentedCredential = stored.credential,
+            proposedCredential = "synthetic-never-accepted",
+            retryDirective = RetryDirective.AFTER_TOKEN_REFRESH,
+        )
+        val credentials = FakeCredentials().apply { state = ProtectedSessionState(stored, wedged) }
+        val transport = ScriptedSessionTransport(SessionStep.Success(IdentityClass.ANONYMOUS))
+        val client = client(credentials, FakeOutbox(), transport = transport)
+
+        client.startRestoration()
+
+        assertEquals(OnloPhase.ANONYMOUS_READY, client.state.value.phase)
+        assertEquals(listOf("bootstrap"), transport.operations)
+        assertEquals(false, credentials.session?.logoutPending)
+    }
+
+    @Test
+    fun `open conversation refreshes an expired chat token once`() = runBlocking {
+        val credentials = FakeCredentials(protectedAnonymous())
+        val transport = ScriptedSessionTransport(
+            SessionStep.Success(IdentityClass.ANONYMOUS),
+            SessionStep.Success(IdentityClass.ANONYMOUS),
+            transcriptStatuses = listOf(401, 200),
+        )
+        val client = client(
+            credentials,
+            FakeOutbox(),
+            transport = transport,
+            widgetChatApi = WidgetChatApi(transport, ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())),
+        )
+        client.startRestoration()
+
+        val outcome = client.openConversation("conversation-1")
+
+        assertEquals(OpenConversationOutcome.Opened, outcome)
+        assertEquals(listOf("Bearer synthetic-chat-token-1", "Bearer synthetic-chat-token-2"), transport.transcriptAuthorizations)
+    }
+
+    @Test
     fun `expired inbox bearer refreshes the session once and retries with fresh authority`() = runBlocking {
         val credentials = FakeCredentials().apply {
             state = ProtectedSessionState(protectedAnonymous(), null)
@@ -1703,6 +1834,50 @@ class OnloClientLifecycleTest {
                 emptyMap(),
                 """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"synthetic-session-$sessionCalls","chatToken":"synthetic-chat-token-$sessionCalls","installationId":"00000000-0000-0000-0000-000000000001","generation":$sessionCalls,"proposedCredential":"$proposed","identityClass":"anonymous","publicationState":"testing","attestationState":"not_required","configRevision":"fixture","configSchemaVersion":1,"configEtag":"fixture"}}""",
             )
+        }
+    }
+
+    private sealed interface SessionStep {
+        data class Success(val identityClass: IdentityClass) : SessionStep
+        data class Failure(val code: String, val directive: RetryDirective) : SessionStep
+    }
+
+    /** Answers session exchanges in order and echoes each request's installation and proposed credential. */
+    private class ScriptedSessionTransport(
+        vararg steps: SessionStep,
+        private val transcriptStatuses: List<Int> = emptyList(),
+    ) : OnloTransport {
+        private val remaining = steps.toMutableList()
+        private var sessionCalls = 0
+        val operations = mutableListOf<String>()
+        val transcriptAuthorizations = mutableListOf<String>()
+
+        override suspend fun execute(request: OnloHttpRequest): OnloHttpResponse {
+            if (request.url.encodedPath.contains("/conversations/")) {
+                transcriptAuthorizations += checkNotNull(request.headers["Authorization"])
+                val status = transcriptStatuses.getOrElse(transcriptAuthorizations.size - 1) { 200 }
+                if (status != 200) return OnloHttpResponse(status, emptyMap(), "{\"error\":\"Invalid session token\"}")
+                return OnloHttpResponse(200, emptyMap(), """{"conversation":{"id":"conversation-1","sessionId":"synthetic-session","status":"open","isHumanTakeover":false},"messages":[],"sync":{"previousCursor":null,"nextCursor":null,"limit":100}}""")
+            }
+            val body = org.json.JSONObject(request.body?.let { Buffer().also(it::writeTo).readUtf8() }.orEmpty())
+            val operation = body.getJSONObject("operation")
+            operations += operation.getString("type")
+            return when (val step = remaining.removeAt(0)) {
+                is SessionStep.Failure -> OnloHttpResponse(
+                    401,
+                    emptyMap(),
+                    """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":false,"error":{"code":"${step.code}","message":"fixture","retry":{"directive":"${step.directive.wireValue}"}}}""",
+                )
+                is SessionStep.Success -> {
+                    sessionCalls += 1
+                    val installationId = body.getJSONObject("client").getString("installationId")
+                    OnloHttpResponse(
+                        200,
+                        emptyMap(),
+                        """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"synthetic-session-$sessionCalls","chatToken":"synthetic-chat-token-$sessionCalls","installationId":"$installationId","generation":$sessionCalls,"proposedCredential":"${operation.getString("proposedCredential")}","identityClass":"${step.identityClass.wireValue}","publicationState":"testing","attestationState":"not_required","configRevision":"fixture","configSchemaVersion":1,"configEtag":"fixture"}}""",
+                    )
+                }
+            }
         }
     }
 
