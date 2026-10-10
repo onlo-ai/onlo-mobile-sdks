@@ -70,3 +70,7 @@ Fresh 0.3.4 local gates: iOS 138 macOS + 138 Simulator, Android 135, Flutter 9, 
 Packaging rehearsal: nine prepared files cover all four channels; local manifest hashes pass. Dart `--dry-run --to-archive` produced no file despite exit 0; fixed to separate validation and `--to-archive` commands, then verified the actual archive.
 
 Remote PR CI exposed a third iOS race: delayed session-success push work cleared a newer `after_token_refresh` gate. Added bearer/token/gate-generation fences; repeated token registration preserves prerequisites. Controlled regression fails on pre-fix source and passes with genuine fresh-bearer recovery; iOS suite now 139. Simulator fixture now disables unrelated UIKit events and routes concurrent config/push requests separately. Final macOS + Simulator suites passed 139 tests each; PR CI and exact merge-main CI passed (`f0cc569`). OIDC workflow changes require fresh CI.
+
+## Publication recovery
+
+0.3.4 attempt 1: npm/iOS/Android registry content verified; pub.dev rejected JWT timestamps. Pinned setup-dart minted `PUB_TOKEN` at 11:28 UTC; Flutter used it at 11:37 UTC after preceding uploads. Preserved `publication-attempts-run1.json`; verified Flutter absent, reset only its diagnosed attempt, reran identical approved artifacts. Permanent fix: request fresh pub.dev OIDC immediately before upload; no artifact/tag changes. 29 release regressions pass.

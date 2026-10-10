@@ -69,3 +69,30 @@ class OIDCTests(unittest.TestCase):
                 maven.assert_not_called()
                 self.assertEqual(set(json.loads((root.parent / 'publication-attempts.json').read_text())), {'react-native'})
                 self.assertEqual(status.call_count, 2)
+
+
+class FlutterOIDCTests(unittest.TestCase):
+    def test_refreshes_stale_setup_token_at_upload_time(self):
+        import io
+        from urllib.parse import parse_qs, urlsplit
+        with patch.dict(os.environ, {'ACTIONS_ID_TOKEN_REQUEST_URL': 'https://example.invalid/token?api-version=2', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN': 'synthetic-request', 'PUB_TOKEN': 'synthetic-expired'}, clear=True), patch.object(publish.urllib.request, 'urlopen', return_value=io.StringIO('{"value":"synthetic-fresh"}')) as request, patch.object(publish.subprocess, 'run') as command:
+            publish.publish_flutter(Path('/approved'))
+            url = request.call_args.args[0].full_url
+            self.assertEqual(parse_qs(urlsplit(url).query), {'api-version':['2'], 'audience':['https://pub.dev']})
+            self.assertEqual(command.call_args.kwargs['env']['PUB_TOKEN'], 'synthetic-fresh')
+            self.assertEqual(os.environ['PUB_TOKEN'], 'synthetic-expired')
+            self.assertEqual(command.call_args.args[0], ['dart', 'pub', 'publish', '--force', '--from-archive=/approved/flutter.tar.gz'])
+
+    def test_token_exchange_failure_never_attempts_upload(self):
+        import io
+        for body in ('{}', '{"value":null}'):
+            with self.subTest(body=body), patch.dict(os.environ, {'ACTIONS_ID_TOKEN_REQUEST_URL': 'https://example.invalid/token', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN': 'synthetic-request'}, clear=True), patch.object(publish.urllib.request, 'urlopen', return_value=io.StringIO(body)), patch.object(publish.subprocess, 'run') as command:
+                with self.assertRaisesRegex(ValueError, 'missing token'):
+                    publish.publish_flutter(Path('/approved'))
+                command.assert_not_called()
+
+    def test_missing_oidc_never_uses_stale_token(self):
+        with patch.dict(os.environ, {'PUB_TOKEN':'synthetic-expired'}, clear=True), patch.object(publish.subprocess, 'run') as command:
+            with self.assertRaisesRegex(ValueError, 'requires GitHub OIDC'):
+                publish.publish_flutter(Path('/approved'))
+            command.assert_not_called()
