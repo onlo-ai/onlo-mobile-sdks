@@ -60,6 +60,22 @@ def publish_maven(directory, version, remember):
         raise TimeoutError('Central publication unconfirmed; do not upload again')
 
 
+def require_npm_oidc(version):
+    # Prerequisites only: npm validates the trust relationship during publish.
+    expected = f'{REPO}/.github/workflows/publish.yml@refs/tags/{version}'
+    if (os.environ.get('GITHUB_ACTIONS') != 'true'
+            or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted'
+            or os.environ.get('GITHUB_WORKFLOW_REF') != expected
+            or not os.environ.get('ACTIONS_ID_TOKEN_REQUEST_URL')
+            or not os.environ.get('ACTIONS_ID_TOKEN_REQUEST_TOKEN')):
+        raise ValueError('npm requires the approved GitHub-hosted OIDC workflow')
+    if any(os.environ.get(key) for key in ('NODE_AUTH_TOKEN', 'NPM_TOKEN', 'NPM_CONFIG__AUTH', 'NPM_CONFIG__AUTHTOKEN')):
+        raise ValueError('long-lived npm authentication is forbidden in the OIDC job')
+    node = tuple(int(part) for part in run('node', '--version').lstrip('v').split('.'))
+    if node < (24, 15, 0) or run('npm', '--version') != '12.2.0':
+        raise ValueError('npm OIDC requires Node >=24.15.0 and pinned npm 12.2.0')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('version')
@@ -82,8 +98,8 @@ def main():
     upload_status(args.version, states, args.directory.parent)
     if publication_decision(states) == 'hard-stop':
         raise ValueError('registry content mismatch, partial or unverifiable; no uploads')
-    # Use the same publishing token for read-only identity/access diagnosis first.
-    subprocess.run(['node', 'scripts/npm-auth-diagnostics.mjs'], check=True)
+    if states['react-native'] != 'verified':
+        require_npm_oidc(args.version)
     journal = args.directory.parent / 'publication-attempts.json'
     assets = release(args.version)['assets']
     if any(a['name'] == journal.name for a in assets):
@@ -96,7 +112,8 @@ def main():
         run('gh', 'release', 'upload', args.version, str(journal), '--repo', REPO, '--clobber')
 
     try:
-        for name in ('ios', 'android', 'flutter', 'react-native'):
+        # Establish actual npm OIDC authorization before uploading other packages.
+        for name in ('react-native', 'ios', 'android', 'flutter'):
             states = verify_all(manifest)
             if publication_decision(states) == 'hard-stop':
                 raise ValueError('registry state changed; publication stopped')
