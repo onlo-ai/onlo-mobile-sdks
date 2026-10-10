@@ -81,7 +81,7 @@ jobs:
           metadata = json.loads((root / 'npm-pack.json').read_text())
           shutil.move(root / metadata[0]['filename'], root / 'prepared/react-native.tgz')
           PYTHON
-          (cd packages/flutter && dart pub publish --dry-run --to-archive="$RUNNER_TEMP/prepared/flutter.tar.gz")
+          (cd packages/flutter && dart pub publish --dry-run && dart pub publish --to-archive="$RUNNER_TEMP/prepared/flutter.tar.gz")
           pod ipc spec OnloSDK.podspec > "$RUNNER_TEMP/prepared/OnloSDK.podspec.json"
           git archive --format=tar.gz HEAD > "$RUNNER_TEMP/prepared/ios-source.tar.gz"
           python3 scripts/release_artifacts.py create "$RUNNER_TEMP/prepared" --version "$VERSION" --commit "$(git rev-parse HEAD)"

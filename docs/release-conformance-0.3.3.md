@@ -64,3 +64,5 @@ Candidate 0.3.4: all four registry version endpoints returned 404 on 2026-10-10.
 - Local workflow validation: actionlint 1.7.12; 22 release regression tests. Real 0.3.3 CocoaPods/SwiftPM, Maven AAR and pub.dev content comparisons passed. New pipeline has not yet run remotely; Central upload/new npm authorization remain unverified.
 
 Fresh 0.3.4 local gates: iOS 138 macOS + 138 Simulator, Android 135, Flutter 9, React Native 18; all native/wrapper release builds and pod lint pass. RN iOS first failed on stale installed Pods; `pod install` then `npm run build:ios:release` passed. Exact commands/logs: `/tmp/onlo-034-gates.json`, `/tmp/onlo-034-rn-pod-install.log`, `/tmp/onlo-034-rn-ios-retry.log`.
+
+Packaging rehearsal: nine prepared files cover all four channels; local manifest hashes pass. Dart `--dry-run --to-archive` produced no file despite exit 0; fixed to separate validation and `--to-archive` commands, then verified the actual archive.
