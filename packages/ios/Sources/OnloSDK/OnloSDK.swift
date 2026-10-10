@@ -123,9 +123,13 @@ public actor OnloSDK {
     private var configuration: Configuration?
     private var requestFactory: OnloRequestFactory?
     private var runtimeSession: RuntimeSession?
-    /// Actor reentrancy lets foreground, config, and inbox recovery all request a Resume while one
-    /// is in flight. They share it: a second rotation of the same credential would be rejected.
-    private var inFlightResume: Task<Void, Error>?
+    // Actor isolation does not serialize work across awaits. A boundary invalidates
+    // both successful and failed completions, while exact resumes share one flight.
+    private var sessionEpoch = UUID()
+    private var resumeFlight: (id: UUID, epoch: UUID, credential: StoredSessionCredential, task: Task<Void, Error>)?
+    private var logoutFlight: Task<SDKState, Error>?
+    private var protectedWriteActive = false
+    private var protectedWriteWaiters: [CheckedContinuation<Void, Never>] = []
     /// Verified only after the server accepts the corresponding identify
     /// transition. Kept in memory for the native greeting and cleared at every
     /// account boundary; it is never written to SDK storage.
@@ -191,6 +195,20 @@ public actor OnloSDK {
     private var pushRetryTask: Task<Void, Never>?
     private var pushReconciliationID: UUID?
     private var pushReconciliationWakeRequested = false
+    private var pushBearerGateRevision: UInt64 = 0
+    private var pushRejectedBearerContext: UUID?
+
+    private struct PushRecoveryScope: Equatable, Sendable {
+        let registrationRevision: UInt64
+        let gateRevision: UInt64
+        let bearerContext: UUID
+    }
+
+    private var pushRecoveryScope: PushRecoveryScope {
+        PushRecoveryScope(registrationRevision: pushRegistrationRevision,
+                          gateRevision: pushBearerGateRevision,
+                          bearerContext: configAuthority)
+    }
     private var pushRegistrationRevision: UInt64 = 0
     private struct PendingAPNsRegistration: Sendable {
         let token: Data
@@ -216,16 +234,19 @@ public actor OnloSDK {
         )
     }
 
-    private func activatePersistenceAuthority(for session: RuntimeSession) async throws {
+    private func activatePersistenceAuthority(for session: RuntimeSession, expectedEpoch: UUID? = nil) async throws {
         guard let store = ownerStore as? any AuthorityFencedPersisting else {
             throw OnloError.persistenceUnavailable
         }
         let authority = persistenceAuthority(for: session, bearerContext: configAuthority)
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
         await store.activateAuthority(authority)
         if let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring {
+            if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
             await pushStore.activateAuthority(authority)
         }
         if let fencedConfigStore = configStore as? any AuthorityFencedConfigStoring {
+            if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
             await fencedConfigStore.activateAuthority(authority)
         }
     }
@@ -478,6 +499,10 @@ public actor OnloSDK {
         guard isCompactJWT(userJwt) else { throw OnloError.invalidUserJWT }
         let pendingFirstName = Self.firstNameClaim(from: userJwt)
         try requireInitialized()
+        if let flight = resumeFlight, flight.epoch == sessionEpoch {
+            try await flight.task.value
+        }
+        guard state != .logoutPending else { throw OnloError.invalidState }
         // Hosts may repeat their login integration after view/scene recovery.
         // The current identified owner remains authoritative until the host
         // explicitly calls logout for an account switch.
@@ -640,16 +665,51 @@ public actor OnloSDK {
     @discardableResult
     public func logout() async throws -> SDKState {
         try requireInitialized()
-        if state == .logoutPending {
-            let protectedState = try await credentialStore.loadState()
-            guard let stored = protectedState.credential, stored.logoutPending else { throw OnloError.invalidState }
-            try await continuePendingLogout(stored, pendingTransition: protectedState.pendingTransition)
-            return state
-        }
-        guard let session = runtimeSession else {
+        if let logoutFlight { return try await logoutFlight.value }
+        guard state == .logoutPending || runtimeSession != nil else {
             throw state == .offlineReady ? OnloError.requiresNetwork : OnloError.invalidState
         }
-        return try await logout(session.credential)
+        // Revoke in-memory authority before the first suspension, including when
+        // an earlier resume response has not yet arrived. Never cancel its durable
+        // replay record: the server may already have rotated the credential.
+        sessionEpoch = UUID()
+        state = .logoutPending
+        identifiedFirstName = nil
+        if let scope = runtimeSession?.credential.ownerScope { cancelActiveSends(for: scope) }
+        runtimeSession = nil
+        configAuthority = UUID()
+        let task = Task { try await self.completeRequestedLogout() }
+        logoutFlight = task
+        defer { logoutFlight = nil }
+        return try await task.value
+    }
+
+    private func completeRequestedLogout() async throws -> SDKState {
+        await invalidateMessengerPresentations()
+        await acquireProtectedWrite()
+        let protected: ProtectedSessionState
+        do {
+            var current = try await credentialStore.loadState()
+            guard let stored = current.credential else { throw OnloError.invalidState }
+            current.credential = StoredSessionCredential(
+                installationId: stored.installationId, generation: stored.generation,
+                proposedCredential: stored.proposedCredential, identityClass: stored.identityClass,
+                ownerScope: stored.ownerScope, logoutPending: true
+            )
+            try await credentialStore.saveState(current)
+            protected = current
+        } catch {
+            releaseProtectedWrite()
+            throw error
+        }
+        releaseProtectedWrite()
+        guard let stored = protected.credential else { throw OnloError.invalidState }
+        cancelActiveSends(for: stored.ownerScope)
+        await revokePersistenceAuthority(for: stored.ownerScope)
+        try await ownerStore.beginLogout(for: stored.ownerScope)
+        try? await pushIntentStore.clear()
+        try await continuePendingLogout(stored, pendingTransition: protected.pendingTransition)
+        return state
     }
 
     public func currentState() -> SDKState { state }
@@ -1529,9 +1589,7 @@ public actor OnloSDK {
     public func refreshConfigurationForForeground() async throws {
         try requireInitialized()
         if state == .logoutPending {
-            let protected = try await credentialStore.loadState()
-            guard let stored = protected.credential, stored.logoutPending else { throw OnloError.invalidState }
-            try await continuePendingLogout(stored, pendingTransition: protected.pendingTransition)
+            _ = try await logout()
             return
         }
         var recoveredSession = false
@@ -1649,15 +1707,26 @@ public actor OnloSDK {
     }
 
     public func present(conversationId: String? = nil) async throws -> OnloPresentationIntent {
-        try await present(conversationId: conversationId, allowTokenRefresh: true)
+        try await present(conversationId: conversationId, allowTokenRefresh: true, expectedOwner: nil)
     }
 
-    private func present(conversationId: String?, allowTokenRefresh: Bool) async throws -> OnloPresentationIntent {
+    private func present(
+        conversationId: String?,
+        allowTokenRefresh: Bool,
+        expectedOwner: OwnerScope?
+    ) async throws -> OnloPresentationIntent {
+        let startedAt = Date()
+        if let expectedOwner, runtimeSession?.credential.ownerScope != expectedOwner {
+            await record(operation: "present", code: "owner_changed", requestId: nil, startedAt: startedAt)
+            throw OnloError.invalidState
+        }
         guard state == .anonymousReady || state == .identifiedReady || state == .offlineReady else {
+            await record(operation: "present", code: "invalid_state", requestId: nil, startedAt: startedAt)
             throw OnloError.invalidState
         }
         guard let conversationId else { return .messenger(conversationId: nil) }
         guard state != .offlineReady, let session = runtimeSession, let requestFactory else {
+            await record(operation: "present", code: "requires_network", requestId: nil, startedAt: startedAt)
             throw OnloError.requiresNetwork
         }
 
@@ -1666,7 +1735,6 @@ public actor OnloSDK {
             query: .latest(limit: 1),
             chatToken: session.chatToken
         )
-        let startedAt = Date()
         do {
             let response = try await transport.execute(request)
             let transcript = try OnloResponseDecoder.widget(ConversationTranscriptResult.self, from: response)
@@ -1676,11 +1744,15 @@ public actor OnloSDK {
             await record(operation: "present", code: "ok", requestId: nil, startedAt: startedAt)
             return .messenger(conversationId: conversationId)
         } catch let error as OnloError {
-            await record(operation: "present", code: error.safeCode, requestId: nil, startedAt: startedAt)
-            // The 15-minute chat token routinely expires while the host app stays open.
-            if allowTokenRefresh, isWidgetUnauthorized(error), await refreshMessengerBearer(session),
-               state == .anonymousReady || state == .identifiedReady {
-                return try await present(conversationId: conversationId, allowTokenRefresh: false)
+            await record(operation: "present", code: error.safeCode, requestId: error.requestId, startedAt: startedAt)
+            if allowTokenRefresh, isWidgetUnauthorized(error),
+               await refreshMessengerBearer(session) {
+                await record(operation: "present", code: "bearer_refreshed", requestId: nil, startedAt: startedAt)
+                return try await present(
+                    conversationId: conversationId,
+                    allowTokenRefresh: false,
+                    expectedOwner: session.credential.ownerScope
+                )
             }
             throw error
         } catch {
@@ -1737,8 +1809,11 @@ public actor OnloSDK {
            existing.ownerScope == session.credential.ownerScope,
            existing.action == .register,
            existing.token == value,
-           existing.isRegistered {
-            return .registered
+           existing.notificationPreference == registration.notificationPreference,
+           existing.locale == registration.locale {
+            if existing.isRegistered { return .registered }
+            // Re-registering the same token cannot erase a persisted prerequisite.
+            return try await reconcilePushIntent()
         }
         let intent = ProtectedPushIntent(
             ownerScope: session.credential.ownerScope,
@@ -1953,6 +2028,12 @@ public actor OnloSDK {
                 case .afterTokenRefresh:
                     // Persist the prerequisite without touching session state.
                     // The next normal session success supplies the new bearer.
+                    // A callback scheduled before this rejection cannot supply
+                    // a fresh bearer, even if it executes after persistence.
+                    guard let current = runtimeSession,
+                          persistenceAuthority(for: current, bearerContext: configAuthority) == persistence else { return .pendingRetry }
+                    pushBearerGateRevision &+= 1
+                    pushRejectedBearerContext = bearerAuthority
                     let gated = copiedPushIntent(intent, retryDirective: .afterTokenRefresh, requiresFreshBearer: true)
                     guard let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring,
                           try await pushStore.save(gated, replacing: intent, authority: persistence) else { return .pendingRetry }
@@ -2044,36 +2125,35 @@ public actor OnloSDK {
     }
 
     private func schedulePushReconciliationAfterSessionSuccess() {
-        let expectedRegistrationRevision = pushRegistrationRevision
+        let expected = pushRecoveryScope
         Task { [weak self] in
-            await self?.reconcilePushAfterSessionSuccess(
-                expectedRegistrationRevision: expectedRegistrationRevision
-            )
+            await self?.reconcilePushAfterSessionSuccess(expected: expected)
         }
     }
 
-    private func reconcilePushAfterSessionSuccess(
-        expectedRegistrationRevision: UInt64
-    ) async {
-        await consumePushFreshBearerGateAfterSessionSuccess()
-        guard expectedRegistrationRevision == pushRegistrationRevision else { return }
-        _ = try? await reconcilePushIntent(
-            expectedRegistrationRevision: expectedRegistrationRevision
-        )
-        guard expectedRegistrationRevision == pushRegistrationRevision else { return }
+    private func reconcilePushAfterSessionSuccess(expected: PushRecoveryScope) async {
+        guard expected == pushRecoveryScope else { return }
+        await consumePushFreshBearerGateAfterSessionSuccess(expected: expected)
+        guard expected == pushRecoveryScope else { return }
+        _ = try? await reconcilePushIntent(expectedRegistrationRevision: expected.registrationRevision)
+        guard expected == pushRecoveryScope else { return }
         await registerPendingAPNsAfterSessionReady()
     }
 
-    private func consumePushFreshBearerGateAfterSessionSuccess() async {
-        guard let session = runtimeSession,
+    private func consumePushFreshBearerGateAfterSessionSuccess(expected: PushRecoveryScope) async {
+        guard expected == pushRecoveryScope,
+              pushRejectedBearerContext != expected.bearerContext,
+              let session = runtimeSession,
               state == .anonymousReady || state == .identifiedReady else { return }
         do {
             guard let intent = try await pushIntentStore.load(),
+                  expected == pushRecoveryScope,
                   intent.ownerScope == session.credential.ownerScope,
                   intent.requiresFreshBearer,
                   let pushStore = pushIntentStore as? any AuthorityFencedPushIntentStoring else { return }
-            let authority = persistenceAuthority(for: session, bearerContext: configAuthority)
-            await pushStore.activateAuthority(authority)
+            // Session establishment already activated this authority. A delayed
+            // callback must never reactivate an obsolete owner/bearer.
+            let authority = persistenceAuthority(for: session, bearerContext: expected.bearerContext)
             _ = try await pushStore.save(
                 copiedPushIntent(intent, retryDirective: nil, requiresFreshBearer: false),
                 replacing: intent,
@@ -2084,7 +2164,8 @@ public actor OnloSDK {
         }
     }
 
-    private func bootstrapAnonymous(pendingTransition: PendingSessionTransition? = nil) async throws {
+    private func bootstrapAnonymous(pendingTransition: PendingSessionTransition? = nil, expectedEpoch: UUID? = nil) async throws {
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
         let pending: PendingSessionTransition
         if let pendingTransition, !pendingTransition.usesLegacyUUIDCredential {
             guard pendingTransition.isBootstrap else { throw OnloError.invalidState }
@@ -2098,20 +2179,24 @@ public actor OnloSDK {
                 installationId: UUID().uuidString,
                 proposedCredential: InstallationCredential.generate()
             )
-            try await commitProtectedState(credential: nil, pendingTransition: pending)
+            try await commitProtectedState(credential: nil, pendingTransition: pending, expectedEpoch: expectedEpoch)
         }
         let result: APIResponse<SessionResult>
         do {
-            try await ensurePendingReplayAllowed(pending, userJwtProvided: false)
+            try await ensurePendingReplayAllowed(pending, userJwtProvided: false, expectedEpoch: expectedEpoch)
             result = try await sendSession(try pending.sessionOperation(), installationId: pending.installationId)
         } catch {
-            try await resolveDefinitiveSessionFailure(error, credential: nil)
+            if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
+            try await resolveDefinitiveSessionFailure(error, credential: nil, expectedEpoch: expectedEpoch)
+            if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
             if retainsSessionTransition(error) { state = .offlineReady }
             throw error
         }
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
         guard pending.accepts(result.result), result.result.identityClass == .anonymous else { throw OnloError.invalidResponse }
         let scope = OwnerScope(kind: .anonymous)
         try await ownerStore.prepare(scope: scope)
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
         let credential = StoredSessionCredential(
             installationId: result.result.installationId,
             generation: result.result.generation,
@@ -2120,12 +2205,15 @@ public actor OnloSDK {
             ownerScope: scope,
             logoutPending: false
         )
-        try await commitProtectedState(credential: credential, pendingTransition: nil)
+        try await commitProtectedState(credential: credential, pendingTransition: nil, expectedEpoch: expectedEpoch)
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
         runtimeSession = RuntimeSession(sessionId: result.result.sessionId, chatToken: result.result.chatToken, credential: credential)
         configAuthority = UUID()
-        try await activatePersistenceAuthority(for: runtimeSession!)
+        try await activatePersistenceAuthority(for: runtimeSession!, expectedEpoch: expectedEpoch)
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
         state = .anonymousReady
-        await refreshConfigurationAfterSessionSuccess()
+        // A resume replacement refreshes config after its shared flight completes.
+        if expectedEpoch == nil { await refreshConfigurationAfterSessionSuccess() }
         startDurableDispatchIfNeeded()
         startForegroundStreamIfAvailable()
         schedulePushReconciliationAfterSessionSuccess()
@@ -2152,13 +2240,17 @@ public actor OnloSDK {
     /// no replay of it can succeed. Fence and purge the old owner, forget the installation, and
     /// bootstrap a fresh anonymous one: the state a reinstall used to be needed for. If another
     /// transition already committed a newer credential, that one wins and nothing is retired.
-    private func replaceRejectedInstallation(_ stored: StoredSessionCredential) async throws {
+    private func replaceRejectedInstallation(_ stored: StoredSessionCredential, expectedEpoch: UUID? = nil) async throws {
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
         let current = try await credentialStore.loadState().credential
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
         guard current?.installationId == stored.installationId,
               current?.proposedCredential == stored.proposedCredential else { return }
         await record(operation: "session", code: "installation_replaced", requestId: nil, startedAt: Date())
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
 
         await invalidateMessengerPresentations()
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
         identifiedFirstName = nil
         cancelConfigRetry()
         pushRetryTask?.cancel()
@@ -2169,20 +2261,24 @@ public actor OnloSDK {
         configAuthority = UUID()
         cancelActiveSends(for: stored.ownerScope)
         await revokePersistenceAuthority(for: stored.ownerScope)
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
 
         // Persist the account fence before removing credentials. A crash can
         // never make the old owner scope readable by a replacement session.
         try await ownerStore.beginLogout(for: stored.ownerScope)
-        try await commitProtectedState(credential: nil, pendingTransition: nil)
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
+        try await commitProtectedState(credential: nil, pendingTransition: nil, expectedEpoch: expectedEpoch)
         try? await pushIntentStore.clear()
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
         try await ownerStore.finishLogout(for: stored.ownerScope)
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
 
         messengerInboxCache = nil
         helpCenterCache = nil
         transcriptValidationAuthorities.removeAll()
         conversationObservationGeneration &+= 1
         state = .restoring
-        try await bootstrapAnonymous()
+        try await bootstrapAnonymous(expectedEpoch: expectedEpoch)
     }
 
     private func registerSend(_ task: Task<Void, Never>, id: UUID, scope: OwnerScope) {
@@ -3001,38 +3097,65 @@ public actor OnloSDK {
     }
 
     private func resume(_ stored: StoredSessionCredential, pendingTransition: PendingSessionTransition? = nil) async throws {
-        if let inFlightResume { return try await inFlightResume.value }
-        let resumption = Task { try await self.performResume(stored, pendingTransition: pendingTransition) }
-        inFlightResume = resumption
-        defer { inFlightResume = nil }
-        try await resumption.value
+        guard !stored.logoutPending, state != .logoutPending, state != .identifying else { throw OnloError.invalidState }
+        let epoch = sessionEpoch
+        if let flight = resumeFlight, flight.epoch == epoch {
+            guard flight.credential == stored else { throw OnloError.invalidState }
+            await record(operation: "session", code: "resume_joined", requestId: nil, startedAt: Date())
+            return try await flight.task.value
+        }
+        let id = UUID()
+        let task = Task { try await self.performResume(stored, pendingTransition: pendingTransition, epoch: epoch) }
+        resumeFlight = (id, epoch, stored, task)
+        defer { if resumeFlight?.id == id { resumeFlight = nil } }
+        try await task.value
+        if resumeFlight?.id == id { resumeFlight = nil }
+        try requireSessionEpoch(epoch)
+        // Only successful rotations refresh config. Keep this outside the shared
+        // flight so config's own bounded recovery cannot await itself.
+        if state == .anonymousReady || state == .identifiedReady {
+            await refreshConfigurationAfterSessionSuccess()
+        }
     }
 
-    private func performResume(_ stored: StoredSessionCredential, pendingTransition: PendingSessionTransition?) async throws {
+    private func requireSessionEpoch(_ epoch: UUID) throws {
+        guard sessionEpoch == epoch, state != .logoutPending else { throw OnloError.invalidState }
+    }
+
+    private func performResume(_ stored: StoredSessionCredential, pendingTransition: PendingSessionTransition?, epoch: UUID) async throws {
+        try requireSessionEpoch(epoch)
         try await ownerStore.prepare(scope: stored.ownerScope)
+        try requireSessionEpoch(epoch)
+        let protected = try await credentialStore.loadState()
+        try requireSessionEpoch(epoch)
+        guard protected.credential == stored else { throw OnloError.invalidState }
         let pending: PendingSessionTransition
-        if let pendingTransition {
-            guard pendingTransition.matchesResume(stored) else { throw OnloError.invalidState }
-            pending = pendingTransition
+        if let existing = protected.pendingTransition ?? pendingTransition {
+            guard existing.matchesResume(stored) else { throw OnloError.invalidState }
+            pending = existing
         } else {
             pending = .resume(transitionId: UUID().uuidString, installationId: stored.installationId, expectedGeneration: stored.generation, presentedCredential: stored.proposedCredential, proposedCredential: InstallationCredential.generate())
-            try await commitProtectedState(credential: stored, pendingTransition: pending)
+            try await commitProtectedState(credential: stored, pendingTransition: pending, expectedEpoch: epoch)
         }
         do {
-            try await ensurePendingReplayAllowed(pending, userJwtProvided: false)
-            let result = try await sendSession(
-                try pending.sessionOperation(), installationId: pending.installationId
-            )
+            try await ensurePendingReplayAllowed(pending, userJwtProvided: false, expectedEpoch: epoch)
+            try requireSessionEpoch(epoch)
+            let result = try await sendSession(try pending.sessionOperation(), installationId: pending.installationId)
+            try requireSessionEpoch(epoch)
             guard pending.accepts(result.result) else { throw OnloError.invalidResponse }
-            try await applyResumedSession(result.result, previous: stored)
+            try await applyResumedSession(result.result, previous: stored, epoch: epoch)
         } catch where Self.isInstallationCredentialRejection(error) {
-            try await replaceRejectedInstallation(stored)
+            try requireSessionEpoch(epoch)
+            try await replaceRejectedInstallation(stored, expectedEpoch: epoch)
         } catch let error as OnloError {
+            // A stale failure has no authority to change storage, retry gates or state.
+            try requireSessionEpoch(epoch)
             if error.transportCode != nil {
                 state = .offlineReady
                 return
             }
-            try await resolveDefinitiveSessionFailure(error, credential: stored)
+            try await resolveDefinitiveSessionFailure(error, credential: stored, expectedEpoch: epoch)
+            try requireSessionEpoch(epoch)
             if retainsSessionTransition(error) { state = .offlineReady }
             throw error
         }
@@ -3064,7 +3187,8 @@ public actor OnloSDK {
         return result.result
     }
 
-    private func applyResumedSession(_ result: SessionResult, previous: StoredSessionCredential) async throws {
+    private func applyResumedSession(_ result: SessionResult, previous: StoredSessionCredential, epoch: UUID) async throws {
+        try requireSessionEpoch(epoch)
         // Rotate the actor-visible bearer authority before the persistence
         // actor arbitrates the final old-vs-revocation ordering.
         configAuthority = UUID()
@@ -3075,12 +3199,18 @@ public actor OnloSDK {
             // A server-side identity transition cannot expose the old partition locally.
             cancelActiveSends(for: previous.ownerScope)
             await revokePersistenceAuthority(for: previous.ownerScope)
+            try requireSessionEpoch(epoch)
             await invalidateMessengerPresentations()
+            try requireSessionEpoch(epoch)
             try await ownerStore.beginLogout(for: previous.ownerScope)
+            try requireSessionEpoch(epoch)
             try await ownerStore.finishLogout(for: previous.ownerScope)
+            try requireSessionEpoch(epoch)
             try? await pushIntentStore.clear()
+            try requireSessionEpoch(epoch)
             scope = OwnerScope(kind: result.identityClass == .anonymous ? .anonymous : .identified)
             try await ownerStore.prepare(scope: scope)
+            try requireSessionEpoch(epoch)
         }
         // A resumed session may rotate the bearer while retaining the same
         // owner. Release its old stream before publishing the replacement so
@@ -3088,6 +3218,7 @@ public actor OnloSDK {
         if runtimeSession?.credential.ownerScope == scope {
             cancelActiveSends(for: scope)
             await revokePersistenceAuthority(for: scope)
+            try requireSessionEpoch(epoch)
         }
         let credential = StoredSessionCredential(
             installationId: result.installationId,
@@ -3097,11 +3228,12 @@ public actor OnloSDK {
             ownerScope: scope,
             logoutPending: false
         )
-        try await commitProtectedState(credential: credential, pendingTransition: nil)
+        try await commitProtectedState(credential: credential, pendingTransition: nil, expectedEpoch: epoch)
+        try requireSessionEpoch(epoch)
         runtimeSession = RuntimeSession(sessionId: result.sessionId, chatToken: result.chatToken, credential: credential)
-        try await activatePersistenceAuthority(for: runtimeSession!)
+        try await activatePersistenceAuthority(for: runtimeSession!, expectedEpoch: epoch)
+        try requireSessionEpoch(epoch)
         state = result.identityClass == .anonymous ? .anonymousReady : .identifiedReady
-        await refreshConfigurationAfterSessionSuccess()
         startDurableDispatchIfNeeded()
         startForegroundStreamIfAvailable()
         schedulePushReconciliationAfterSessionSuccess()
@@ -3557,14 +3689,32 @@ public actor OnloSDK {
         }
     }
 
+    private func acquireProtectedWrite() async {
+        if protectedWriteActive {
+            await withCheckedContinuation { protectedWriteWaiters.append($0) }
+        } else {
+            protectedWriteActive = true
+        }
+    }
+
+    private func releaseProtectedWrite() {
+        if protectedWriteWaiters.isEmpty { protectedWriteActive = false }
+        else { protectedWriteWaiters.removeFirst().resume() }
+    }
+
     private func commitProtectedState(
         credential: StoredSessionCredential?,
         pendingTransition: PendingSessionTransition?,
-        retryGate: SessionRetryGate? = nil
+        retryGate: SessionRetryGate? = nil,
+        expectedEpoch: UUID? = nil
     ) async throws {
+        await acquireProtectedWrite()
+        defer { releaseProtectedWrite() }
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
         try await credentialStore.saveState(
             ProtectedSessionState(credential: credential, pendingTransition: pendingTransition, retryGate: retryGate)
         )
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
     }
 
     /// A decoded `never` response is terminal. `after_full_sync` cannot apply to
@@ -3572,8 +3722,10 @@ public actor OnloSDK {
     /// directives retain the exact pending transition for their prerequisite.
     private func resolveDefinitiveSessionFailure(
         _ error: Error,
-        credential: StoredSessionCredential?
+        credential: StoredSessionCredential?,
+        expectedEpoch: UUID? = nil
     ) async throws {
+        if let expectedEpoch { try requireSessionEpoch(expectedEpoch) }
         guard let onloError = error as? OnloError,
               case .remote(let remote) = onloError else { return }
         if let credential, let current = try await credentialStore.loadState().credential,
@@ -3584,11 +3736,11 @@ public actor OnloSDK {
         }
         switch remote.retry.directive {
         case .never, .afterFullSync:
-            try await commitProtectedState(credential: credential, pendingTransition: nil)
+            try await commitProtectedState(credential: credential, pendingTransition: nil, expectedEpoch: expectedEpoch)
         case .afterTokenRefresh:
-            try await retainRetryGate(.afterTokenRefresh, credential: credential)
+            try await retainRetryGate(.afterTokenRefresh, credential: credential, expectedEpoch: expectedEpoch)
         case .afterAttestation:
-            try await retainRetryGate(.afterAttestation, credential: credential)
+            try await retainRetryGate(.afterAttestation, credential: credential, expectedEpoch: expectedEpoch)
         case .afterBackoff:
             let state = try await credentialStore.loadState()
             let previousAttempt: Int
@@ -3605,7 +3757,7 @@ public actor OnloSDK {
                 let jitter = min(max(backoffJitter(attempt), -0.2), 0.2)
                 delay = (baseMs * (1 + jitter)) / 1_000
             }
-            try await retainRetryGate(.afterBackoff(eligibleAt: now().addingTimeInterval(delay), fallbackAttempt: attempt), credential: credential)
+            try await retainRetryGate(.afterBackoff(eligibleAt: now().addingTimeInterval(delay), fallbackAttempt: attempt), credential: credential, expectedEpoch: expectedEpoch)
         }
     }
 
@@ -3617,25 +3769,23 @@ public actor OnloSDK {
         }
     }
 
-    private func retainRetryGate(_ gate: SessionRetryGate, credential: StoredSessionCredential?) async throws {
+    private func retainRetryGate(_ gate: SessionRetryGate, credential: StoredSessionCredential?, expectedEpoch: UUID? = nil) async throws {
         let state = try await credentialStore.loadState()
-        try await commitProtectedState(credential: credential ?? state.credential, pendingTransition: state.pendingTransition, retryGate: gate)
+        try await commitProtectedState(credential: credential ?? state.credential, pendingTransition: state.pendingTransition, retryGate: gate, expectedEpoch: expectedEpoch)
     }
 
-    private func ensurePendingReplayAllowed(_ pending: PendingSessionTransition, userJwtProvided: Bool) async throws {
+    private func ensurePendingReplayAllowed(_ pending: PendingSessionTransition, userJwtProvided: Bool, expectedEpoch: UUID? = nil) async throws {
         let state = try await credentialStore.loadState()
         guard state.pendingTransition == pending else { throw OnloError.invalidState }
         switch state.retryGate {
         case nil: return
         case .afterBackoff(let eligibleAt, _):
             guard now() >= eligibleAt else { throw OnloError.requiresNetwork }
-            try await commitProtectedState(credential: state.credential, pendingTransition: pending, retryGate: nil)
+            try await commitProtectedState(credential: state.credential, pendingTransition: pending, retryGate: nil, expectedEpoch: expectedEpoch)
         case .afterTokenRefresh:
-            // Outside Identify the server sends this directive only as `session_expired`, so the
-            // retained transition presents a credential that was already rejected (SDK <= 0.3.2).
             guard pending.isIdentify else { throw PersistedCredentialRejection() }
             guard userJwtProvided else { throw OnloError.invalidState }
-            try await commitProtectedState(credential: state.credential, pendingTransition: pending, retryGate: nil)
+            try await commitProtectedState(credential: state.credential, pendingTransition: pending, retryGate: nil, expectedEpoch: expectedEpoch)
         case .afterAttestation:
             // No v1 iOS attestation implementation exists yet; never pretend a
             // proof was refreshed or replay a protected transition without one.
@@ -3660,6 +3810,12 @@ public actor OnloSDK {
         return parts.count == 3 && parts.allSatisfy { !$0.isEmpty && $0.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" } }
     }
 
+    /// Native framework diagnostic seam. Bridge error payloads remain unchanged.
+    @_spi(FrameworkBridge)
+    public func recordFrameworkFailure(_ error: OnloError, startedAt: Date) async {
+        await record(operation: "framework_bridge", code: error.safeCode, requestId: error.requestId, startedAt: startedAt)
+    }
+
     private func record(operation: String, code: String, requestId: String?, startedAt: Date) async {
         let duration = max(0, Int(Date().timeIntervalSince(startedAt) * 1_000))
         await logger.record(
@@ -3667,7 +3823,7 @@ public actor OnloSDK {
                 operation: operation,
                 code: code,
                 requestId: requestId,
-                sdkVersion: configuration?.sdkVersion ?? "unknown",
+                sdkVersion: configuration?.sdkVersion ?? OnloSDKVersion.current,
                 durationMs: duration
             )
         )

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.4
+
+- Fence targeted recovery to the original owner; retain terminal non-401 behavior and one retry.
+- Add safe native diagnostics without changing bridge error payloads.
+
 ## 0.3.3
 
 - Included the native session-recovery fixes for rejected installation

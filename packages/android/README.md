@@ -4,7 +4,7 @@ Add Onlo’s ready-made support Messenger to an Android app. Get the basic flow 
 
 > **Want working code first?** Start with the [runnable Android example](../../examples/android/README.md). It uses the SDK source in this repository and demonstrates initialization, anonymous and signed-in login, Messenger presentation, logout, and FCM forwarding.
 
-> **Package availability:** version `0.3.3` is prepared in this repository, but the public package is not published yet. Install only a version marked as available in **Onlo Dashboard → WebChat → Install → Mobile app**; otherwise, run the repository example.
+> **Source version: 0.3.4.** Installation examples below target this release; use them once publication is verified. See [actual registry availability](../../README.md#published-versions). Version 0.3.4 includes the session-concurrency correction.
 
 ## Prerequisites
 
@@ -56,7 +56,7 @@ repositories {
 }
 
 dependencies {
-    implementation("ai.onlo:onlo-android-sdk:0.3.3")
+    implementation("ai.onlo:onlo-android-sdk:0.3.4")
 }
 ```
 
@@ -139,7 +139,7 @@ Expected result: tapping Support opens Onlo’s native Messenger. Onlo does not 
 
 ## 2. Verify signed-in customer identity
 
-Identified login starts with your app’s existing authentication. Customers do not enter an Onlo OTP or sign in a second time.
+Identified login starts with your app’s existing authentication. Customers do not enter an Onlo OTP or sign in a second time. Your backend must authenticate the app session and derive the customer ID from it; never mint a proof from an unverified email or client-supplied customer ID. The merchant test backend’s login code is only for synthetic test users.
 
 ### Generate and store the identity secret
 
@@ -380,6 +380,8 @@ If logout remains pending, keep Support disabled until native recovery completes
 - No identity secret, JWT, provider credential, push token, customer data, or message content is stored or logged by the host app.
 
 ## Troubleshooting
+
+For conversation-opening failures, record the installed wrapper/native versions, platform, and safe error code/request ID when available. Do not log or share JWTs, credentials, push tokens, or customer messages. `native_operation_failed` alone does not establish an expired-token cause. Avoid host retry loops or reinstalling as an authentication workaround.
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |

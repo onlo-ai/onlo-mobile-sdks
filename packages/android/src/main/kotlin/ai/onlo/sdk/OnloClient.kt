@@ -476,16 +476,31 @@ public class OnloClient internal constructor(
 
     /** Refetches with current bearer authority before allowing a targeted native presentation. */
     public suspend fun openConversation(conversationId: String): OpenConversationOutcome =
-        openConversation(conversationId, allowTokenRefresh = true)
+        openConversation(conversationId, allowTokenRefresh = true, expectedOwner = null)
 
-    private suspend fun openConversation(conversationId: String, allowTokenRefresh: Boolean): OpenConversationOutcome {
-        if (conversationId.isBlank()) return OpenConversationOutcome.NotAuthorised
+    private suspend fun openConversation(
+        conversationId: String,
+        allowTokenRefresh: Boolean,
+        expectedOwner: OwnerScope?,
+    ): OpenConversationOutcome {
+        val startedAt = nowMs()
+        fun logFailure(code: String) = logger.log(SafeLogEvent(
+            SafeLogCode.CONVERSATION_OPEN_FAILED, configuration.sdkVersion,
+            detailCode = code, durationMs = (nowMs() - startedAt).coerceAtLeast(0),
+        ))
+        if (conversationId.isBlank()) {
+            logFailure("invalid_argument")
+            return OpenConversationOutcome.NotAuthorised
+        }
         val capture = operationMutex.withLock {
             val session = inMemorySession ?: return@withLock null
             val protected = protectedSession ?: return@withLock null
             val api = widgetChatApi ?: return@withLock null
-            if (protected.logoutPending) null else ConversationOpenAuthority(protected, session.sessionId, session.chatToken, configSessionVersion, api)
-        } ?: return OpenConversationOutcome.NoActiveSession
+            if (protected.logoutPending || (expectedOwner != null && protected.ownerScope() != expectedOwner)) null else ConversationOpenAuthority(protected, session.sessionId, session.chatToken, configSessionVersion, api)
+        } ?: run {
+            logFailure("no_active_session")
+            return OpenConversationOutcome.NoActiveSession
+        }
         return try {
             val convergence = TranscriptConvergence(capture.api, outboxStore)
             val persistenceAuthority = persistenceAuthority(capture)
@@ -517,16 +532,15 @@ public class OnloClient internal constructor(
             OpenConversationOutcome.NoActiveSession
         }
         catch (failure: WidgetHttpFailure) {
-            // The 15-minute chat token routinely expires while the host app stays open.
+            logFailure("widget_http_${failure.status}")
             if (allowTokenRefresh && failure.status == 401 && refreshMessengerBearer(capture)) {
-                openConversation(conversationId, allowTokenRefresh = false)
-            } else {
-                OpenConversationOutcome.Unavailable
-            }
+                logger.log(SafeLogEvent(SafeLogCode.CONVERSATION_BEARER_REFRESHED, configuration.sdkVersion, detailCode = "retry_once"))
+                openConversation(conversationId, allowTokenRefresh = false, expectedOwner = capture.session.ownerScope())
+            } else OpenConversationOutcome.Unavailable
         }
-        catch (_: IOException) { OpenConversationOutcome.Unavailable }
-        catch (_: ProtocolViolation) { OpenConversationOutcome.NotAuthorised }
-        catch (_: ai.onlo.sdk.storage.OwnerBlockedException) { OpenConversationOutcome.NoActiveSession }
+        catch (_: IOException) { logFailure("network_unavailable"); OpenConversationOutcome.Unavailable }
+        catch (_: ProtocolViolation) { logFailure("invalid_response"); OpenConversationOutcome.NotAuthorised }
+        catch (_: ai.onlo.sdk.storage.OwnerBlockedException) { logFailure("owner_blocked"); OpenConversationOutcome.NoActiveSession }
     }
 
     /** SDK messenger-only inbox fetch. The list route is contract-backed and bearer-authorised. */

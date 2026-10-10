@@ -291,7 +291,10 @@ public class OnloSDKModule(
     }
 
     private fun requireCurrentActivity(): Activity =
-        availableCurrentActivity() ?: throw BridgeFailure("native_operation_failed")
+        availableCurrentActivity() ?: run {
+            OnloReactNativeBridge.reportMissingPresentationHost()
+            throw BridgeFailure("native_operation_failed")
+        }
 
     private fun runOperation(promise: Promise, operation: suspend () -> Unit) {
         moduleScope.launch {

@@ -29,9 +29,12 @@ final class NativeLifecycleBindingTests: XCTestCase {
         await transport.enqueueUnavailable()
         let sdk = OnloSDK(
             credentialStore: InMemoryCredentialStore(credential),
+            configStore: InMemoryConfigStore(),
+            pushIntentStore: InMemoryPushIntentStore(),
             ownerStore: InMemoryOwnerScopedStore(),
             transport: transport,
-            hostAppIdentifier: "com.example.host"
+            hostAppIdentifier: "com.example.host",
+            lifecycleBindingEnabled: false
         )
         let configuration = OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!)
         let initialState = try await sdk.initialize(configuration)
