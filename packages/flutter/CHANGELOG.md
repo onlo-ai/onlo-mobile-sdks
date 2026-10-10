@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.4
 
 - Fence targeted recovery to the original owner; retain terminal non-401 behavior and one retry.
 - Add safe native diagnostics without changing bridge error payloads.

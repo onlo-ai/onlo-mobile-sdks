@@ -13,6 +13,8 @@ Add Onlo’s ready-made support Messenger to an iOS, Android, React Native, or F
 
 ## Published versions
 
+Source candidate: **0.3.4**. The table records the last independently verified registry state; candidate source is not proof of publication.
+
 Verified from public artifacts on 2026-10-10; repository versions alone do not prove publication.
 
 | SDK | Published version | Registry |

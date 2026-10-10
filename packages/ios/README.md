@@ -4,7 +4,7 @@ Add Onlo’s ready-made support Messenger to an iOS app. Get the basic flow work
 
 > **Want working code first?** Start with the [iOS integration example](../../examples/ios/README.md). It provides copy-ready host code for initialization, customer login, Messenger presentation, logout, and APNs callbacks. It is not a standalone Xcode app.
 
-> **Published version (verified 2026-10-10):** `0.3.3`. See [registry status and known issues](../../README.md#published-versions). The local concurrency correction is not yet released.
+> **Source version: 0.3.4.** Installation examples below target this release; use them once publication is verified. See [actual registry availability](../../README.md#published-versions). Version 0.3.4 includes the session-concurrency correction.
 
 ## Prerequisites
 
@@ -52,21 +52,21 @@ In Xcode, select **File → Add Package Dependencies** and enter:
 https://github.com/onlo-ai/onlo-mobile-sdks
 ```
 
-Choose exact version `0.3.3` and add the `OnloSDK` product once.
+Choose exact version `0.3.4` and add the `OnloSDK` product once.
 
 For a manifest-based host:
 
 ```swift
 .package(
     url: "https://github.com/onlo-ai/onlo-mobile-sdks.git",
-    exact: "0.3.3"
+    exact: "0.3.4"
 )
 ```
 
 For CocoaPods:
 
 ```ruby
-pod 'OnloSDK', '0.3.3'
+pod 'OnloSDK', '0.3.4'
 ```
 
 Run `pod install`, then open the generated workspace. Use Swift Package Manager or CocoaPods for a target, never both.

@@ -2,15 +2,26 @@ name: SDK release qualification
 
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      npm_diagnostics:
+        description: Read-only npm credential diagnosis (no publication)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 jobs:
   shared:
+    if: ${{ inputs.npm_diagnostics != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
           cache: npm
@@ -20,6 +31,7 @@ jobs:
       - run: npm run test:conformance
       - run: npm run test:hygiene
       - run: npm run check:hygiene
+      - run: python3 -m unittest discover -s scripts -p 'test_release*.py' -v
       - run: npm run check:versions
       - run: npm --prefix packages/react-native test
       - name: Validate React Native package contents
@@ -27,15 +39,16 @@ jobs:
         working-directory: packages/react-native
 
   android:
+    if: ${{ inputs.npm_diagnostics != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
         with:
           # The current sdkmanager no longer ships the legacy `tools` package the action installs by default.
           packages: platform-tools
@@ -46,18 +59,30 @@ jobs:
       - run: packages/android/gradlew -p examples/android :app:assembleRelease
 
   ios:
+    if: ${{ inputs.npm_diagnostics != true }}
     runs-on: macos-15
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - run: swift package resolve
       - run: swift build -c release
       - run: pod lib lint OnloSDK.podspec --allow-warnings
       - run: swift test --package-path packages/ios
+      - name: Test native session races on iOS Simulator
+        working-directory: packages/ios
+        run: |
+          device_id="$(python3 - <<'PYTHON'
+          import json, subprocess
+          devices = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'available', '--json']))['devices']
+          print(next(d['udid'] for runtime, entries in devices.items() if 'iOS' in runtime for d in entries if d['name'].startswith('iPhone')))
+          PYTHON
+          )"
+          xcodebuild -scheme OnloSDK -destination "platform=iOS Simulator,id=$device_id" -parallel-testing-enabled NO test
       - name: Build native example unsigned
         run: xcodebuild -project examples/ios-local-e2e/OnloLocalE2EApp.xcodeproj -scheme OnloLocalE2EApp -configuration Release -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build
 
   react-native:
+    if: ${{ inputs.npm_diagnostics != true }}
     strategy:
       fail-fast: false
       matrix:
@@ -65,16 +90,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
         if: runner.os == 'Linux'
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
         if: runner.os == 'Linux'
         with:
           packages: platform-tools
@@ -98,6 +123,7 @@ jobs:
         working-directory: examples/react-native
 
   flutter:
+    if: ${{ inputs.npm_diagnostics != true }}
     strategy:
       fail-fast: false
       matrix:
@@ -105,8 +131,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
         with:
           flutter-version: "3.44.2"
           cache: true
@@ -127,3 +153,36 @@ jobs:
       - run: flutter build ios --release --no-codesign
         if: runner.os == 'macOS'
         working-directory: examples/flutter
+
+  required:
+    name: SDK CI required
+    needs: [shared, android, ios, react-native, flutter]
+    if: always() && inputs.npm_diagnostics != true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every SDK gate
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          assert len(results) == 5 and all(v['result'] == 'success' for v in results.values()), 'SDK qualification incomplete'
+          PYTHON
+
+  npm-diagnostics:
+    if: github.event_name == 'workflow_dispatch' && inputs.npm_diagnostics == true
+    runs-on: ubuntu-latest
+    environment: sdk-release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+      - name: Diagnose npm identity and package access without publishing
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: node scripts/npm-auth-diagnostics.mjs

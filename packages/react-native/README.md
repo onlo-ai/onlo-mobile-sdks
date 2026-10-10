@@ -4,7 +4,7 @@ Add Onlo’s ready-made native support Messenger to a React Native app. Get the 
 
 > **Want working code first?** Start with the [runnable React Native example](../../examples/react-native/README.md). It uses the local bridge and native SDKs from this repository and demonstrates initialization, customer login, Messenger presentation, logout, and push-forwarding hooks.
 
-> **Published version (verified 2026-10-10):** `0.3.2`. See [registry status and known issues](../../README.md#published-versions). The local concurrency correction is not yet released.
+> **Source version: 0.3.4.** Installation examples below target this release; use them once publication is verified. See [actual registry availability](../../README.md#published-versions). Version 0.3.4 includes the session-concurrency correction.
 
 React Native is a typed facade. The iOS and Android Onlo cores own credentials, sessions, offline messages, push registration, and UI.
 
@@ -52,11 +52,11 @@ Never store Onlo JWTs, session state, push tokens, customer data, or messages in
 ### Install the package
 
 ```bash
-npm install @onlo-ai/react-native@0.3.2
+npm install @onlo-ai/react-native@0.3.4
 cd ios && pod install
 ```
 
-The published 0.3.2 package resolves matching 0.3.2 native cores on iOS and Android. Do not add either native core manually.
+The 0.3.4 package resolves matching 0.3.4 native cores on iOS and Android. Do not add either native core manually.
 
 Expected result: the import resolves and both native hosts build:
 

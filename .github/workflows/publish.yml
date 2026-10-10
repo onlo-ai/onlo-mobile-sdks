@@ -2,360 +2,145 @@ name: Publish mobile SDKs
 
 on:
   push:
-    tags:
-      - "[0-9]+.[0-9]+.[0-9]+"
-  workflow_dispatch:
-    inputs:
-      release_ref:
-        description: Existing tag or commit to publish
-        required: true
-        default: 0.2.0
-      version:
-        description: Exact package version at release_ref
-        required: true
-        default: 0.2.0
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
 concurrency:
   group: mobile-sdk-publication
   cancel-in-progress: false
 
 jobs:
-  preflight:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    outputs:
-      release_ref: ${{ steps.release.outputs.release_ref }}
-      version: ${{ steps.release.outputs.version }}
-      publish_flutter: ${{ steps.release.outputs.publish_flutter }}
-    steps:
-      - id: release
-        name: Resolve immutable release
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          TAG_NAME: ${{ github.ref_name }}
-          INPUT_REF: ${{ inputs.release_ref }}
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          if [[ "$EVENT_NAME" == "push" ]]; then
-            version="$TAG_NAME"
-            release_ref="$TAG_NAME"
-            publish_flutter="true"
-          else
-            version="$INPUT_VERSION"
-            release_ref="$INPUT_REF"
-            publish_flutter="false"
-          fi
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Invalid semantic version: $version" >&2
-            exit 1
-          fi
-          echo "release_ref=$release_ref" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "publish_flutter=$publish_flutter" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.release.outputs.release_ref }}
-          fetch-depth: 0
-
-      - name: Validate every package version and identity
-        shell: bash
-        env:
-          VERSION: ${{ steps.release.outputs.version }}
-        run: |
-          set -euo pipefail
-          npm run check:versions -- --expected "$VERSION"
-          git ls-remote --exit-code origin "refs/tags/$VERSION"
-          tag_commit="$(git rev-parse "refs/tags/$VERSION^{commit}")"
-          checkout_commit="$(git rev-parse HEAD)"
-          if [[ "$checkout_commit" != "$tag_commit" ]]; then
-            echo "release_ref must resolve to the commit tagged $VERSION" >&2
-            exit 1
-          fi
-
-  publish-ios:
-    needs: preflight
+  prepare:
     runs-on: macos-15
-    environment: sdk-release
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.preflight.outputs.release_ref }}
-
-      - id: existing
-        name: Check CocoaPods version
-        shell: bash
-        env:
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          if pod trunk info OnloSDK 2>/dev/null | grep -Eq "^[[:space:]]+- ${VERSION} \\("; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish OnloSDK to CocoaPods
-        if: steps.existing.outputs.published != 'true'
-        env:
-          COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
-        run: pod trunk push OnloSDK.podspec --allow-warnings
-
-  publish-android:
-    needs: preflight
-    runs-on: ubuntu-latest
-    environment: sdk-release
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.preflight.outputs.release_ref }}
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - uses: android-actions/setup-android@v3
-        with:
-          # The current sdkmanager no longer ships the legacy `tools` package the action installs by default.
-          packages: platform-tools
-
-      - name: Install Android publication toolchain
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
-
-      - id: existing
-        name: Check Maven Central version
-        shell: bash
-        env:
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          url="https://repo1.maven.org/maven2/ai/onlo/onlo-android-sdk/${VERSION}/onlo-android-sdk-${VERSION}.pom"
-          if curl --fail --silent --show-error --location "$url" >/dev/null; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish Android SDK to Maven Central
-        if: steps.existing.outputs.published != 'true'
-        env:
-          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
-          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
-          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.MAVEN_SIGNING_KEY }}
-          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.MAVEN_SIGNING_PASSWORD }}
-        run: |
-          packages/android/gradlew -p packages/android \
-            publishAndReleaseToMavenCentral \
-            -Ponlo.maven.central=true \
-            -Ponlo.release.version=${{ needs.preflight.outputs.version }}
-
-  verify-ios:
-    needs: [preflight, publish-ios]
-    runs-on: macos-15
-    permissions:
-      contents: read
-    steps:
-      - name: Verify public SwiftPM tag
-        shell: bash
-        env:
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          git ls-remote --exit-code \
-            https://github.com/onlo-ai/onlo-mobile-sdks.git \
-            "refs/tags/$VERSION"
-
-      - name: Verify public CocoaPods version
-        shell: bash
-        env:
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          for attempt in {1..20}; do
-            if pod trunk info OnloSDK 2>/dev/null | grep -Eq "^[[:space:]]+- ${VERSION} \\("; then
-              exit 0
-            fi
-            sleep 15
-          done
-          echo "OnloSDK $VERSION is not publicly resolvable" >&2
-          exit 1
-
-  verify-android:
-    needs: [preflight, publish-android]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Verify public Maven version
-        shell: bash
-        env:
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          url="https://repo1.maven.org/maven2/ai/onlo/onlo-android-sdk/${VERSION}/onlo-android-sdk-${VERSION}.pom"
-          for attempt in {1..120}; do
-            if curl --fail --silent --show-error --location "$url" >/dev/null; then
-              exit 0
-            fi
-            sleep 15
-          done
-          echo "Android SDK $VERSION is not publicly resolvable" >&2
-          exit 1
-
-  publish-react-native:
-    needs: [preflight, verify-ios, verify-android]
-    runs-on: ubuntu-latest
-    environment: sdk-release
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.preflight.outputs.release_ref }}
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          registry-url: https://registry.npmjs.org
-          cache: npm
-
-      - id: existing
-        name: Check npm version
-        shell: bash
-        env:
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          if npm view "@onlo-ai/react-native@$VERSION" version >/dev/null 2>&1; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish React Native package
-        if: steps.existing.outputs.published != 'true'
-        working-directory: packages/react-native
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
-
-  publish-flutter:
-    needs: [preflight, verify-ios, verify-android]
-    if: needs.preflight.outputs.publish_flutter == 'true'
-    runs-on: ubuntu-latest
-    environment: sdk-release
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.preflight.outputs.release_ref }}
-
-      - uses: dart-lang/setup-dart@v1
-
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: "3.44.2"
-          cache: true
-
-      - id: existing
-        name: Check pub.dev version
-        shell: bash
-        env:
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          if curl --fail --silent --show-error --location \
-            "https://pub.dev/api/packages/onlo_flutter" |
-            grep -Fq "\"version\":\"$VERSION\""; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish Flutter package
-        if: steps.existing.outputs.published != 'true'
-        working-directory: packages/flutter
-        run: dart pub publish --force
-
-  verify-wrappers:
-    needs: [preflight, publish-react-native, publish-flutter]
-    if: always() && needs.publish-react-native.result == 'success' && (needs.publish-flutter.result == 'success' || needs.publish-flutter.result == 'skipped')
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - name: Verify public npm version
-        shell: bash
-        env:
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          for attempt in {1..20}; do
-            if [[ "$(npm view "@onlo-ai/react-native@$VERSION" version 2>/dev/null)" == "$VERSION" ]]; then
-              exit 0
-            fi
-            sleep 15
-          done
-          echo "React Native SDK $VERSION is not publicly resolvable" >&2
-          exit 1
-
-      - name: Verify public pub.dev version when requested
-        if: needs.preflight.outputs.publish_flutter == 'true'
-        shell: bash
-        env:
-          VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          set -euo pipefail
-          for attempt in {1..40}; do
-            if curl --fail --silent --show-error --location \
-              "https://pub.dev/api/packages/onlo_flutter" |
-              grep -Fq "\"version\":\"$VERSION\""; then
-              exit 0
-            fi
-            sleep 15
-          done
-          echo "Flutter SDK $VERSION is not publicly resolvable" >&2
-          exit 1
-
-  github-release:
-    needs: [preflight, verify-wrappers]
-    if: github.event_name == 'push' && needs.verify-wrappers.result == 'success'
-    runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: write
+      actions: read
+    outputs:
+      manifest_sha: ${{ steps.manifest.outputs.sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ needs.preflight.outputs.release_ref }}
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.preflight.outputs.release_ref }}
-          VERSION: ${{ needs.preflight.outputs.version }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require protected main ancestry and exact-SHA CI
+        run: python3 scripts/release_control.py authority "$VERSION"
+      - name: Verify every SDK version
+        run: npm run check:versions -- --expected "$VERSION"
+      - id: existing
+        name: Reuse an immutable prepared draft on rerun
         run: |
           set -euo pipefail
-          notes_file="$RUNNER_TEMP/release-notes.md"
-          awk -v heading="## $VERSION" '
-            $0 == heading { found = 1; next }
-            found && /^## / { exit }
-            found { print }
-            END { if (!found) exit 1 }
-          ' CHANGELOG.md > "$notes_file"
-          test -s "$notes_file"
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
-            gh release create "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "Onlo Mobile SDKs $VERSION" \
-              --notes-file "$notes_file"
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          exists="$(python3 -c 'import json,os; print(str(any(r["tag_name"] == os.environ["VERSION"] for r in json.load(open(os.environ["RUNNER_TEMP"] + "/releases.json")))).lower())')"
+          echo "exists=$exists" >> "$GITHUB_OUTPUT"
+          if [[ "$exists" == true ]]; then
+            python3 scripts/release_control.py restore "$VERSION" --directory "$RUNNER_TEMP/restored"
+          fi
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        if: steps.existing.outputs.exists != 'true'
+        with:
+          node-version: '22'
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        if: steps.existing.outputs.exists != 'true'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+        if: steps.existing.outputs.exists != 'true'
+        with:
+          packages: platform-tools
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        if: steps.existing.outputs.exists != 'true'
+        with:
+          flutter-version: '3.44.2'
+      - name: Prepare publishable bytes once
+        if: steps.existing.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/prepared/maven"
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          packages/android/gradlew -p packages/android publishReleasePublicationToQualificationRepository -Ponlo.maven.repository="$RUNNER_TEMP/maven"
+          export PREPARED="$RUNNER_TEMP/prepared"
+          python3 - <<'PYTHON'
+          import os, pathlib, shutil
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          for p in (root / 'maven/ai/onlo/onlo-android-sdk' / os.environ['VERSION']).iterdir():
+              if p.suffix in ('.aar', '.jar', '.pom', '.module'):
+                  shutil.copy2(p, root / 'prepared/maven' / p.name)
+          PYTHON
+          npm pack ./packages/react-native --json --pack-destination "$RUNNER_TEMP" > "$RUNNER_TEMP/npm-pack.json"
+          python3 - <<'PYTHON'
+          import json, os, pathlib, shutil
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          metadata = json.loads((root / 'npm-pack.json').read_text())
+          shutil.move(root / metadata[0]['filename'], root / 'prepared/react-native.tgz')
+          PYTHON
+          (cd packages/flutter && dart pub publish --dry-run --to-archive="$RUNNER_TEMP/prepared/flutter.tar.gz")
+          pod ipc spec OnloSDK.podspec > "$RUNNER_TEMP/prepared/OnloSDK.podspec.json"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/prepared/ios-source.tar.gz"
+          python3 scripts/release_artifacts.py create "$RUNNER_TEMP/prepared" --version "$VERSION" --commit "$(git rev-parse HEAD)"
+          python3 scripts/release_control.py draft "$VERSION" --directory "$RUNNER_TEMP/prepared"
+      - id: manifest
+        name: Bind approval to the prepared manifest
+        env:
+          EXISTING: ${{ steps.existing.outputs.exists }}
+        run: |
+          python3 - <<'PYTHON'
+          import hashlib, os, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          manifest = root / ('restored/manifest.json' if os.environ['EXISTING'] == 'true' else 'prepared/manifest.json')
+          digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output: output.write('sha=' + digest + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output: output.write('DRAFT prepared. Approval manifest SHA-256: `' + digest + '`\n')
+          PYTHON
+
+  publish:
+    needs: prepare
+    runs-on: macos-15
+    timeout-minutes: 120
+    environment: sdk-release
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ github.ref_name }}
+      MANIFEST_SHA: ${{ needs.prepare.outputs.manifest_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Revalidate authority and download approved bytes
+        run: python3 scripts/release_control.py restore "$VERSION" --directory "$RUNNER_TEMP/approved"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          registry-url: https://registry.npmjs.org
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        with:
+          flutter-version: '3.44.2'
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d
+        with:
+          sdk: '3.12.2'
+      - name: Install signing tool
+        run: command -v gpg >/dev/null || brew install gnupg
+      - name: Publish missing packages and verify actual registry bytes
+        env:
+          NPM_E404_RESOLVED: ${{ vars.NPM_E404_RESOLVED }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          COCOAPODS_TRUNK_TOKEN: ${{ secrets.COCOAPODS_TRUNK_TOKEN }}
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          MAVEN_SIGNING_KEY: ${{ secrets.MAVEN_SIGNING_KEY }}
+          MAVEN_SIGNING_PASSWORD: ${{ secrets.MAVEN_SIGNING_PASSWORD }}
+        run: python3 scripts/release_publish.py "$VERSION" "$RUNNER_TEMP/approved/prepared" --manifest-sha "$MANIFEST_SHA"
+      - name: Finalize only after four independent registry verifications
+        run: python3 scripts/release_control.py finalize "$VERSION" --directory "$RUNNER_TEMP/approved/prepared" --manifest-sha "$MANIFEST_SHA"

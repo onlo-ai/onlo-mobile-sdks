@@ -51,3 +51,16 @@ Post-expiry: human dashboard reply displayed live; subsequent identified outboun
 - Artifact checks: candidate Maven publication bundle and RN package pass; Flutter dry-run reports only dirty-Git warning. Flutter host example is outside the published plugin and is not a release blocker.
 - NO-SHIP: release workflow, npm authorization diagnosis, approved unused patch version and registry content verification remain gates. Existing 0.3.3 stays immutable. Local commit/reconciliation only; no push, tag movement or publication.
 - Evidence: `published-artifact-audit/` in the durable evidence directory above. Customer/developer READMEs now state verified availability, merchant-auth requirements and known issue.
+
+## 0.3.4 release controls
+
+Candidate 0.3.4: all four registry version endpoints returned 404 on 2026-10-10. Existing 0.3.3 untouched. Publication remains NO-SHIP until remote gates pass.
+
+- CI: PR + main; five independent jobs, aggregate `SDK CI required`, Simulator race tests; no publishing credentials.
+- Guarded tag worker: tag SHA must belong to protected main with successful exact-SHA main CI. Draft + prepared manifest precede `sdk-release` approval by `betavirus777`.
+- Android: approved AAR/POM/source/Javadoc/module bytes; sign/upload those files without rebuilding. npm + Flutter: publish prepared archives, compare downloaded SHA-256. iOS: canonical CocoaPods spec plus downloaded SwiftPM archive file-content SHA-256 (paths/executable bits retained; archive timestamps ignored).
+- Match → skip. Mismatch/partial/unverifiable → stop. Draft stays unpublished until all four independently verify. Unknown upload outcome requires registry/deployment diagnosis before retry; prepared assets are never overwritten.
+- npm diagnosis: dispatch `release-qualification.yml` on main with `npm_diagnostics=true`; read-only, environment-approved, no upload. Identity/access success alone does not prove granular token scope or resolve the old E404. Set environment variable `NPM_E404_RESOLVED=true` only after cause/correction evidence exists.
+- Local workflow validation: actionlint 1.7.12; 22 release regression tests. Real 0.3.3 CocoaPods/SwiftPM, Maven AAR and pub.dev content comparisons passed. New pipeline has not yet run remotely; Central upload/new npm authorization remain unverified.
+
+Fresh 0.3.4 local gates: iOS 138 macOS + 138 Simulator, Android 135, Flutter 9, React Native 18; all native/wrapper release builds and pod lint pass. RN iOS first failed on stale installed Pods; `pod install` then `npm run build:ios:release` passed. Exact commands/logs: `/tmp/onlo-034-gates.json`, `/tmp/onlo-034-rn-pod-install.log`, `/tmp/onlo-034-rn-ios-retry.log`.
