@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 import uuid
 import zipfile
@@ -76,6 +77,27 @@ def require_npm_oidc(version):
         raise ValueError('npm OIDC requires Node >=24.15.0 and pinned npm 12.2.0')
 
 
+def publish_flutter(directory):
+    # setup-dart registers PUB_TOKEN; earlier registry uploads may outlive that JWT.
+    # Mint immediately before upload and keep it in this child process environment.
+    endpoint = os.environ.get('ACTIONS_ID_TOKEN_REQUEST_URL', '')
+    request_token = os.environ.get('ACTIONS_ID_TOKEN_REQUEST_TOKEN', '')
+    if urllib.parse.urlsplit(endpoint).scheme != 'https' or not request_token:
+        raise ValueError('Flutter publication requires GitHub OIDC credentials')
+    parts = urllib.parse.urlsplit(endpoint)
+    query = dict(urllib.parse.parse_qsl(parts.query))
+    query['audience'] = 'https://pub.dev'
+    endpoint = urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
+    request = urllib.request.Request(endpoint, headers={'Authorization': 'Bearer ' + request_token})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        token = json.load(response).get('value')
+    if not isinstance(token, str) or not token:
+        raise ValueError('GitHub OIDC response missing token')
+    environment = os.environ.copy()
+    environment['PUB_TOKEN'] = token
+    subprocess.run(['dart', 'pub', 'publish', '--force', '--from-archive=' + str(directory / 'flutter.tar.gz')], env=environment, check=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('version')
@@ -126,7 +148,7 @@ def main():
             elif name == 'android':
                 publish_maven(args.directory, args.version, lambda deployment: persist(name, {'state': 'uploaded', 'deploymentId': deployment}))
             elif name == 'flutter':
-                subprocess.run(['dart', 'pub', 'publish', '--force', '--from-archive=' + str(args.directory / 'flutter.tar.gz')], check=True)
+                publish_flutter(args.directory)
             else:
                 subprocess.run(['npm', 'publish', str(args.directory / 'react-native.tgz'), '--access', 'public', '--provenance', '--registry', 'https://registry.npmjs.org/'], check=True)
             # Bounded visibility polling; no upload retry. Mismatch stops immediately.
