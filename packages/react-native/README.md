@@ -4,7 +4,9 @@ Add Onlo’s ready-made native support Messenger to a React Native app. Get the 
 
 > **Want working code first?** Start with the [runnable React Native example](../../examples/react-native/README.md). It uses the local bridge and native SDKs from this repository and demonstrates initialization, customer login, Messenger presentation, logout, and push-forwarding hooks.
 
-> **Published version: 0.3.4.** Registry artifact content verified on 2026-10-10. See [actual registry availability](../../README.md#published-versions). Version 0.3.4 includes the session-concurrency correction.
+| Published version | Registry verification | Changes | CI/CD |
+| --- | --- | --- | --- |
+| 0.3.4 | [Artifact verified](https://github.com/onlo-ai/onlo-mobile-sdks/releases/tag/0.3.4) · 2026-10-10 | [0.3.4 changelog](https://github.com/onlo-ai/onlo-mobile-sdks/blob/0.3.4/packages/react-native/CHANGELOG.md#034) | [Live pipelines and release checks](https://github.com/onlo-ai/onlo-mobile-sdks#cicd-status) |
 
 React Native is a typed facade. The iOS and Android Onlo cores own credentials, sessions, offline messages, push registration, and UI.
 
