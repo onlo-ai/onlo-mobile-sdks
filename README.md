@@ -11,18 +11,31 @@ Add Onlo’s ready-made support Messenger to an iOS, Android, React Native, or F
 | React Native | [React Native guide](packages/react-native/README.md) | [React Native example](examples/react-native/README.md) |
 | Flutter | [Flutter guide](packages/flutter/README.md) | [Flutter example](examples/flutter/README.md) |
 
+## CI/CD status
+
+| Pipeline | Live status | Details |
+| --- | --- | --- |
+| Main CI | ![Main SDK CI](https://github.com/onlo-ai/onlo-mobile-sdks/actions/workflows/release-qualification.yml/badge.svg?branch=main&event=push) | [Tests and builds](https://github.com/onlo-ai/onlo-mobile-sdks/actions/workflows/release-qualification.yml?query=branch%3Amain+event%3Apush) |
+| SDK publishing | ![SDK publishing](https://github.com/onlo-ai/onlo-mobile-sdks/actions/workflows/publish.yml/badge.svg?event=push) | [Publish and artifact verification](https://github.com/onlo-ai/onlo-mobile-sdks/actions/workflows/publish.yml) |
+
+Badges show the latest workflow result; the table below records the verified published release.
+
 ## Published versions
 
 **0.3.4 is published across all four SDKs.** Downloaded registry artifacts match the approved [release manifest](https://github.com/onlo-ai/onlo-mobile-sdks/releases/tag/0.3.4).
 
 Verified from public artifacts on 2026-10-10; repository versions alone do not prove publication.
 
-| SDK | Published version | Registry |
-| --- | --- | --- |
-| iOS | 0.3.4 | [CocoaPods](https://trunk.cocoapods.org/api/v1/pods/OnloSDK/specs/0.3.4) / [SwiftPM tag](https://github.com/onlo-ai/onlo-mobile-sdks/tree/0.3.4) |
-| Android | 0.3.4 | [Maven Central](https://repo1.maven.org/maven2/ai/onlo/onlo-android-sdk/0.3.4/) |
-| Flutter | 0.3.4 | [pub.dev](https://pub.dev/packages/onlo_flutter/versions/0.3.4) |
-| React Native | 0.3.4 | [npm](https://www.npmjs.com/package/@onlo-ai/react-native/v/0.3.4) |
+| SDK | Version | Release CI | Publication | Changelog |
+| --- | --- | --- | --- | --- |
+| iOS | 0.3.4 | [Passed](https://github.com/onlo-ai/onlo-mobile-sdks/actions/runs/38047453416/job/114199736561) | [CocoaPods](https://trunk.cocoapods.org/api/v1/pods/OnloSDK/specs/0.3.4) / [SwiftPM](https://github.com/onlo-ai/onlo-mobile-sdks/tree/0.3.4) · content verified | [Changes](packages/ios/CHANGELOG.md#034) |
+| Android | 0.3.4 | [Passed](https://github.com/onlo-ai/onlo-mobile-sdks/actions/runs/38047453416/job/114199736395) | [Maven Central](https://repo1.maven.org/maven2/ai/onlo/onlo-android-sdk/0.3.4/) · hash verified | [Changes](packages/android/CHANGELOG.md#034) |
+| Flutter | 0.3.4 | [Android](https://github.com/onlo-ai/onlo-mobile-sdks/actions/runs/38047453416/job/114199736536) / [iOS](https://github.com/onlo-ai/onlo-mobile-sdks/actions/runs/38047453416/job/114199736544) passed | [pub.dev](https://pub.dev/packages/onlo_flutter/versions/0.3.4) · hash verified | [Changes](packages/flutter/CHANGELOG.md#034) |
+| React Native | 0.3.4 | [Android](https://github.com/onlo-ai/onlo-mobile-sdks/actions/runs/38047453416/job/114199736629) / [iOS](https://github.com/onlo-ai/onlo-mobile-sdks/actions/runs/38047453416/job/114199736619) passed | [npm](https://www.npmjs.com/package/@onlo-ai/react-native/v/0.3.4) · hash verified | [Changes](packages/react-native/CHANGELOG.md#034) |
+
+[Full changelog](CHANGELOG.md) · [Release notes and verification artifacts](https://github.com/onlo-ai/onlo-mobile-sdks/releases/tag/0.3.4)
+
+Changelogs describe each SDK release. README installation/status tables are updated after registry verification; documentation-only changes do not require a new SDK version.
 
 **Upgrade from iOS 0.3.3:** 0.3.4 fixes late-refresh logout/account-isolation races and delayed push recovery callbacks. Rebuild wrapper apps after upgrading their matching native dependencies. Customer-device incident verification remains separate from SDK publication.
 
