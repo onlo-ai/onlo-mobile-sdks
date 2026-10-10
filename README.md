@@ -13,18 +13,18 @@ Add Onlo’s ready-made support Messenger to an iOS, Android, React Native, or F
 
 ## Published versions
 
-Source candidate: **0.3.4**. The table records the last independently verified registry state; candidate source is not proof of publication.
+**0.3.4 is published across all four SDKs.** Downloaded registry artifacts match the approved [release manifest](https://github.com/onlo-ai/onlo-mobile-sdks/releases/tag/0.3.4).
 
 Verified from public artifacts on 2026-10-10; repository versions alone do not prove publication.
 
 | SDK | Published version | Registry |
 | --- | --- | --- |
-| iOS | 0.3.3 | [CocoaPods](https://trunk.cocoapods.org/api/v1/pods/OnloSDK/specs/0.3.3) / [SwiftPM tag](https://github.com/onlo-ai/onlo-mobile-sdks/tree/0.3.3) |
-| Android | 0.3.3 | [Maven Central](https://repo1.maven.org/maven2/ai/onlo/onlo-android-sdk/0.3.3/) |
-| Flutter | 0.3.3 | [pub.dev](https://pub.dev/packages/onlo_flutter/versions/0.3.3) |
-| React Native | 0.3.2 | [npm](https://www.npmjs.com/package/@onlo-ai/react-native/v/0.3.2) |
+| iOS | 0.3.4 | [CocoaPods](https://trunk.cocoapods.org/api/v1/pods/OnloSDK/specs/0.3.4) / [SwiftPM tag](https://github.com/onlo-ai/onlo-mobile-sdks/tree/0.3.4) |
+| Android | 0.3.4 | [Maven Central](https://repo1.maven.org/maven2/ai/onlo/onlo-android-sdk/0.3.4/) |
+| Flutter | 0.3.4 | [pub.dev](https://pub.dev/packages/onlo_flutter/versions/0.3.4) |
+| React Native | 0.3.4 | [npm](https://www.npmjs.com/package/@onlo-ai/react-native/v/0.3.4) |
 
-**Known iOS 0.3.3 issue:** a late refresh can restore the previous session after failed logout. A regression reproduces this in published source. The local correction is not yet published; do not treat repository HEAD or a successful package download as release acceptance. Rebuild wrapper apps after upgrading their matching native dependencies.
+**Upgrade from iOS 0.3.3:** 0.3.4 fixes late-refresh logout/account-isolation races and delayed push recovery callbacks. Rebuild wrapper apps after upgrading their matching native dependencies. Customer-device incident verification remains separate from SDK publication.
 
 ## Prerequisites
 

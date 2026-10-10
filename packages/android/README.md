@@ -4,7 +4,7 @@ Add Onlo’s ready-made support Messenger to an Android app. Get the basic flow 
 
 > **Want working code first?** Start with the [runnable Android example](../../examples/android/README.md). It uses the SDK source in this repository and demonstrates initialization, anonymous and signed-in login, Messenger presentation, logout, and FCM forwarding.
 
-> **Source version: 0.3.4.** Installation examples below target this release; use them once publication is verified. See [actual registry availability](../../README.md#published-versions). Version 0.3.4 includes the session-concurrency correction.
+> **Published version: 0.3.4.** Registry artifact content verified on 2026-10-10. See [actual registry availability](../../README.md#published-versions). Version 0.3.4 includes the session-concurrency correction.
 
 ## Prerequisites
 

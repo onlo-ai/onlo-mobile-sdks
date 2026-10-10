@@ -4,7 +4,7 @@ Add Onlo’s ready-made native support Messenger to a Flutter app. Get the basic
 
 > **Want working code first?** Start with the [runnable Flutter example](../../examples/flutter/README.md). It uses the local plugin and native SDKs from this repository and demonstrates initialization, customer login, Messenger presentation, logout, and push-forwarding hooks.
 
-> **Source version: 0.3.4.** Installation examples below target this release; use them once publication is verified. See [actual registry availability](../../README.md#published-versions). Version 0.3.4 includes the session-concurrency correction.
+> **Published version: 0.3.4.** Registry artifact content verified on 2026-10-10. See [actual registry availability](../../README.md#published-versions). Version 0.3.4 includes the session-concurrency correction.
 
 Flutter is a typed plugin. The iOS and Android Onlo cores own credentials, sessions, offline messages, push registration, and UI.
 

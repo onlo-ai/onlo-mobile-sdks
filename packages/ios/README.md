@@ -4,7 +4,7 @@ Add Onlo’s ready-made support Messenger to an iOS app. Get the basic flow work
 
 > **Want working code first?** Start with the [iOS integration example](../../examples/ios/README.md). It provides copy-ready host code for initialization, customer login, Messenger presentation, logout, and APNs callbacks. It is not a standalone Xcode app.
 
-> **Source version: 0.3.4.** Installation examples below target this release; use them once publication is verified. See [actual registry availability](../../README.md#published-versions). Version 0.3.4 includes the session-concurrency correction.
+> **Published version: 0.3.4.** Registry artifact content verified on 2026-10-10. See [actual registry availability](../../README.md#published-versions). Version 0.3.4 includes the session-concurrency correction.
 
 ## Prerequisites
 

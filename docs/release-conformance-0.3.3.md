@@ -74,3 +74,5 @@ Remote PR CI exposed a third iOS race: delayed session-success push work cleared
 ## Publication recovery
 
 0.3.4 attempt 1: npm/iOS/Android registry content verified; pub.dev rejected JWT timestamps. Pinned setup-dart minted `PUB_TOKEN` at 11:28 UTC; Flutter used it at 11:37 UTC after preceding uploads. Preserved `publication-attempts-run1.json`; verified Flutter absent, reset only its diagnosed attempt, reran identical approved artifacts. Permanent fix: request fresh pub.dev OIDC immediately before upload; no artifact/tag changes. 29 release regressions pass.
+
+Release result: 0.3.4 public at 2026-10-10 17:13 IST, source `5e08c9b`; [run 38047938828](https://github.com/onlo-ai/onlo-mobile-sdks/actions/runs/38047938828) attempt 2 succeeded. All four actual registry artifacts independently verified against manifest SHA-256 `f57dc7387e929ca4370f65eacc1f59a67a081c089378b2f6a836ed87443331df`. Existing 0.3.3 unchanged. Token-timing fix is follow-up source, not part of immutable 0.3.4.
