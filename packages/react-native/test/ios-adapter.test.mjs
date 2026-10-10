@@ -9,7 +9,7 @@ const module = await readFile(new URL('../ios/Sources/OnloSDKModule.mm', import.
 const config = await readFile(new URL('../react-native.config.js', import.meta.url), 'utf8');
 
 test('iOS adapter delegates the public RN surface to one native OnloSDK core', () => {
-  assert.match(swift, /private let sdk = OnloSDK\(\)/);
+  assert.match(swift, /private let sdk = OnloSDK\.shared/);
   assert.match(swift, /initializeFrameworkBridge\(sdkKey: sdkKey, sdkFamily: \.reactNative\)/);
   for (const seam of ['loginUnidentifiedUser', 'loginIdentifiedUser', 'logout', 'setAPNsPushToken', 'handlePushNotificationFromBridge']) {
     assert.match(swift, new RegExp(`sdk\\.${seam}`));

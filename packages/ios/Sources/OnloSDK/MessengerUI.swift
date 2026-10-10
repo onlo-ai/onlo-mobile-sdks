@@ -1071,18 +1071,18 @@ private final class OnloMessengerViewController: UIViewController, UITableViewDa
 
         recognitionTask = speechRecognizer?.recognitionTask(with: request) { [weak self] result, error in
             Task { @MainActor [weak self] in
-                guard let self, isDictating else { return }
+                guard let self, self.isDictating else { return }
                 if let result {
                     let transcript = result.bestTranscription.formattedString
-                    composer.text = [dictationPrefix, transcript]
+                    self.composer.text = [self.dictationPrefix, transcript]
                         .filter { !$0.isEmpty }
                         .joined(separator: " ")
-                    updateComposerHeight()
-                    renderComposerAvailability()
-                    if result.isFinal { stopDictation() }
+                    self.updateComposerHeight()
+                    self.renderComposerAvailability()
+                    if result.isFinal { self.stopDictation() }
                 } else if error != nil {
-                    stopDictation()
-                    showVoiceError("Voice input stopped. You can continue typing.")
+                    self.stopDictation()
+                    self.showVoiceError("Voice input stopped. You can continue typing.")
                 }
             }
         }

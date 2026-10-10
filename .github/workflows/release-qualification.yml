@@ -36,6 +36,9 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: android-actions/setup-android@v3
+        with:
+          # The current sdkmanager no longer ships the legacy `tools` package the action installs by default.
+          packages: platform-tools
       - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "platforms;android-36" "build-tools;36.0.0"
       - run: packages/android/gradlew -p packages/android testDebugUnitTest assembleRelease
       - name: Validate Maven Central publication bundle locally
@@ -73,6 +76,8 @@ jobs:
           java-version: "17"
       - uses: android-actions/setup-android@v3
         if: runner.os == 'Linux'
+        with:
+          packages: platform-tools
       - run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
         if: runner.os == 'Linux'
       - run: npm ci

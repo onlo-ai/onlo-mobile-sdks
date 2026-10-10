@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.3
+
+### Fixed
+
+- Android and iOS no longer stay unusable after the server rejects a stored
+  installation credential (`session_expired` or `session_revoked`). The SDK
+  retires the old local owner and starts a fresh anonymous installation, the
+  state a reinstall used to be needed for. Devices already stuck on 0.3.2
+  recover on their first launch with 0.3.3.
+- A rejected identify replay now identifies a replacement installation with
+  the host's JWT instead of failing every later login.
+- A logout whose credential the server rejects now completes instead of
+  staying pending.
+- `openConversation` and Messenger transcript loads refresh an expired chat
+  token once instead of failing with `native_operation_failed`.
+- iOS shares one native core per process across the `Onlo` facade and the
+  React Native and Flutter bridges, and coalesces overlapping session
+  resumes, so two rotations of the same credential can no longer race.
+- Background SDK work on Android can no longer crash the host app.
+- Flutter treats an omitted optional argument as absent, so `Onlo.present()`
+  without a conversation and `setPushToken` without a locale no longer fail
+  with `invalid_argument`.
+
+### Compatibility
+
+- No public API or wire-protocol changes.
+- An identified customer whose credential was rejected is anonymous until the
+  host's next `loginIdentifiedUser`, the same as after a fresh install.
+
 ## 0.3.2
 
 ### Fixed

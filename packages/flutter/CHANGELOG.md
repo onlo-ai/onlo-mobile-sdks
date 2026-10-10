@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.3
+
+- Included the native session-recovery fixes for rejected installation
+  credentials and expired chat tokens.
+- Shared one iOS native core across Flutter engines in the same process.
+- Treated omitted optional arguments as absent, fixing `Onlo.present()`
+  without a conversation on iOS and `setPushToken` without a locale.
+- Kept the Flutter API and bridge contract unchanged.
+
 ## 0.3.2
 
 - Included the native foreground-notification suppression fix for anonymous

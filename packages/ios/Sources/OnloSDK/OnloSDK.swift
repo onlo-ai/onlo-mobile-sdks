@@ -50,6 +50,11 @@ public enum OnloPresentationIntent: Sendable, Equatable {
 }
 
 public actor OnloSDK {
+    /// The process-wide core behind the `Onlo` facade and the React Native and Flutter bridges.
+    /// A bridge instance exists per Flutter engine or React Native reload; sharing one actor means
+    /// two cores never rotate the same Keychain installation credential.
+    @_spi(FrameworkBridge) public static let shared = OnloSDK()
+
     static let productionOrigin = URL(string: "https://onlo.ai")!
     static let implementedCapabilities = [
         "secure_storage",
@@ -118,6 +123,9 @@ public actor OnloSDK {
     private var configuration: Configuration?
     private var requestFactory: OnloRequestFactory?
     private var runtimeSession: RuntimeSession?
+    /// Actor reentrancy lets foreground, config, and inbox recovery all request a Resume while one
+    /// is in flight. They share it: a second rotation of the same credential would be rejected.
+    private var inFlightResume: Task<Void, Error>?
     /// Verified only after the server accepts the corresponding identify
     /// transition. Kept in memory for the native greeting and cleared at every
     /// account boundary; it is never written to SDK storage.
@@ -398,9 +406,10 @@ public actor OnloSDK {
                 // A JWT is intentionally not persisted. The host must supply a
                 // fresh one before this exact identity transition can be replayed.
                 state = .reauthRequired
-            } else if pendingTransition != nil {
+            } else if pendingTransition != nil, !protectedState.retainsRejectedCredential {
                 state = .offlineReady
             } else {
+                // A retained rejected credential is replaced now instead of staying offline forever.
                 try await resume(stored, pendingTransition: pendingTransition)
             }
         } else if pendingTransition != nil {
@@ -462,6 +471,10 @@ public actor OnloSDK {
 
     @discardableResult
     public func loginIdentifiedUser(userJwt: String) async throws -> SDKState {
+        try await loginIdentifiedUser(userJwt: userJwt, replacingRejectedInstallation: true)
+    }
+
+    private func loginIdentifiedUser(userJwt: String, replacingRejectedInstallation: Bool) async throws -> SDKState {
         guard isCompactJWT(userJwt) else { throw OnloError.invalidUserJWT }
         let pendingFirstName = Self.firstNameClaim(from: userJwt)
         try requireInitialized()
@@ -500,7 +513,14 @@ public actor OnloSDK {
            let pending = protectedState.pendingTransition,
            pending.isIdentify,
            stored.identityClass == .anonymous {
-            let replayed = try await replayPendingIdentify(pending, previous: stored, userJwt: userJwt)
+            let replayed: SDKState
+            do {
+                replayed = try await replayPendingIdentify(pending, previous: stored, userJwt: userJwt)
+            } catch where replacingRejectedInstallation && Self.isInstallationCredentialRejection(error) {
+                // A fresh JWT cannot revive a rejected installation credential.
+                try await replaceRejectedInstallation(stored)
+                return try await loginIdentifiedUser(userJwt: userJwt, replacingRejectedInstallation: false)
+            }
             if replayed == .identifiedReady { identifiedFirstName = pendingFirstName }
             return replayed
         }
@@ -529,6 +549,10 @@ public actor OnloSDK {
             try await ensurePendingReplayAllowed(pending, userJwtProvided: true)
             result = try await sendSession(try pending.sessionOperation(userJwt: userJwt), installationId: pending.installationId)
         } catch let error as OnloError {
+            if replacingRejectedInstallation, Self.isInstallationCredentialRejection(error) {
+                try await replaceRejectedInstallation(anonymousSession.credential)
+                return try await loginIdentifiedUser(userJwt: userJwt, replacingRejectedInstallation: false)
+            }
             try await resolveDefinitiveSessionFailure(error, credential: anonymousSession.credential)
             if case let .remote(remote) = error, remote.code == .identityDisabled {
                 state = .anonymousReady
@@ -1424,7 +1448,12 @@ public actor OnloSDK {
     /// a previously authorised encrypted transcript, but never one from a
     /// different owner scope.
     func messengerTranscript(conversationId: String) async throws -> ConversationTranscriptResult? {
+        try await messengerTranscript(conversationId: conversationId, allowTokenRefresh: true)
+    }
+
+    private func messengerTranscript(conversationId: String, allowTokenRefresh: Bool) async throws -> ConversationTranscriptResult? {
         let startedAt = Date()
+        let attemptedSession = runtimeSession
         do {
         guard !conversationId.isEmpty,
               let transcriptStore = ownerStore as? any TranscriptPersisting else {
@@ -1484,6 +1513,11 @@ public actor OnloSDK {
         }
         } catch let error as OnloError {
             await record(operation: "transcript", code: error.safeCode, requestId: error.requestId, startedAt: startedAt)
+            if allowTokenRefresh, isWidgetUnauthorized(error), let attemptedSession,
+               await refreshMessengerBearer(attemptedSession),
+               state == .anonymousReady || state == .identifiedReady {
+                return try await messengerTranscript(conversationId: conversationId, allowTokenRefresh: false)
+            }
             throw error
         } catch {
             await record(operation: "transcript", code: "network_unavailable", requestId: nil, startedAt: startedAt)
@@ -1615,6 +1649,10 @@ public actor OnloSDK {
     }
 
     public func present(conversationId: String? = nil) async throws -> OnloPresentationIntent {
+        try await present(conversationId: conversationId, allowTokenRefresh: true)
+    }
+
+    private func present(conversationId: String?, allowTokenRefresh: Bool) async throws -> OnloPresentationIntent {
         guard state == .anonymousReady || state == .identifiedReady || state == .offlineReady else {
             throw OnloError.invalidState
         }
@@ -1639,6 +1677,11 @@ public actor OnloSDK {
             return .messenger(conversationId: conversationId)
         } catch let error as OnloError {
             await record(operation: "present", code: error.safeCode, requestId: nil, startedAt: startedAt)
+            // The 15-minute chat token routinely expires while the host app stays open.
+            if allowTokenRefresh, isWidgetUnauthorized(error), await refreshMessengerBearer(session),
+               state == .anonymousReady || state == .identifiedReady {
+                return try await present(conversationId: conversationId, allowTokenRefresh: false)
+            }
             throw error
         } catch {
             await record(operation: "present", code: "network_unavailable", requestId: nil, startedAt: startedAt)
@@ -2102,6 +2145,18 @@ public actor OnloSDK {
               pendingTransition == nil || pendingTransition?.matchesResume(stored) == true else {
             throw OnloError.invalidState
         }
+        try await replaceRejectedInstallation(stored)
+    }
+
+    /// The server rejected this installation credential (`session_expired`/`session_revoked`), so
+    /// no replay of it can succeed. Fence and purge the old owner, forget the installation, and
+    /// bootstrap a fresh anonymous one: the state a reinstall used to be needed for. If another
+    /// transition already committed a newer credential, that one wins and nothing is retired.
+    private func replaceRejectedInstallation(_ stored: StoredSessionCredential) async throws {
+        let current = try await credentialStore.loadState().credential
+        guard current?.installationId == stored.installationId,
+              current?.proposedCredential == stored.proposedCredential else { return }
+        await record(operation: "session", code: "installation_replaced", requestId: nil, startedAt: Date())
 
         await invalidateMessengerPresentations()
         identifiedFirstName = nil
@@ -2946,6 +3001,14 @@ public actor OnloSDK {
     }
 
     private func resume(_ stored: StoredSessionCredential, pendingTransition: PendingSessionTransition? = nil) async throws {
+        if let inFlightResume { return try await inFlightResume.value }
+        let resumption = Task { try await self.performResume(stored, pendingTransition: pendingTransition) }
+        inFlightResume = resumption
+        defer { inFlightResume = nil }
+        try await resumption.value
+    }
+
+    private func performResume(_ stored: StoredSessionCredential, pendingTransition: PendingSessionTransition?) async throws {
         try await ownerStore.prepare(scope: stored.ownerScope)
         let pending: PendingSessionTransition
         if let pendingTransition {
@@ -2962,6 +3025,8 @@ public actor OnloSDK {
             )
             guard pending.accepts(result.result) else { throw OnloError.invalidResponse }
             try await applyResumedSession(result.result, previous: stored)
+        } catch where Self.isInstallationCredentialRejection(error) {
+            try await replaceRejectedInstallation(stored)
         } catch let error as OnloError {
             if error.transportCode != nil {
                 state = .offlineReady
@@ -2969,10 +3034,6 @@ public actor OnloSDK {
             }
             try await resolveDefinitiveSessionFailure(error, credential: stored)
             if retainsSessionTransition(error) { state = .offlineReady }
-            if case .remote(let apiError) = error, apiError.code == .sessionExpired || apiError.code == .sessionRevoked {
-                state = .reauthRequired
-                return
-            }
             throw error
         }
     }
@@ -3128,6 +3189,14 @@ public actor OnloSDK {
     }
 
     private func continuePendingLogout(_ stored: StoredSessionCredential, pendingTransition: PendingSessionTransition?) async throws {
+        do {
+            try await continuePendingLogoutTransition(stored, pendingTransition: pendingTransition)
+        } catch where Self.isInstallationCredentialRejection(error) {
+            try await replaceRejectedInstallation(stored)
+        }
+    }
+
+    private func continuePendingLogoutTransition(_ stored: StoredSessionCredential, pendingTransition: PendingSessionTransition?) async throws {
         if let pendingTransition, pendingTransition.matchesResume(stored) {
             let resumed = try await resumeForPendingLogout(stored)
             let refreshed = StoredSessionCredential(installationId: resumed.installationId, generation: resumed.generation, proposedCredential: resumed.proposedCredential, identityClass: resumed.identityClass, ownerScope: stored.ownerScope, logoutPending: true)
@@ -3188,6 +3257,11 @@ public actor OnloSDK {
         do {
             try await ensurePendingReplayAllowed(pending, userJwtProvided: false)
             result = try await sendSession(try pending.sessionOperation(), installationId: pending.installationId)
+        } catch where Self.isInstallationCredentialRejection(error) {
+            // The server can no longer authenticate this installation, so it has no session left
+            // to end: purging the owner and starting a fresh anonymous installation is the logout.
+            try await replaceRejectedInstallation(pendingCredential)
+            return state
         } catch {
             try await resolveDefinitiveSessionFailure(error, credential: pendingCredential)
             throw error
@@ -3502,6 +3576,12 @@ public actor OnloSDK {
     ) async throws {
         guard let onloError = error as? OnloError,
               case .remote(let remote) = onloError else { return }
+        if let credential, let current = try await credentialStore.loadState().credential,
+           current.installationId != credential.installationId || current.proposedCredential != credential.proposedCredential {
+            // A concurrent transition already committed a newer credential; an older failure
+            // must never write its stale credential back over it.
+            return
+        }
         switch remote.retry.directive {
         case .never, .afterFullSync:
             try await commitProtectedState(credential: credential, pendingTransition: nil)
@@ -3551,13 +3631,24 @@ public actor OnloSDK {
             guard now() >= eligibleAt else { throw OnloError.requiresNetwork }
             try await commitProtectedState(credential: state.credential, pendingTransition: pending, retryGate: nil)
         case .afterTokenRefresh:
-            guard pending.isIdentify, userJwtProvided else { throw OnloError.invalidState }
+            // Outside Identify the server sends this directive only as `session_expired`, so the
+            // retained transition presents a credential that was already rejected (SDK <= 0.3.2).
+            guard pending.isIdentify else { throw PersistedCredentialRejection() }
+            guard userJwtProvided else { throw OnloError.invalidState }
             try await commitProtectedState(credential: state.credential, pendingTransition: pending, retryGate: nil)
         case .afterAttestation:
             // No v1 iOS attestation implementation exists yet; never pretend a
             // proof was refreshed or replay a protected transition without one.
             throw OnloError.invalidState
         }
+    }
+
+    /// `session_expired`/`session_revoked` answer a transition that presented the installation
+    /// credential, so the server will never accept that credential again.
+    private static func isInstallationCredentialRejection(_ error: Error) -> Bool {
+        if error is PersistedCredentialRejection { return true }
+        guard case let .remote(remote) = error as? OnloError else { return false }
+        return remote.code == .sessionExpired || remote.code == .sessionRevoked
     }
 
     private func requireInitialized() throws {
@@ -3580,5 +3671,15 @@ public actor OnloSDK {
                 durationMs: duration
             )
         )
+    }
+}
+
+/// A transition retained by SDK 0.3.2 or earlier behind a gate only Identify can satisfy.
+private struct PersistedCredentialRejection: Error {}
+
+private extension ProtectedSessionState {
+    var retainsRejectedCredential: Bool {
+        guard let pendingTransition, !pendingTransition.isIdentify else { return false }
+        return retryGate == .afterTokenRefresh
     }
 }

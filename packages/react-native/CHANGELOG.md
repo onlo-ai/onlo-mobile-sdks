@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.3
+
+- Included the native session-recovery fixes for rejected installation
+  credentials and expired chat tokens.
+- Shared one iOS native core across bridge reloads in the same process.
+- Kept the React Native API and bridge contract unchanged.
+
 ## 0.3.2
 
 - Included the native foreground-notification suppression fix for anonymous
