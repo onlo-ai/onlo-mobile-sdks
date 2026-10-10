@@ -1,6 +1,6 @@
 # Flutter example app
 
-Run the repository’s Flutter host against the local plugin and one local native core per platform. The example covers anonymous and identified login, native Support presentation, logout, push forwarding, and deep links.
+Run the repository’s Flutter host against the local plugin and one local native core per platform. The example covers anonymous login, native Support presentation, logout, push forwarding, and deep links. Identified login requires your authenticated merchant-backend integration.
 
 > **Push-provider dependencies are not included.** Basic chat works without them, but push notifications do not. Android requires your own Firebase project, Android app configuration, FCM plugin, and service-account credentials; iOS requires an Apple Developer account, push-enabled App ID, APNs plugin callbacks, and an APNs authentication key. Follow the official [Firebase Android setup](https://firebase.google.com/docs/android/setup), [FCM credential setup](https://firebase.google.com/docs/cloud-messaging/send/v1-api#provide-credentials-manually), and [Apple APNs setup](https://developer.apple.com/documentation/UserNotifications/registering-your-app-with-apns) before testing push.
 
@@ -18,6 +18,14 @@ Run the repository’s Flutter host against the local plugin and one local nativ
 | `../../packages/flutter` | Local path dependency for the typed Flutter plugin |
 | `config/onlo.local.json` | Ignored public test key and backend URL; never a signing secret or JWT |
 | Native core | Owns session, protected storage, transcript, offline work, push, and messenger UI |
+
+## Identified-login setup
+
+`ONLO_OPERATOR_BACKEND_URL` selects your backend; changing this URL does not authenticate a customer. The current `_fetchShortLivedOnloUserJwtFromOperatorBackend` posts to `/v1/onlo-user-jwt` without a merchant session. Implement your host authentication and send its authenticated request before using **Complete host login**.
+
+The bundled merchant backend requires `/v1/test-login` first and a bearer merchant session for `/v1/onlo-user-jwt`. Its login code is for synthetic test users only. The Flutter example does not yet implement that exchange; use the [native iOS E2E host](../ios-local-e2e/README.md) to exercise the bundled backend. Never bypass backend authentication or put its signing secret in Flutter config.
+
+This repository example is outside the published Flutter SDK package. Its setup limitation does not change the plugin’s `loginIdentifiedUser(userJwt:)` contract.
 
 ## Run the example step by step
 
@@ -47,7 +55,7 @@ Run the repository’s Flutter host against the local plugin and one local nativ
 
 5. Select **Complete host login**, then **Support**.
 
-   Expected result: the host backend returns a short-lived JWT, Dart passes it directly to native code, and identified Support becomes ready.
+   Expected result after implementing the authenticated-backend exchange above: the backend returns a short-lived JWT, Dart passes it directly to native code, and identified Support becomes ready.
 
 6. Select **Log out / switch account** before using another test account.
 

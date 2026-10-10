@@ -103,7 +103,6 @@ RCT_REMAP_METHOD(present,
     [self reject:reject payload:OnloInvalidArgument()]; return;
   }
   UIViewController *host = RCTPresentedViewController();
-  if (host == nil) { [self reject:reject payload:OnloOperationFailure()]; return; }
   [self.nativeBridge presentFrom:host conversationID:conversationID presentationMode:presentationMode completion:^(NSDictionary *error) { [self complete:resolve reject:reject error:error]; }];
 }
 
@@ -117,7 +116,6 @@ RCT_REMAP_METHOD(openConversation,
                  reject:(RCTPromiseRejectBlock)reject) {
   if (![conversationID isKindOfClass:NSString.class] || conversationID.length == 0) { [self reject:reject payload:OnloInvalidArgument()]; return; }
   UIViewController *host = RCTPresentedViewController();
-  if (host == nil) { [self reject:reject payload:OnloOperationFailure()]; return; }
   [self.nativeBridge openConversation:conversationID from:host completion:^(NSDictionary *error) { [self complete:resolve reject:reject error:error]; }];
 }
 

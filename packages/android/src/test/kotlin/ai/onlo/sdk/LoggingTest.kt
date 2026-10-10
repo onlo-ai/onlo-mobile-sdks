@@ -22,6 +22,8 @@ class LoggingTest {
             OnloLogLevel.ERROR,
             SafeLogEvent(SafeLogCode.SESSION_EXCHANGE_FAILED, "0.1.0").requiredLevel(),
         )
+        assertEquals(OnloLogLevel.ERROR, SafeLogEvent(SafeLogCode.CONVERSATION_OPEN_FAILED, "fixture").requiredLevel())
+        assertEquals(OnloLogLevel.INFO, SafeLogEvent(SafeLogCode.CONVERSATION_BEARER_REFRESHED, "fixture").requiredLevel())
         assertEquals("request_injected", "request\ninjected".safeLogField())
     }
 }

@@ -20,6 +20,8 @@ internal enum class SafeLogCode {
     CREDENTIAL_INVALIDATED,
     PROTOCOL_REJECTED,
     LOGOUT_PENDING,
+    CONVERSATION_OPEN_FAILED,
+    CONVERSATION_BEARER_REFRESHED,
 }
 
 internal fun interface SafeLogger {
@@ -61,11 +63,13 @@ internal class AndroidSafeLogger : SafeLogger {
 
 internal fun SafeLogEvent.requiredLevel(): OnloLogLevel = when (code) {
     SafeLogCode.SESSION_EXCHANGE_STARTED -> OnloLogLevel.VERBOSE
-    SafeLogCode.SESSION_EXCHANGE_SUCCEEDED -> OnloLogLevel.INFO
+    SafeLogCode.SESSION_EXCHANGE_SUCCEEDED,
+    SafeLogCode.CONVERSATION_BEARER_REFRESHED -> OnloLogLevel.INFO
     SafeLogCode.SESSION_EXCHANGE_FAILED,
     SafeLogCode.CREDENTIAL_INVALIDATED,
     SafeLogCode.PROTOCOL_REJECTED,
-    SafeLogCode.LOGOUT_PENDING -> OnloLogLevel.ERROR
+    SafeLogCode.LOGOUT_PENDING,
+    SafeLogCode.CONVERSATION_OPEN_FAILED -> OnloLogLevel.ERROR
 }
 
 internal fun String.safeLogField(): String = take(128).map { character ->

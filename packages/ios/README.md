@@ -4,7 +4,7 @@ Add Onlo’s ready-made support Messenger to an iOS app. Get the basic flow work
 
 > **Want working code first?** Start with the [iOS integration example](../../examples/ios/README.md). It provides copy-ready host code for initialization, customer login, Messenger presentation, logout, and APNs callbacks. It is not a standalone Xcode app.
 
-> **Package availability:** version `0.3.2` is prepared in this repository, but the public package is not published yet. Install only a version marked as available in **Onlo Dashboard → WebChat → Install → Mobile app**; otherwise, run the repository example.
+> **Published version (verified 2026-10-10):** `0.3.3`. See [registry status and known issues](../../README.md#published-versions). The local concurrency correction is not yet released.
 
 ## Prerequisites
 
@@ -52,21 +52,21 @@ In Xcode, select **File → Add Package Dependencies** and enter:
 https://github.com/onlo-ai/onlo-mobile-sdks
 ```
 
-Choose exact version `0.3.2` and add the `OnloSDK` product once.
+Choose exact version `0.3.3` and add the `OnloSDK` product once.
 
 For a manifest-based host:
 
 ```swift
 .package(
     url: "https://github.com/onlo-ai/onlo-mobile-sdks.git",
-    exact: "0.3.2"
+    exact: "0.3.3"
 )
 ```
 
 For CocoaPods:
 
 ```ruby
-pod 'OnloSDK', '0.3.2'
+pod 'OnloSDK', '0.3.3'
 ```
 
 Run `pod install`, then open the generated workspace. Use Swift Package Manager or CocoaPods for a target, never both.
@@ -128,7 +128,7 @@ Expected result: tapping Support opens Onlo’s native Messenger. Onlo does not 
 
 ## 2. Verify signed-in customer identity
 
-Identified login starts with your app’s existing authentication. Customers do not enter an Onlo OTP or sign in a second time.
+Identified login starts with your app’s existing authentication. Customers do not enter an Onlo OTP or sign in a second time. Your backend must authenticate the app session and derive the customer ID from it; never mint a proof from an unverified email or client-supplied customer ID. The merchant test backend’s login code is only for synthetic test users.
 
 ### Generate and store the identity secret
 
@@ -346,6 +346,8 @@ If logout remains pending, keep Support disabled until native recovery completes
 - No identity secret, JWT, provider credential, push token, customer data, or message content is stored or logged by the host app.
 
 ## Troubleshooting
+
+For conversation-opening failures, record the installed wrapper/native versions, platform, and safe error code/request ID when available. Do not log or share JWTs, credentials, push tokens, or customer messages. `native_operation_failed` alone does not establish an expired-token cause. Avoid host retry loops or reinstalling as an authentication workaround.
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |

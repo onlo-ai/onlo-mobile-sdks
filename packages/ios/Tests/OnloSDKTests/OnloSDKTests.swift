@@ -90,6 +90,10 @@ final class OnloSDKTests: XCTestCase {
         XCTAssertFalse(logger.shouldRecord(event))
         logger.setLevel(.error)
         XCTAssertTrue(logger.shouldRecord(event))
+        let joined = SDKLogEvent(operation: "session", code: "resume_joined", sdkVersion: "0.3.3", durationMs: 0)
+        XCTAssertFalse(logger.shouldRecord(joined), "Coalescing is not an error")
+        logger.setLevel(.verbose)
+        XCTAssertTrue(logger.shouldRecord(joined))
         XCTAssertEqual(
             logger.formattedMessage(for: event),
             "operation=session_secret code=network_unavailable sdkVersion=0.1.0 runtime=ios requestId=request_injected durationMs=0"
@@ -2403,7 +2407,7 @@ private actor InMemoryOutboxKeyStore: OutboxEncryptionKeyStoring {
     func loadOrCreate() async throws -> SymmetricKey { key }
 }
 
-private actor InMemoryConfigStore: MobileConfigStoring, AuthorityFencedConfigStoring {
+actor InMemoryConfigStore: MobileConfigStoring, AuthorityFencedConfigStoring {
     private var stored = ProtectedMobileConfigState(config: nil, etag: nil, retry: nil)
     private var activeAuthority: PersistenceAuthority?
     func loadConfigState() async throws -> ProtectedMobileConfigState { stored }

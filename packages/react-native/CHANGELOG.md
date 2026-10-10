@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.3
+
+- Add safe native diagnostics for conversation HTTP/network failures and missing presentation hosts; preserve bridge error payloads.
+
+- Targeted native Messenger opens refresh a rejected chat bearer once, using
+  the protected installation credential without asking for another host login.
+- Retries preserve the current owner and stop after a second rejection;
+  account changes and non-401 failures remain blocked.
+- No public API or wire-protocol changes.
+
 ## 0.3.2
 
 - Included the native foreground-notification suppression fix for anonymous

@@ -152,10 +152,25 @@ public object Onlo {
 public object OnloReactNativeBridge {
     @JvmStatic
     public fun initialize(context: Context, sdkKey: String): OnloClient = Onlo.initializeForReactNative(context, sdkKey)
+
+    /** Framework adapter diagnostic seam; no host/customer values accepted. */
+    @JvmSynthetic
+    public fun reportMissingPresentationHost() = logMissingPresentationHost()
 }
 
 /** Cross-module Flutter bridge initializer. The descriptor family is deliberately fixed. */
 public object OnloFlutterBridge {
     @JvmStatic
     public fun initialize(context: Context, sdkKey: String): OnloClient = Onlo.initializeForFlutter(context, sdkKey)
+
+    /** Framework adapter diagnostic seam; no host/customer values accepted. */
+    @JvmSynthetic
+    public fun reportMissingPresentationHost() = logMissingPresentationHost()
+}
+
+private fun logMissingPresentationHost() {
+    AndroidSafeLogger().log(ai.onlo.sdk.logging.SafeLogEvent(
+        ai.onlo.sdk.logging.SafeLogCode.CONVERSATION_OPEN_FAILED,
+        SDK_VERSION, detailCode = "presentation_host_unavailable", durationMs = 0,
+    ))
 }

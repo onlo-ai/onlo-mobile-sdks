@@ -125,14 +125,14 @@ public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHand
             result(failure("invalid_argument")); return
         }
         operation(result) {
-            guard let host = self.presentationHost() else { throw BridgeError(code: "native_operation_failed") }
+            guard let host = self.presentationHost() else { throw BridgeError(code: "native_operation_failed", diagnosticCode: "presentation_host_unavailable") }
             try await self.presentMessenger(from: host, conversationId: conversationId, options: options)
         }
     }
 
     private func openConversation(_ conversationId: String, result: @escaping FlutterResult) {
         operation(result) {
-            guard let host = self.presentationHost() else { throw BridgeError(code: "native_operation_failed") }
+            guard let host = self.presentationHost() else { throw BridgeError(code: "native_operation_failed", diagnosticCode: "presentation_host_unavailable") }
             try await self.presentMessenger(from: host, conversationId: conversationId)
         }
     }
@@ -188,10 +188,13 @@ public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHand
 
     private func operation(_ result: @escaping FlutterResult, _ body: @escaping @MainActor () async throws -> Void) {
         Task { @MainActor in
+            let startedAt = Date()
             do {
                 try await body()
                 result(nil)
             } catch {
+                let code = (error as? BridgeError)?.diagnosticCode ?? (error as? OnloError)?.safeCode ?? "native_operation_failed"
+                await self.sdk.recordFrameworkFailure((error as? OnloError) ?? .transport(code: code), startedAt: startedAt)
                 result(errorPayload(error))
             }
         }
@@ -239,7 +242,7 @@ public final class OnloFlutterPlugin: NSObject, FlutterPlugin, FlutterStreamHand
     }
 }
 
-private struct BridgeError: Error { let code: String }
+private struct BridgeError: Error { let code: String; var diagnosticCode: String? = nil }
 
 private func arguments(_ call: FlutterMethodCall) -> [String: Any] { call.arguments as? [String: Any] ?? [:] }
 private func nonEmpty(_ value: Any?) -> String? {

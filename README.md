@@ -11,7 +11,18 @@ Add Onlo’s ready-made support Messenger to an iOS, Android, React Native, or F
 | React Native | [React Native guide](packages/react-native/README.md) | [React Native example](examples/react-native/README.md) |
 | Flutter | [Flutter guide](packages/flutter/README.md) | [Flutter example](examples/flutter/README.md) |
 
-> **Release status:** version `0.3.2` is prepared in this repository, but the public packages are not published yet. Install only a version marked as available in **Onlo Dashboard → WebChat → Install → Mobile app**.
+## Published versions
+
+Verified from public artifacts on 2026-10-10; repository versions alone do not prove publication.
+
+| SDK | Published version | Registry |
+| --- | --- | --- |
+| iOS | 0.3.3 | [CocoaPods](https://trunk.cocoapods.org/api/v1/pods/OnloSDK/specs/0.3.3) / [SwiftPM tag](https://github.com/onlo-ai/onlo-mobile-sdks/tree/0.3.3) |
+| Android | 0.3.3 | [Maven Central](https://repo1.maven.org/maven2/ai/onlo/onlo-android-sdk/0.3.3/) |
+| Flutter | 0.3.3 | [pub.dev](https://pub.dev/packages/onlo_flutter/versions/0.3.3) |
+| React Native | 0.3.2 | [npm](https://www.npmjs.com/package/@onlo-ai/react-native/v/0.3.2) |
+
+**Known iOS 0.3.3 issue:** a late refresh can restore the previous session after failed logout. A regression reproduces this in published source. The local correction is not yet published; do not treat repository HEAD or a successful package download as release acceptance. Rebuild wrapper apps after upgrading their matching native dependencies.
 
 ## Prerequisites
 
@@ -53,6 +64,12 @@ Expected result: the message reaches your Onlo workspace and Dashboard automatic
 
 The snippet shows the shared flow, not copy-paste platform syntax. The complete guides include the correct imports, lifecycle setup, identity example, push registration, and Messenger presentation code.
 
+## Signed-in customers
+
+Your app authenticates the customer using its existing password, OTP, or SSO flow. Your authenticated backend derives the stable customer ID from that session and signs a short-lived Onlo user JWT. Pass the JWT to `loginIdentifiedUser`; Onlo does not ask for another password. A public SDK key or customer email alone does not establish identity.
+
+The merchant-backend example uses a synthetic test login code. It is test infrastructure, not a production authentication service. Disable Support during logout/account switches and await native logout before enabling the next customer.
+
 ## Features
 
 | Feature | What it provides |
@@ -79,7 +96,7 @@ The snippet shows the shared flow, not copy-paste platform syntax. The complete 
 | Symptom | What to check |
 | --- | --- |
 | The package cannot be downloaded | Install only a version marked as available in Dashboard. |
-| Messenger does not open | Confirm initialization and one login method completed, then inspect the SDK error code. |
+| Messenger does not open / `native_operation_failed` | Confirm native readiness and a live presentation host. Capture SDK/platform version and safe error code/request ID when available; the generic bridge error alone does not identify the cause. Never share tokens, identity proofs, or message content. |
 | Dashboard does not confirm the connection | Send a test message and confirm the app uses the SDK key from the selected integration. |
 | Push does not register | Follow the platform guide for APNs or FCM credentials, permission, and device-token registration. |
 | Another customer cannot open Support | Keep Support disabled until the previous Onlo logout finishes. |

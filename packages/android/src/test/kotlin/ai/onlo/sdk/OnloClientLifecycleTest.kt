@@ -1055,6 +1055,7 @@ class OnloClientLifecycleTest {
         fallbackBackoffJitter: () -> Double = { 0.0 },
         configController: MobileConfigController? = null,
         widgetChatApi: WidgetChatApi? = null,
+        logger: SafeLogger = SafeLogger { _: SafeLogEvent -> },
     ): OnloClient = OnloClient(
         configuration = OnloConfiguration("public-sdk-key", "ai.onlo.fixture"),
         credentialStore = credentials,
@@ -1063,7 +1064,7 @@ class OnloClientLifecycleTest {
             transport = transport ?: FixtureTransport(responses, failures),
             requests = ProtocolRequestFactory("https://onlo.ai/".toHttpUrl()),
         ),
-        logger = SafeLogger { _: SafeLogEvent -> },
+        logger = logger,
         scope = CoroutineScope(Dispatchers.Unconfined),
         configController = configController,
         widgetChatApi = widgetChatApi,
@@ -1551,6 +1552,130 @@ class OnloClientLifecycleTest {
                 emptyMap(),
                 """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"synthetic-session","chatToken":"synthetic-chat-token","installationId":"00000000-0000-0000-0000-000000000001","generation":1,"proposedCredential":"$proposed","identityClass":"identified","publicationState":"testing","attestationState":"not_required","configRevision":"fixture","configSchemaVersion":1,"configEtag":"fixture"}}""",
             )
+        }
+    }
+
+    @Test
+    fun `expired conversation bearer refreshes once before opening`() = runBlocking {
+        val transport = ExpiredConversationBearerTransport()
+        val credentials = FakeCredentials().apply { state = ProtectedSessionState(protectedAnonymous(), null) }
+        val client = client(credentials, FakeOutbox(), transport = transport, widgetChatApi = WidgetChatApi(transport, ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())))
+        client.startRestoration()
+        assertEquals(OpenConversationOutcome.Opened, client.openConversation("conversation-history"))
+        assertEquals(2, transport.sessionCalls)
+        assertEquals(2, transport.transcriptCalls)
+        assertEquals(listOf<String?>("Bearer token-1", "Bearer token-2"), transport.authorizations)
+        assertEquals(MessengerPresentationTarget.Conversation("conversation-history"), client.presentationTarget.value)
+    }
+
+    @Test
+    fun `identified conversation refresh preserves owner without host JWT`() = runBlocking {
+        val stored = protectedIdentified()
+        val transport = ExpiredConversationBearerTransport(initialIdentity = "identified")
+        val credentials = FakeCredentials().apply { state = ProtectedSessionState(stored, null) }
+        val client = client(credentials, FakeOutbox(), transport = transport, widgetChatApi = WidgetChatApi(transport, ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())))
+        client.startRestoration()
+        assertEquals(OpenConversationOutcome.Opened, client.openConversation("conversation-history"))
+        assertEquals(2, transport.sessionCalls)
+        assertEquals(2, transport.transcriptCalls)
+        assertEquals(stored.ownerScopeId, credentials.state?.session?.ownerScopeId)
+        assertEquals(IdentityClass.IDENTIFIED, credentials.state?.session?.identityClass)
+    }
+
+    @Test
+    fun `conversation bearer refresh stops after one rejected retry`() = runBlocking {
+        val transport = ExpiredConversationBearerTransport(listOf(401, 401))
+        val credentials = FakeCredentials().apply { state = ProtectedSessionState(protectedAnonymous(), null) }
+        val client = client(credentials, FakeOutbox(), transport = transport, widgetChatApi = WidgetChatApi(transport, ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())))
+        client.startRestoration()
+        assertEquals(OpenConversationOutcome.Unavailable, client.openConversation("conversation-history"))
+        assertEquals(2, transport.sessionCalls)
+        assertEquals(2, transport.transcriptCalls)
+        assertEquals(MessengerPresentationIntent.HIDDEN, client.presentationIntent.value)
+    }
+
+    @Test
+    fun `conversation non401 failure does not rotate credentials`() = runBlocking {
+        for (status in listOf(403, 404, 503)) {
+            val transport = ExpiredConversationBearerTransport(listOf(status))
+            val credentials = FakeCredentials().apply { state = ProtectedSessionState(protectedAnonymous(), null) }
+            val client = client(credentials, FakeOutbox(), transport = transport, widgetChatApi = WidgetChatApi(transport, ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())))
+            client.startRestoration()
+            assertEquals(OpenConversationOutcome.Unavailable, client.openConversation("conversation-history"))
+            assertEquals(1, transport.sessionCalls)
+            assertEquals(1, transport.transcriptCalls)
+            assertEquals(MessengerPresentationIntent.HIDDEN, client.presentationIntent.value)
+        }
+    }
+
+    @Test
+    fun `conversation retry cannot cross owner change`() = runBlocking {
+        val transport = ExpiredConversationBearerTransport(changesIdentity = true)
+        val credentials = FakeCredentials().apply { state = ProtectedSessionState(protectedAnonymous(), null) }
+        val client = client(credentials, FakeOutbox(), transport = transport, widgetChatApi = WidgetChatApi(transport, ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())))
+        client.startRestoration()
+        assertEquals(OpenConversationOutcome.Unavailable, client.openConversation("conversation-history"))
+        assertEquals(2, transport.sessionCalls)
+        assertEquals(1, transport.transcriptCalls)
+        assertEquals(MessengerPresentationIntent.HIDDEN, client.presentationIntent.value)
+    }
+
+    @Test
+    fun `conversation network failure is terminal and logged safely`() = runBlocking {
+        val transport = ExpiredConversationBearerTransport(networkFailure = true)
+        val events = mutableListOf<SafeLogEvent>()
+        val credentials = FakeCredentials().apply { state = ProtectedSessionState(protectedAnonymous(), null) }
+        val client = client(credentials, FakeOutbox(), transport = transport, widgetChatApi = WidgetChatApi(transport, ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())), logger = SafeLogger { events += it })
+        client.startRestoration()
+        assertEquals(OpenConversationOutcome.Unavailable, client.openConversation("conversation-history"))
+        assertEquals(1, transport.sessionCalls)
+        assertEquals(1, transport.transcriptCalls)
+        val failures = events.filter { it.code == ai.onlo.sdk.logging.SafeLogCode.CONVERSATION_OPEN_FAILED }
+        assertEquals(listOf("network_unavailable"), failures.map { it.detailCode })
+        assertEquals(false, failures.toString().contains("conversation-history"))
+        assertEquals(false, failures.toString().contains("token-1"))
+    }
+
+    @Test
+    fun `delayed conversation 401 cannot resume after logout`() = runBlocking {
+        val transport = ExpiredConversationBearerTransport(pauseTranscript = true)
+        val credentials = FakeCredentials().apply { state = ProtectedSessionState(protectedAnonymous(), null) }
+        val client = client(credentials, FakeOutbox(), transport = transport, widgetChatApi = WidgetChatApi(transport, ProtocolRequestFactory("https://onlo.ai/".toHttpUrl())))
+        client.startRestoration()
+        val opening = async { client.openConversation("conversation-history") }
+        transport.transcriptStarted.await()
+        assertEquals(LogoutOutcome.Completed, client.logout())
+        val afterLogout = transport.sessionCalls
+        transport.releaseTranscript.complete(Unit)
+        assertEquals(OpenConversationOutcome.Unavailable, opening.await())
+        assertEquals(afterLogout, transport.sessionCalls)
+        assertEquals(1, transport.transcriptCalls)
+        assertEquals(MessengerPresentationIntent.HIDDEN, client.presentationIntent.value)
+    }
+
+    private class ExpiredConversationBearerTransport(private val statuses: List<Int> = listOf(401), private val changesIdentity: Boolean = false, private val initialIdentity: String = "anonymous", private val networkFailure: Boolean = false, private val pauseTranscript: Boolean = false) : OnloTransport {
+        var sessionCalls = 0
+        var transcriptCalls = 0
+        val authorizations = mutableListOf<String?>()
+        val transcriptStarted = CompletableDeferred<Unit>()
+        val releaseTranscript = CompletableDeferred<Unit>()
+        override suspend fun execute(request: OnloHttpRequest): OnloHttpResponse {
+            if (request.url.encodedPath.endsWith("/conversations/conversation-history")) {
+                transcriptCalls += 1
+                authorizations += request.headers["Authorization"]
+                if (pauseTranscript && transcriptCalls == 1) {
+                    transcriptStarted.complete(Unit)
+                    releaseTranscript.await()
+                }
+                if (networkFailure) throw IOException("synthetic_offline")
+                if (transcriptCalls <= statuses.size) return OnloHttpResponse(statuses[transcriptCalls - 1], emptyMap(), "{}")
+                return OnloHttpResponse(200, emptyMap(), """{"conversation":{"id":"conversation-history","sessionId":"historical-session","status":"open","isHumanTakeover":false},"messages":[],"sync":{"previousCursor":null,"nextCursor":null,"limit":100}}""")
+            }
+            sessionCalls += 1
+            val body = request.body?.let { Buffer().also(it::writeTo).readUtf8() }.orEmpty()
+            val proposed = org.json.JSONObject(body).getJSONObject("operation").getString("proposedCredential")
+            val identity = if (changesIdentity && sessionCalls > 1) "identified" else initialIdentity
+            return OnloHttpResponse(200, emptyMap(), """{"requestId":"fixture","serverTime":"2026-01-01T00:00:00Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"session-$sessionCalls","chatToken":"token-$sessionCalls","installationId":"00000000-0000-0000-0000-000000000001","generation":$sessionCalls,"proposedCredential":"$proposed","identityClass":"$identity","publicationState":"testing","attestationState":"not_required","configRevision":"fixture","configSchemaVersion":1,"configEtag":"fixture"}}""")
         }
     }
 

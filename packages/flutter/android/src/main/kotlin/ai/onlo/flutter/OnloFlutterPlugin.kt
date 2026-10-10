@@ -273,7 +273,10 @@ public class OnloFlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
     private fun requireClient(): OnloClient = client ?: throw BridgeFailure("native_bridge_unavailable")
     private fun requireActivity(): Activity = activity
         ?.takeIf { !it.isFinishing && !it.isDestroyed }
-        ?: throw BridgeFailure("native_operation_failed")
+        ?: run {
+            OnloFlutterBridge.reportMissingPresentationHost()
+            throw BridgeFailure("native_operation_failed")
+        }
 
     private fun operation(result: MethodChannel.Result, block: suspend () -> Unit) {
         scope.launch {

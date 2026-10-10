@@ -189,6 +189,25 @@ void main() {
       ),
     );
   });
+  test('conversation failure is terminal after native recovery', () async {
+    const channel = MethodChannel('ai.onlo/onlo_flutter');
+    var attempts = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      attempts += 1;
+      throw PlatformException(code: 'native_operation_failed');
+    });
+    addTearDown(() => TestDefaultBinaryMessengerBinding
+        .instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, null));
+    OnloPlatform.instance = MethodChannelOnloPlatform(methodChannel: channel);
+    await expectLater(
+      Onlo.openConversation('synthetic-conversation'),
+      throwsA(isA<OnloNativeException>().having(
+          (error) => error.code, 'code', OnloErrorCode.nativeOperationFailed)),
+    );
+    expect(attempts, 1);
+  });
 }
 
 final class _FakeOnloPlatform extends OnloPlatform {

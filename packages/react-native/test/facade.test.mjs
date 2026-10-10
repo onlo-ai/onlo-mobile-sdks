@@ -238,3 +238,15 @@ test('reads retry metadata from React Native rejection userInfo', async () => {
     return true;
   });
 });
+
+test('conversation failure is terminal at the wrapper boundary after native recovery', async () => {
+  const native = createNativeModule();
+  let attempts = 0;
+  native.openConversation = async () => {
+    attempts += 1;
+    throw { code: 'native_operation_failed', message: 'unsafe native details', retry: { directive: 'never' } };
+  };
+  const { Onlo } = loadFacade(native);
+  await assert.rejects(Onlo.openConversation('synthetic-conversation'), { code: 'native_operation_failed' });
+  assert.equal(attempts, 1);
+});

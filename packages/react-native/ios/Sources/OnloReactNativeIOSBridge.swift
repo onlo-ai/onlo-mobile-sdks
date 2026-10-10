@@ -73,12 +73,13 @@ public final class OnloReactNativeIOSBridge: NSObject {
         }
     }
 
-    public func present(from host: UIViewController, conversationID: String?, presentationMode: String?, completion: @escaping Completion) {
+    public func present(from host: UIViewController?, conversationID: String?, presentationMode: String?, completion: @escaping Completion) {
         guard conversationID == nil || isNonBlank(conversationID!),
               let options = messengerOptions(presentationMode) else {
             completion(failure("invalid_argument")); return
         }
         operation(completion) {
+            guard let host else { throw OnloError.transport(code: "presentation_host_unavailable") }
             try await self.presentMessenger(from: host, conversationID: conversationID, options: options)
         }
     }
@@ -89,9 +90,10 @@ public final class OnloReactNativeIOSBridge: NSObject {
         completion(nil)
     }
 
-    public func openConversation(_ conversationID: String, from host: UIViewController, completion: @escaping Completion) {
+    public func openConversation(_ conversationID: String, from host: UIViewController?, completion: @escaping Completion) {
         guard isNonBlank(conversationID) else { completion(failure("invalid_argument")); return }
         operation(completion) {
+            guard let host else { throw OnloError.transport(code: "presentation_host_unavailable") }
             try await self.presentMessenger(from: host, conversationID: conversationID)
         }
     }
@@ -170,8 +172,12 @@ public final class OnloReactNativeIOSBridge: NSObject {
 
     private func operation(_ completion: @escaping Completion, _ body: @escaping @MainActor () async throws -> Void) {
         Task { @MainActor in
+            let startedAt = Date()
             do { try await body(); completion(nil) }
-            catch { completion(errorPayload(error)) }
+            catch {
+                await self.sdk.recordFrameworkFailure((error as? OnloError) ?? .transport(code: "native_operation_failed"), startedAt: startedAt)
+                completion(errorPayload(error))
+            }
         }
     }
 

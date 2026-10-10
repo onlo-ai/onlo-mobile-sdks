@@ -70,6 +70,118 @@ final class MessengerSecurityTests: XCTestCase {
         ])
     }
 
+    func testExpiredConversationBearerRefreshesOnceAndRetries() async throws {
+        let transport = ExpiredConversationBearerTransport()
+        let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host", lifecycleBindingEnabled: false)
+        _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        let intent = try await sdk.openConversation("conversation-history")
+        XCTAssertEqual(intent, .messenger(conversationId: "conversation-history"))
+        let counts = await transport.counts()
+        XCTAssertEqual(counts.session, 2)
+        XCTAssertEqual(counts.transcript, 2)
+        let authorizations = await transport.authorizations()
+        XCTAssertEqual(authorizations, ["Bearer token-1", "Bearer token-2"])
+    }
+
+    func testIdentifiedConversationRefreshPreservesProtectedOwner() async throws {
+        let scope = OwnerScope(kind: .identified)
+        let stored = StoredSessionCredential(installationId: "installation-1", generation: 1, proposedCredential: "synthetic-credential", identityClass: .identified, ownerScope: scope)
+        let credentials = InMemoryCredentialStore(stored)
+        let transport = ExpiredConversationBearerTransport(initialIdentity: "identified")
+        let sdk = OnloSDK(credentialStore: credentials, ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host", lifecycleBindingEnabled: false)
+        _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        let intent = try await sdk.openConversation("conversation-history")
+        XCTAssertEqual(intent, .messenger(conversationId: "conversation-history"))
+        let protected = try await credentials.loadState()
+        XCTAssertEqual(protected.credential?.ownerScope, scope)
+        XCTAssertEqual(protected.credential?.identityClass, .identified)
+        let counts = await transport.counts()
+        XCTAssertEqual(counts.session, 2)
+        XCTAssertEqual(counts.transcript, 2)
+    }
+
+    func testConversationBearerRetryIsBounded() async throws {
+        let transport = ExpiredConversationBearerTransport(statuses: [401, 401])
+        let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host", lifecycleBindingEnabled: false)
+        _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        do {
+            _ = try await sdk.openConversation("conversation-history")
+            XCTFail("A second rejection must remain terminal")
+        } catch { XCTAssertEqual(error as? OnloError, .transport(code: "widget_http_401")) }
+        let counts = await transport.counts()
+        XCTAssertEqual(counts.session, 2)
+        XCTAssertEqual(counts.transcript, 2)
+    }
+
+    func testConversationNon401DoesNotRefresh() async throws {
+        for status in [403, 404, 503] {
+            let transport = ExpiredConversationBearerTransport(statuses: [status])
+            let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host", lifecycleBindingEnabled: false)
+            _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+            do { _ = try await sdk.openConversation("conversation-history"); XCTFail("Rejected transcript cannot open") }
+            catch { XCTAssertEqual(error as? OnloError, .transport(code: "widget_http_\(status)")) }
+            let counts = await transport.counts()
+            XCTAssertEqual(counts.session, 1)
+            XCTAssertEqual(counts.transcript, 1)
+        }
+    }
+
+    func testConversationRefreshCannotCrossOwnerChange() async throws {
+        let transport = ExpiredConversationBearerTransport(changesIdentity: true)
+        let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host", lifecycleBindingEnabled: false)
+        _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        do { _ = try await sdk.openConversation("conversation-history"); XCTFail("Cannot open under another owner") }
+        catch { XCTAssertEqual(error as? OnloError, .transport(code: "widget_http_401")) }
+        let counts = await transport.counts()
+        XCTAssertEqual(counts.session, 2)
+        XCTAssertEqual(counts.transcript, 1)
+    }
+
+    func testFrameworkPresentationFailureIncludesSafeNativeMetadata() async {
+        let logger = InMemorySDKLogger()
+        let sdk = OnloSDK(logger: logger)
+        await sdk.recordFrameworkFailure(.correlatedTransport(code: "presentation_host_unavailable", requestId: "synthetic-request"), startedAt: Date())
+        let events = await logger.events()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.operation, "framework_bridge")
+        XCTAssertEqual(events.first?.code, "presentation_host_unavailable")
+        XCTAssertEqual(events.first?.requestId, "synthetic-request")
+        XCTAssertNotEqual(events.first?.sdkVersion, "unknown")
+        XCTAssertGreaterThanOrEqual(events.first?.durationMs ?? -1, 0)
+    }
+
+    func testConversationNetworkFailureIsTerminalAndLoggedSafely() async throws {
+        let transport = ExpiredConversationBearerTransport(networkFailure: true)
+        let logger = InMemorySDKLogger()
+        let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), ownerStore: InMemoryOwnerScopedStore(), transport: transport, logger: logger, hostAppIdentifier: "com.example.host", lifecycleBindingEnabled: false)
+        _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        do { _ = try await sdk.openConversation("conversation-history"); XCTFail("Offline transcript cannot open") }
+        catch { XCTAssertEqual(error as? OnloError, .transport(code: "network_unavailable")) }
+        let counts = await transport.counts()
+        XCTAssertEqual(counts.session, 1)
+        XCTAssertEqual(counts.transcript, 1)
+        let events = await logger.events().filter { $0.operation == "present" }
+        XCTAssertEqual(events.map(\.code), ["network_unavailable"])
+        XCTAssertFalse(String(describing: events).contains("conversation-history"))
+        XCTAssertFalse(String(describing: events).contains("token-1"))
+    }
+
+    func testDelayedConversation401CannotResumeAfterLogout() async throws {
+        let transport = ExpiredConversationBearerTransport(pauseTranscript: true)
+        let sdk = OnloSDK(credentialStore: InMemoryCredentialStore(), ownerStore: InMemoryOwnerScopedStore(), transport: transport, hostAppIdentifier: "com.example.host", lifecycleBindingEnabled: false)
+        _ = try await sdk.initialize(OnloSDK.Configuration(sdkKey: "public-key", appIdentifier: "com.example.host", apiBaseURL: URL(string: "https://sdk.example.test")!))
+        let opening = Task { try await sdk.openConversation("conversation-history") }
+        await transport.waitForTranscript()
+        _ = try await sdk.logout()
+        let afterLogout = await transport.counts()
+        await transport.releaseTranscript()
+        do { _ = try await opening.value; XCTFail("Old-owner rejection cannot recover after logout") }
+        catch { XCTAssertEqual(error as? OnloError, .transport(code: "widget_http_401")) }
+        let counts = await transport.counts()
+        XCTAssertEqual(counts.session, afterLogout.session)
+        XCTAssertEqual(counts.transcript, 1)
+    }
+
     func testAuthorisedHistoricalInboxAcceptsPriorSessionMetadata() async throws {
         let sdk = OnloSDK(
             credentialStore: InMemoryCredentialStore(),
@@ -495,6 +607,56 @@ private actor PersistentInboxTransport: OnloHTTPTransport {
             return OnloHTTPResponse(statusCode: 503, body: Data("{}".utf8))
         }
     }
+}
+
+private actor ExpiredConversationBearerTransport: OnloHTTPTransport {
+    private let statuses: [Int]
+    private let changesIdentity: Bool
+    private let initialIdentity: String
+    private let networkFailure: Bool
+    private let pauseTranscript: Bool
+    private var transcriptWaiter: CheckedContinuation<Void, Never>?
+    private var transcriptRelease: CheckedContinuation<Void, Never>?
+    init(statuses: [Int] = [401], changesIdentity: Bool = false, initialIdentity: String = "anonymous", networkFailure: Bool = false, pauseTranscript: Bool = false) {
+        self.statuses = statuses
+        self.changesIdentity = changesIdentity
+        self.initialIdentity = initialIdentity
+        self.networkFailure = networkFailure
+        self.pauseTranscript = pauseTranscript
+    }
+    private var sessionCount = 0
+    private var transcriptCount = 0
+    private var bearerHeaders: [String] = []
+    func execute(_ request: URLRequest) async throws -> OnloHTTPResponse {
+        if request.url?.path == "/api/sdk/v1/session" {
+            sessionCount += 1
+            return messengerSessionResponse(request, json: """
+            {"requestId":"synthetic","serverTime":"2026-07-21T10:00:00.000Z","protocolVersion":1,"minimumProtocolVersion":1,"ok":true,"result":{"sessionId":"session-\(sessionCount)","chatToken":"token-\(sessionCount)","installationId":"installation-1","generation":\(sessionCount),"proposedCredential":"credential-\(sessionCount)","identityClass":"\(changesIdentity && sessionCount > 1 ? "identified" : initialIdentity)","publicationState":"testing","attestationState":"not_required","configRevision":"revision-1","configSchemaVersion":1,"configEtag":"etag-1"}}
+            """)
+        }
+        if request.url?.path == "/api/widget/conversations/conversation-history" {
+            transcriptCount += 1
+            bearerHeaders.append(request.value(forHTTPHeaderField: "Authorization") ?? "")
+            if pauseTranscript && transcriptCount == 1 {
+                transcriptWaiter?.resume()
+                transcriptWaiter = nil
+                await withCheckedContinuation { transcriptRelease = $0 }
+            }
+            if networkFailure { throw URLError(.notConnectedToInternet) }
+            if transcriptCount <= statuses.count { return OnloHTTPResponse(statusCode: statuses[transcriptCount - 1], body: Data("{}".utf8)) }
+            return OnloHTTPResponse(statusCode: 200, body: Data("""
+            {"conversation":{"id":"conversation-history","sessionId":"historical-session","status":"open","isHumanTakeover":false},"messages":[],"sync":{"previousCursor":null,"nextCursor":null,"limit":100}}
+            """.utf8))
+        }
+        return OnloHTTPResponse(statusCode: 503, body: Data("{}".utf8))
+    }
+    func waitForTranscript() async {
+        if transcriptCount > 0 { return }
+        await withCheckedContinuation { transcriptWaiter = $0 }
+    }
+    func releaseTranscript() { transcriptRelease?.resume(); transcriptRelease = nil }
+    func counts() -> (session: Int, transcript: Int) { (sessionCount, transcriptCount) }
+    func authorizations() -> [String] { bearerHeaders }
 }
 
 private actor ExpiredInboxBearerTransport: OnloHTTPTransport {

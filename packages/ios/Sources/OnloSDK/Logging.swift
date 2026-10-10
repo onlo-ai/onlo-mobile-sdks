@@ -102,9 +102,9 @@ public final class OnloConsoleLogger: SDKLogging, @unchecked Sendable {
 
     private func requiredLevel(for event: SDKLogEvent) -> OnloLogLevel {
         switch event.code {
-        case "ok", "accepted", "complete":
+        case "ok", "accepted", "complete", "bearer_refreshed":
             return .info
-        case "first_token", "not_modified", "offline_cache":
+        case "first_token", "not_modified", "offline_cache", "resume_joined":
             return .verbose
         default:
             return .error
